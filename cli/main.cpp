@@ -9,16 +9,23 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include <dr_libs/dr_flac.h>
 #include <dr_libs/dr_wav.h>
 
+#include "daphne/dsp/filter_design.h"
+#include "daphne/dsp/modulator.h"
+#include "daphne/dsp/progress.h"
 #include "daphne/engine/decoder.h"
 #include "daphne/engine/dsd_file.h"
+#include "daphne/engine/filters.h"
+#include "daphne/engine/settings.h"
 #include "daphne/engine/text.h"
 
 namespace {
@@ -223,6 +230,156 @@ int cmd_render(const std::wstring& in_path, const std::wstring& out_path, int64_
     return 0;
 }
 
+// Hidden test hook: daphne filter-dump <fs_in> <fs_out> <out.f64> [<lo.f64>] [--taps N] [--phase P] [--apodize]
+// Writes the resampling filter as raw float64 (and the double-double low parts with lo.f64).
+int cmd_filter_dump(std::vector<std::wstring> args) {
+    int taps = 4096;
+    double phase = 0.0;
+    bool apodize = false;
+    for (size_t i = 0; i < args.size();) {
+        if (args[i] == L"--apodize") {
+            apodize = true;
+            args.erase(args.begin() + static_cast<std::ptrdiff_t>(i));
+        } else if ((args[i] == L"--taps" || args[i] == L"--phase") && i + 1 < args.size()) {
+            if (args[i] == L"--taps") taps = std::stoi(args[i + 1]);
+            else phase = std::stod(args[i + 1]);
+            args.erase(args.begin() + static_cast<std::ptrdiff_t>(i), args.begin() + static_cast<std::ptrdiff_t>(i) + 2);
+        } else {
+            ++i;
+        }
+    }
+    if (args.size() < 3) {
+        usage();
+        return 1;
+    }
+    const int fs_in = std::stoi(args[0]), fs_out = std::stoi(args[1]);
+    const int ratio = std::max(1, fs_out / fs_in);
+    std::vector<double> lo;
+    const bool want_lo = args.size() >= 4;
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto h = daphne::dsp::design_lowpass(taps, ratio, fs_in, fs_out, phase, apodize, want_lo ? &lo : nullptr);
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::ofstream o(args[2], std::ios::binary);
+    o.write(reinterpret_cast<const char*>(h.data()), static_cast<std::streamsize>(h.size() * sizeof(double)));
+    if (want_lo) {
+        std::ofstream ol(args[3], std::ios::binary);
+        ol.write(reinterpret_cast<const char*>(lo.data()), static_cast<std::streamsize>(lo.size() * sizeof(double)));
+    }
+    std::cout << "taps " << h.size() << ", designed in " << secs << " s\n";
+    return 0;
+}
+
+// Hidden test hook: daphne modulator-test <fs> <osr> <order> <channels> <in.f64> <out.bin> [chunk] [--single]
+// Runs the DSD modulator over raw interleaved float64 and writes the DSD bytes; prints the time and
+// the protection counters. --single: both channels on the calling thread.
+int cmd_modulator_test(std::vector<std::wstring> a) {
+    bool single = false;
+    a.erase(std::remove_if(a.begin(), a.end(), [&](const std::wstring& x) { return x == L"--single" ? (single = true) : false; }), a.end());
+    if (a.size() < 6) return 1;
+    const int fs = std::stoi(a[0]), osr = std::stoi(a[1]), order = std::stoi(a[2]), ch = std::stoi(a[3]);
+    const int chunk = a.size() > 6 ? std::stoi(a[6]) : 1 << 30;
+    std::ifstream in(a[4], std::ios::binary);
+    std::vector<char> raw((std::istreambuf_iterator<char>(in)), {});
+    std::vector<double> x(raw.size() / 8);
+    std::memcpy(x.data(), raw.data(), x.size() * 8);
+    const int frames = static_cast<int>(x.size() / ch);
+    daphne::dsp::DsdModulator m(fs, osr, order);
+    m.set_threaded(!single);
+    std::vector<uint8_t> out;
+    out.reserve(static_cast<size_t>(static_cast<double>(frames) * m.dsd_rate() / fs / 8 * ch) + 64);
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < frames; i += chunk) {
+        const int n = std::min(chunk, frames - i);
+        m.process(x.data() + static_cast<size_t>(i) * ch, n, ch, out);
+    }
+    const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::ofstream o(a[5], std::ios::binary);
+    o.write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(out.size()));
+    std::cout << "order " << m.order() << " dsd " << m.dsd_rate() << " bytes " << out.size() << " seconds " << sec << " ("
+              << (frames / double(fs)) / sec << "x realtime) clamped " << m.clamped_bits() << " resets " << m.loop_resets()
+              << " input clips " << m.input_clips() << "\n";
+    return 0;
+}
+
+// --settings <file>: loads the settings, prints the diagnostics; removes the option from args.
+bool load_settings_arg(std::vector<std::wstring>& args, daphne::Settings& s) {
+    std::vector<std::wstring> rest;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == L"--settings" && i + 1 < args.size()) {
+            std::ifstream f(args[++i], std::ios::binary);
+            if (!f) {
+                std::cerr << "cannot read " << daphne::to_utf8(args[i]) << "\n";
+                return false;
+            }
+            std::stringstream ss;
+            ss << f.rdbuf();
+            auto res = daphne::settings_from_string(ss.str());
+            for (const auto& d : res.diagnostics)
+                std::cerr << (d.level == daphne::Diagnostic::Level::Error ? "settings error   " : "settings warning ")
+                          << (d.path.empty() ? "(root)" : d.path) << ": " << d.message << "\n";
+            if (!res.ok()) return false;
+            s = res.settings;
+        } else {
+            rest.push_back(args[i]);
+        }
+    }
+    args = rest;
+    return true;
+}
+
+int cmd_settings(const std::vector<std::wstring>& a) {
+    if (!a.empty() && a[0] == L"default") {
+        const auto text = daphne::settings_to_json(daphne::Settings{}).dump(2) + "\n";
+        if (a.size() >= 2) {
+            std::ofstream o(a[1], std::ios::binary);
+            o << text;
+        } else {
+            std::cout << text;
+        }
+        return 0;
+    }
+    if (a.size() >= 2 && a[0] == L"check") {
+        std::vector<std::wstring> args = {L"--settings", a[1]};
+        daphne::Settings s;
+        if (!load_settings_arg(args, s)) return 1;
+        std::cout << "ok\n";
+        return 0;
+    }
+    usage();
+    return 1;
+}
+
+// Hidden test hook: daphne resampler-run <fs_in> <fs_out> <in.f64> <out.f64> [--settings file]
+// Runs the resampler the player would build from the settings' filter (no other stage) over raw
+// interleaved stereo float64, and prints the time it took.
+int cmd_resampler_run(std::vector<std::wstring> args) {
+    daphne::Settings s;
+    if (!load_settings_arg(args, s) || args.size() < 4) return 1;
+    const int fs_in = std::stoi(args[0]), fs_out = std::stoi(args[1]);
+    std::ifstream fi(args[2], std::ios::binary | std::ios::ate);
+    const auto bytes = static_cast<size_t>(fi.tellg());
+    std::vector<double> x(bytes / sizeof(double), 0.0);
+    fi.seekg(0);
+    fi.read(reinterpret_cast<char*>(x.data()), static_cast<std::streamsize>(x.size() * sizeof(double)));
+    const int frames = static_cast<int>(x.size() / 2);
+    daphne::dsp::set_design_threads(s.design.threads);   // also the double-double phases' threads
+    auto r = daphne::make_resampler(s.filter, fs_in, fs_out);
+    r->prepare({fs_in, 2, 4096});
+    std::vector<double> y(static_cast<size_t>(r->max_output_frames(frames) + r->max_output_frames(4096)) * 2);
+    int done = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < frames; i += 4096) {
+        const int n = std::min(4096, frames - i);
+        done += r->process(x.data() + static_cast<size_t>(i) * 2, n, y.data() + static_cast<size_t>(done) * 2);
+    }
+    done += r->flush(y.data() + static_cast<size_t>(done) * 2);
+    const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::ofstream o(args[3], std::ios::binary);
+    o.write(reinterpret_cast<const char*>(y.data()), static_cast<std::streamsize>(static_cast<size_t>(done) * 2 * sizeof(double)));
+    std::cout << "frames " << done << " double_double " << r->double_double() << " seconds " << sec << "\n";
+    return 0;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -239,6 +396,10 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     }
     if (a[0] == L"decode-test") return cmd_decode_test(rest);
+    if (a[0] == L"filter-dump") return cmd_filter_dump(rest);
+    if (a[0] == L"resampler-run") return cmd_resampler_run(rest);
+    if (a[0] == L"modulator-test") return cmd_modulator_test(rest);
+    if (a[0] == L"settings") return cmd_settings(rest);
     if (a[0] == L"render") {
         std::vector<std::wstring> r = rest;
         int64_t start = 0;

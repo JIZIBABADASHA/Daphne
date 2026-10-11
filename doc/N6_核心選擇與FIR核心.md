@@ -1,0 +1,110 @@
+# N6 核心選擇與 FIR 核心
+
+## 核心
+
+| `core` | 路徑 |
+|---|---|
+| `pcm`（預設） | 解碼 → 處理鏈（原取樣率）→ 重取樣器升到 `pcm_output_rate(fs, output.rate)` → 量化 → 裝置 |
+| `dsd` | 解碼 → 處理鏈（原取樣率）→ 同一個濾波器升到 705.6 / 768 kHz（`modulator_input_rate`）→ 限幅 → 調變器（DSD 時脈 44100 × osr）→ DoP / 原生 DSD |
+
+- 只有一種 PCM 核心：原取樣率輸出（`rate: "native"`）時，濾波器是單位脈衝，重取樣器直接複製樣本，結果逐位元等同沒有處理。
+  - 開 apodize 時同一個重取樣器改用 apodize 濾波器，不需要換核心，也不用重開裝置。
+- 處理鏈（音量、交叉饋送、EQ）一律在原取樣率執行，兩種核心的 EQ 與音量行為相同；之後才升頻。
+- DSD 檔案：裝置接受 DSD 時直送（N20），否則轉成 PCM（N3）走 PCM 路徑。
+- 整條鏈的組裝在 N4 整合時完成並驗證；本節是其中的 FIR 核心。
+
+### 輸出取樣率（`pcm_output_rate`）
+
+| `output.rate` | 規則 |
+|---|---|
+| `native` | 來源取樣率 |
+| `auto` | 上限 705.6 kHz（44.1k 家族）或 768 kHz（其他），倍率為 ≤ 32 且不超過上限的最大 2 的冪 |
+| `2x` | 每一軌各自的兩倍（無縫播放跨取樣率時，下一軌照自己的取樣率判斷） |
+| `"<Hz>"` | 以該值為上限，同 `auto` 的倍率規則；放不下兩倍時用來源取樣率 |
+
+## 重取樣器（`dsp/resampler.h`、`dsp/src/resampler.cpp`）
+
+整數倍率多相重取樣：
+
+- L = taps × ratio 的濾波器拆成 ratio 個相位、每相位 taps 個係數。
+- 每個相位在輸入取樣率上做均勻分割 overlap-save FFT 卷積（區塊 B，FFT 長度 2B），再把各相位的輸出交錯。
+- 兩個聲道共用一個複數 FFT（左 = 實部、右 = 虛部）。
+
+| 性質 | 說明 |
+|---|---|
+| 時間對齊 | 輸出樣本 j 對應輸入時間 j / ratio；不插入區塊延遲（輸出一次一個區塊） |
+| 正規化 | 每個相位各自正規化到 DC 增益 1（Neumaier 補償加總），常數輸入在每個相位都輸出同一個常數 |
+| 結尾 | `flush()` 輸出緩衝中的輸入：N 個輸入 frame 恰好得到 N × ratio 個輸出 |
+| 旁路 | ratio 1 的單位脈衝直接複製（FFT 來回會改動最後一個 bit） |
+| 不截斷 | 輸出不做 ±1 限制，樣本間峰值完整地交給音量與最終量化 |
+| 區塊大小 | 依 L：< 4096 → 256，≥ 4096 → 512，≥ 16384 → 1024，≥ 65536 → 2048，≥ 262144 → 4096 |
+
+### 雙倍精度卷積（`filter.double_double`）
+
+- 濾波器的 lo 部分一併使用；正規化、核頻譜、FFT、乘加全部以 double-double 計算（AVX2 + FMA3），每個輸出最後才捨入成 double 一次。
+- 一個區塊的各相位互相獨立（各自的累加器、各自的輸出位置），交給常駐執行緒池（`WorkerPool`，最多每相位一條，不超過設計執行緒數）平行處理；結果與執行緒數無關。
+- 播放中不建立執行緒：執行緒池在 `prepare()` 建好，每個區塊只喚醒。
+
+### 效能
+
+20 秒立體聲，44.1 → 352.8 kHz（16 核心機器，單一播放執行緒）：
+
+| 設定 | 時間 | 即時倍數 |
+|---|---|---|
+| 4096 taps，double | 0.24 s | 83× |
+| 65536 taps，double | 0.44 s | 46× |
+| 4096 taps，double-double | 0.34 s | 58× |
+| 16384 taps，double-double | 0.37 s | 53× |
+
+已經遠快於即時，所以 double 路徑維持單執行緒，不另外增加播放執行緒。
+
+## 濾波器與快取（`core/include/daphne/engine/filters.h`、`core/src/filters.cpp`）
+
+- `design_filter(s, fs_in, fs_out, lo)`：ratio = fs_out / fs_in（至少 1），呼叫 `design_lowpass`（N7）。
+- `make_resampler(s, fs_in, fs_out)`：設計（或讀快取）並建立重取樣器；`double_double` 時一併取 lo。
+
+磁碟快取：
+
+| 項目 | 規則 |
+|---|---|
+| 位置 | `%LOCALAPPDATA%\daphne\filters`；`DAPHNE_FILTER_CACHE=<dir>` 改位置、`=off` 停用 |
+| 鍵值 | `v<設計版本>\|taps\|in\|out\|phase\|apod`（phase 以 17 位有效數字寫入，不同值不會共用檔案） |
+| 檔名 | 鍵值的 FNV-1a 64-bit 雜湊；檔內再存完整鍵值，雜湊碰撞或舊版本都會被忽略 |
+| 不快取 | ratio 1 且不 apodize（單位脈衝） |
+| lo 部分 | 只在需要（double-double）時存成 `<key>_lo`，不讓檔案大小加倍 |
+| 寫入 | 先寫暫存檔再改名，讀者只會看到舊檔或完整的新檔 |
+| 容量 | `design.cache_limit_mb`：每次讀寫都更新檔案時間；超過上限時刪除最久未用的檔案，但保留目前設定會用到的濾波器（PCM 濾波器與調變器前置濾波器，來源取樣率 44.1k–384k） |
+
+## 設定（`core/include/daphne/engine/settings.h`、`core/src/settings.cpp`）
+
+完整的 JSON 結構寫在 `settings.h` 開頭。
+
+- 缺少的欄位保留預設值；未知欄位是警告並被忽略；超出範圍或型別錯誤是錯誤，該欄位保留預設值。
+- CLI：`daphne settings default [file]`、`daphne settings check <file>`；各指令都接受 `--settings <file>`。
+
+## 驗證
+
+### 與重構前的實作比較（`resampler-run`）
+
+3 秒隨機立體聲（含一段 0.99 的方波），比較條件：
+
+- taps 1024 / 4096
+- 44.1→44.1 / 88.2 / 352.8 kHz、96→192 kHz
+- 線性、中間相位、最小相位 + apodize
+- double / double-double
+
+共 48 組：**全部逐位元相同**。輸出峰值 1.29，確認樣本間峰值沒有被截斷。
+
+### 單元測試（`tests/test_resampler.cpp`）
+
+| 測試 | 結果 |
+|---|---|
+| ratio 1 單位脈衝：5000 frames、每次 777 frames，輸出與輸入逐位元相同 | 通過 |
+| 1024 taps ×4：N 進 N×4 出；1 kHz 正弦與理想延遲 (L−1)/2 的升頻正弦相比誤差 < −130 dB；峰值位置 L/2 − 1 | 通過 |
+| 左右輸入相同時，兩聲道差 < 1e-14（共用 FFT 的實部 / 虛部，捨入不同） | 通過 |
+| DC 0.25 → 每個輸出 0.25（誤差 < 1e-15） | 通過 |
+| 樣本 ±0.85、波形峰值 1.2 的訊號：輸出峰值 > 1.0（沒有截斷） | 通過 |
+| double-double 1 執行緒與 8 執行緒逐位元相同；與 double 路徑差 0 < d < 1e-13 | 通過 |
+| `pcm_output_rate`：native / auto / 2x / Hz 上限的 11 個案例；`modulator_input_rate`、`dsd_clock` | 通過 |
+| 設定：預設值來回轉換相同；完整範例讀入正確且未知欄位只是警告；3 個錯誤欄位回報 3 個錯誤並保留預設值；JSON 語法錯誤 | 通過 |
+| 快取：寫入後讀出相同（含 lo）；第二次設計來自快取；ratio 1 不快取；不同 phase 不同鍵值；容量清到 0 時只保留指定的濾波器 | 通過 |

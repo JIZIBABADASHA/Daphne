@@ -1,0 +1,162 @@
+#pragma once
+// Settings: one JSON document owned by the host (the CLI or an application). Missing fields keep
+// their defaults; unknown fields are reported as warnings and ignored.
+//
+// {
+//   "version": 1,
+//   "output":  { "api": "wasapi_exclusive" | "wasapi_shared" | "asio", "device": "", "bits": 16 | 24 | 32,
+//                "rate": "native" | "auto" | "2x" | "<Hz>", "dsd": "auto" | "native" | "dop" | "pcm",
+//                "dsd_pcm_lowpass": 24 | 30 | 50, "dsd_pcm_limiter": true, "max_dsd": 0 | 64 | ... | 512,
+//                "dsd_lead_in_ms": 0 .. 2000 },
+//   "core":    "pcm" | "dsd",
+//   "filter":  { "taps": 16 .. 1048576, "phase": "linear" | "intermediate" | "minimum" | "custom",
+//                "phase_custom": 0 .. 1, "apodize": false, "double_double": false },
+//   "eq":      { "enabled": false, "preamp_db": "auto" | -60 .. 24,
+//                "bands": [ { "type": "PK" | "LS" | "HS" | "HP" | "HP24" | "LP" | "LP24" | "NOTCH" | "AP" | "BP",
+//                             "f": Hz, "q": 0.01 .. 100, "gain_db": -30 .. 30, "on": true } ] },
+//   "crossfeed": { "enabled": false, "fc": 100 .. 3000, "amount": 0 .. 1 },
+//   "volume":  { "mode": "digital" | "hardware" | "fixed", "db": -120 .. 0 },
+//   "headroom_db": -24 .. 24,
+//   "dsd_modulator": { "order": 5 | 8 | 9, "osr": 64 | 128 | 256 | 512 | 1024 },
+//   "design":  { "threads": 0 .. 256, "cache_limit_mb": 0 .. }
+// }
+
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+namespace daphne {
+
+enum class OutputApi { WasapiExclusive, WasapiShared, Asio };
+// pcm: decoded PCM through the filter / resampler to the device; dsd: PCM converted to DSD by the
+// modulator (DSD files are sent directly in both modes when the device takes DSD).
+enum class CoreMode { Pcm, Dsd };
+// DSD output: auto (ASIO native DSD, else DoP), native, dop, pcm (DSD always converted to PCM).
+enum class DsdMode { Auto, Native, Dop, Pcm };
+// Filter phase: partial minimum phase 0 / 0.5 / 1, or phase_custom.
+enum class FilterPhase { Linear, Intermediate, Minimum, Custom };
+// EQ band types. HP / LP are 12 dB/oct, HP24 / LP24 two Butterworth sections; BP has a 0 dB peak.
+enum class EqType { PK, LS, HS, HP, HP24, LP, LP24, NOTCH, AP, BP };
+enum class VolumeMode { Digital, Hardware, Fixed };
+
+struct OutputSettings {
+    OutputApi api = OutputApi::WasapiExclusive;
+    std::string device;          // empty = system default
+    int bits = 24;               // 16 | 24 | 32
+    // PCM output rate: "native" (the source rate), "auto" (cap 705600 for 44.1 kHz-family sources,
+    // else 768000), "2x" (twice the source rate, for every track) or "<Hz>" (cap); with a cap the
+    // ratio is the largest power of two <= 32 with ratio * fs_in <= cap.
+    std::string rate = "native";
+    DsdMode dsd = DsdMode::Auto;
+    // DSD files converted to PCM: low-pass pass-band edge in kHz, 24 (stop band from 30 kHz) |
+    // 30 (stop 60) | 50 (stop 80).
+    int dsd_pcm_lowpass = 24;
+    // DSD files converted to PCM: look-ahead limiter at the end of the chain, so peaks above the
+    // SACD reference level (0 dBFS after the +6 dB conversion) are turned down instead of clipped.
+    bool dsd_pcm_limiter = true;
+    // Highest DSD multiple the DAC takes (64 | 128 | 256 | 512), 0 = no limit. Some drivers accept
+    // DSD rates their DAC cannot play: DSD files above it are converted to PCM, the modulator's
+    // osr is capped.
+    int max_dsd = 0;
+    // DSD silence before the music whenever a DSD stream starts on a device, in ms: a DAC switching
+    // from PCM to DSD mutes while it locks, which would cut the start of the track.
+    int dsd_lead_in_ms = 100;
+};
+
+// The resampling filter (filter_design.h). Taps are per input sample; the filter has taps * ratio
+// coefficients.
+struct FilterSettings {
+    int taps = 2048;
+    FilterPhase phase = FilterPhase::Intermediate;
+    double phase_custom = 0.5;   // for phase = custom
+    double phase_alpha() const {
+        switch (phase) {
+            case FilterPhase::Linear: return 0.0;
+            case FilterPhase::Minimum: return 1.0;
+            case FilterPhase::Custom: return phase_custom;
+            default: return 0.5;
+        }
+    }
+    bool apodize = false;
+    bool double_double = false;  // convolve in double-double with the coefficients' low parts
+};
+
+struct EqBand {
+    EqType type = EqType::PK;
+    double f = 1000.0;
+    double q = 0.7071;           // Q; the slope S for LS / HS
+    double gain_db = 0.0;
+    bool on = true;
+};
+
+struct EqSettings {
+    bool enabled = false;
+    // nullopt = "auto" (the preamp that keeps the EQ's largest boost from clipping); a value can only
+    // lower it: min(value, auto)
+    std::optional<double> preamp_db;
+    std::vector<EqBand> bands;
+};
+
+struct CrossfeedSettings {
+    bool enabled = false;
+    double fc = 700.0;           // Hz, 100 .. 3000
+    double amount = 0.22;        // 0 .. 1
+};
+
+struct VolumeSettings {
+    VolumeMode mode = VolumeMode::Fixed;
+    double db = 0.0;
+};
+
+struct ModulatorSettings {
+    int order = 8;               // 5 | 8 | 9
+    int osr = 128;               // DSD64 .. DSD1024
+};
+
+// Filter design runs on several cores, below normal priority while music plays.
+struct DesignSettings {
+    int threads = 0;             // 0 = automatic (all cores but two)
+    int cache_limit_mb = 1024;   // filter cache size limit (filter_cache.h); 0 = no limit
+};
+
+struct Settings {
+    int version = 1;
+    OutputSettings output;
+    CoreMode core = CoreMode::Pcm;
+    FilterSettings filter;
+    EqSettings eq;
+    CrossfeedSettings crossfeed;
+    VolumeSettings volume;
+    double headroom_db = 0.0;    // per-track gain (ReplayGain) before the processing chain
+    ModulatorSettings modulator;
+    DesignSettings design;
+};
+
+struct Diagnostic {
+    enum class Level { Warning, Error } level;
+    std::string path;    // e.g. "eq.bands[2].q"
+    std::string message;
+};
+
+struct LoadResult {
+    Settings settings;               // defaults filled in; invalid fields keep their default
+    std::vector<Diagnostic> diagnostics;
+    bool ok() const;                 // no errors (warnings allowed)
+};
+
+constexpr int kSettingsVersion = 1;
+
+LoadResult settings_from_json(const nlohmann::json& j);
+LoadResult settings_from_string(const std::string& text);
+nlohmann::json settings_to_json(const Settings& s);
+
+// PCM output rate for a source rate; the source rate when no ratio fits.
+int pcm_output_rate(int fs_in, const std::string& rate);
+// The modulator's input rate: the source upsampled to 705.6 / 768 kHz by the filter first.
+int modulator_input_rate(int fs_in);
+// DSD clock of the modulator: 44100 * osr (the DSD standard family, whatever the source).
+inline int dsd_clock(int osr) { return 44100 * osr; }
+
+}  // namespace daphne

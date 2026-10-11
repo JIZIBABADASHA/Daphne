@@ -7,6 +7,14 @@ endif()
 add_executable(daphne_tests
     test_decoders.cpp
     test_dsd_file.cpp
+    test_dsd_output.cpp
+    test_downmix.cpp
+    test_eq.cpp
+    test_filter_design.cpp
+    test_gain.cpp
+    test_modulator.cpp
+    test_output_format.cpp
+    test_resampler.cpp
 )
 target_link_libraries(daphne_tests PRIVATE daphne_engine catch2_main)
 add_test(NAME daphne_tests COMMAND daphne_tests)

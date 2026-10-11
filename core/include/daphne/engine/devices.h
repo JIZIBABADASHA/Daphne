@@ -1,0 +1,38 @@
+#pragma once
+// Output device enumeration (Phase 0: listing only).
+
+#include <string>
+#include <vector>
+
+namespace daphne {
+
+struct ExclusiveFormat {
+    int rate;
+    int bits;       // container bits
+    int valid_bits;
+};
+
+struct WasapiDevice {
+    std::string id;             // endpoint ID (UTF-8)
+    std::string name;           // friendly name (UTF-8)
+    bool is_default = false;
+    int mix_rate = 0;           // shared-mode mix format
+    int mix_channels = 0;
+    int mix_bits = 0;
+    std::vector<ExclusiveFormat> exclusive;  // filled only when probed
+};
+
+struct AsioDriver {
+    std::string name;           // registry key name
+    std::string description;
+    std::string clsid;
+};
+
+// Active render endpoints. probe_exclusive: test common PCM formats in exclusive mode
+// (stereo; 44.1k–768k × 16/24/32-bit) with IAudioClient::IsFormatSupported.
+std::vector<WasapiDevice> list_wasapi_devices(bool probe_exclusive, std::string* error = nullptr);
+
+// Installed ASIO drivers from HKLM\SOFTWARE\ASIO (no SDK needed for listing).
+std::vector<AsioDriver> list_asio_drivers(std::string* error = nullptr);
+
+}  // namespace daphne
