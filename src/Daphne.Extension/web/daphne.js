@@ -223,40 +223,18 @@
   const mark = () => h('span', { class: 'dp-mark' }, h('span', { class: 'dp-petal-svg', html: PETAL }), 'DAPHNE');
 
   /**
-   * Daphne's signal path card (SignalInfo.Custom from DaphneEngine.BuildPath): sections 來源 / DSP / 輸出, a row per
-   * stage. A row shows one line; when it has details, or its line does not fit, it folds and opens on a click.
+   * Daphne's signal path card (SignalInfo.Custom from DaphneEngine.BuildPath): drawn with the host's shared layout
+   * (sections 來源 / DSP / 輸出, one-line stages that fold open), Daphne's mark on 解碼 and after the DSP title. A host
+   * without the shared layout gets the stages as plain lines.
    */
-  function drawPath(box, sg, { stage }) {
+  function drawPath(box, sg, ctx) {
     const p = sg.custom || {};
+    if (ctx.drawPath) return ctx.drawPath(p, { mark });
     for (const sect of p.sections || []) {
-      // the DSP section is Daphne's own processing: its mark after the title
-      box.append(h('div', { class: 'sig-sect' }, sect.title, sect.title === 'DSP' ? mark() : null));
-      for (const r of sect.rows || []) {
-        const line = h('span', { class: 'dp-line' }, r.v);
-        const more = (r.more || []).length ? h('div', { class: 'dp-more' }, ...r.more.map(x => h('div', null, x))) : null;
-        // 解碼 under the summary all the time, with Daphne's mark (the petal and DAPHNE, as in 關於)
-        const dec = r.decoder === 'daphne'
-          ? h('div', { class: 'dp-dec' }, h('span', null, '解碼'), mark())
-          : null;
-        const el = stage(r.k, [line, dec, more].filter(Boolean), r.mod);
-        el.classList.add('dp-stage');
-        const fold = () => {
-          if (!more && line.scrollWidth <= line.clientWidth + 1) return;
-          el.classList.add('dp-fold');
-          // opening a row is not a click on the card (on an upsampled track a click on the card turns it over)
-          el.onclick = e => { e.stopPropagation(); el.classList.toggle('dp-open'); };
-        };
-        if (more) fold(); else requestAnimationFrame(fold);   // a long line folds once it is laid out
-        box.append(el);
-      }
+      box.append(h('div', { class: 'sig-sect' }, sect.title));
+      for (const r of sect.rows || []) box.append(ctx.stage(r.k, r.v, r.mod));
     }
     for (const n of p.notes || []) box.append(h('div', { class: 'note' }, n));
-    // the mark in a heading takes the rows' text colour (as in 解碼), not the heading's: read it once the card is shown
-    requestAnimationFrame(() => {
-      const line = box.querySelector('.dp-line');
-      const c = line && line.isConnected ? getComputedStyle(line).color : '';
-      if (c) box.querySelectorAll('.sig-sect .dp-mark').forEach(m => { m.style.color = `color-mix(in srgb, ${c} 85%, transparent)`; });
-    });
   }
 
   /** Progress popup while the core designs a filter (first load of a filter, or a rebuild in the background). */

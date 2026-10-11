@@ -8,17 +8,19 @@ using Miku;
 namespace DaphneMiku;
 
 /// <summary>
-/// Daphne's own signal path card (SignalInfo.Custom, drawn by web/daphne.js): sections 來源 / DSP / 輸出, each row a
-/// one-line summary with its details under it (the page folds a row that has details, or does not fit on one line).
+/// Daphne's own signal path card (SignalInfo.Custom, drawn by web/daphne.js with the host's shared layout): sections
+/// 來源 / DSP / 輸出, each row a one-line summary with its details under it (folded when it has details or does not fit).
 /// The DSP rows follow the core's processing chain (report "chain"), in its order.
 /// </summary>
 public sealed partial class DaphneEngine
 {
     /// <summary>
-    /// One row: label, the one-line summary, whether it changes the samples (the pink dot), the details (folded), and
-    /// decoder: shown under the summary all the time ("daphne": 解碼 with Daphne's mark).
+    /// One row (the host's shared signal path layout, SignalPath): label, the one-line summary, whether it changes the
+    /// samples (the pink dot), the details (folded), and pin: lines under the summary shown all the time.
     /// </summary>
-    sealed record PathRow(string k, string v, bool mod, string[] more, string decoder = null);
+    sealed record PathRow(string k, string v, bool mod, string[] more, PathPin[] pin = null);
+    /// <summary>A pin: label and value, or mark: Daphne's mark in place of the value.</summary>
+    sealed record PathPin(string k, string v = null, bool mark = false);
 
     static PathRow Row(string k, string v, bool mod, params string[] more) =>
         new(k, v, mod, more.Where(x => !string.IsNullOrEmpty(x)).ToArray());
@@ -85,7 +87,7 @@ public sealed partial class DaphneEngine
             rows = new[]
             {
                 Row("檔案", srcText, false, channels != 2 ? $"聲道：{channels}" : null,
-                    t.IsLossy ? "有損壓縮來源：壓縮時已丟棄部分聲音資訊，無法還原" : null) with { decoder = "daphne" },
+                    t.IsLossy ? "有損壓縮來源：壓縮時已丟棄部分聲音資訊，無法還原" : null) with { pin = new[] { new PathPin("解碼", mark: true) } },
             },
         });
 
@@ -140,7 +142,7 @@ public sealed partial class DaphneEngine
         }
         if (proc.Count == 0)
             proc.Add(Row("DSP", dsdFile ? "無：DSD 原樣送出" : "無：樣本原樣送出", false));
-        sections.Add(new { title = "DSP", rows = proc });
+        sections.Add(new { title = "DSP", mark = true, rows = proc });   // Daphne's own processing: its mark after the title
 
         // ── 輸出
         var outRows = new List<PathRow>();
