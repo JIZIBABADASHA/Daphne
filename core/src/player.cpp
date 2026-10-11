@@ -278,6 +278,16 @@ struct Player::Impl {
 
     // What the resampler is set to, for messages.
     std::string current_filter() const {
+        // DSD file converted to PCM: the conversion, then the upsampling filter only when it is used
+        std::string pre;
+        if (rep.source.dsd_pcm) {
+            const int dr = rep.source.dsd_rate;
+            pre = "DSD" + std::to_string(dr > 0 ? dr / (dr % 44100 == 0 ? 44100 : 48000) : 0) + " -> PCM " +
+                  std::to_string(rep.source.rate) + " Hz (low-pass " + std::to_string(s.output.dsd_pcm_lowpass) + " kHz" +
+                  (s.output.dsd_pcm_limiter ? ", limiter" : "") + ")";
+            if (s.core == CoreMode::Pcm && rep.device.rate == rep.source.rate && !s.filter.apodize) return pre;
+            pre += ", then ";
+        }
         std::string d = describe_filter(s);
         if (s.core == CoreMode::Pcm && rep.device.rate == rep.source.rate)
             d += s.filter.apodize ? " (output rate = source rate: 1x, the apodizing filter still applies)"
@@ -286,7 +296,7 @@ struct Player::Impl {
             d += ", " + std::to_string(rep.source.rate) + " -> " + std::to_string(rep.device.rate) + " Hz";
         else if (dsdenc)
             d += " | " + dsdenc->describe();
-        return d;
+        return pre + d;
     }
 
     static std::string describe_filter(const Settings& x) {
@@ -487,7 +497,8 @@ struct Player::Impl {
         rep.chain = cur->stages();
         rep.filter = current_filter();
         rep.not_bit_perfect_reason.clear();
-        if (!src.lossless_int) rep.not_bit_perfect_reason = "source is not integer PCM";
+        if (src.dsd_pcm) rep.not_bit_perfect_reason = "DSD converted to PCM";
+        else if (!src.lossless_int) rep.not_bit_perfect_reason = "source is not integer PCM";
         else if (!cur->transparent()) rep.not_bit_perfect_reason = "DSP active";
         else if (effective_bits(rep.device) < src.bits)
             rep.not_bit_perfect_reason =

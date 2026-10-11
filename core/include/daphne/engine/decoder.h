@@ -19,7 +19,8 @@ struct AudioInfo {
     int64_t frames = -1;        // total frames, -1 = unknown
     uint32_t channel_mask = 0;  // WAVEFORMATEXTENSIBLE speaker mask, 0 = unknown (default order)
     std::string codec;          // "FLAC", "WAV", "AIFF", "MP3", "AAC", "ALAC", ...
-    int dsd_rate = 0;           // DSD file played directly: its DSD rate (rate = dsd_rate / 8, frames = bytes)
+    int dsd_rate = 0;           // DSD file: its DSD rate. Played directly: rate = dsd_rate / 8, frames = bytes;
+                                // converted to PCM (dsd_pcm): rate is the PCM rate
     bool dsd_pcm = false;       // DSD file converted to PCM (make_dsd_pcm_decoder)
 };
 

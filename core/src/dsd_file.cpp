@@ -292,6 +292,7 @@ public:
         info_.channels = ch_;
         info_.channel_mask = d.channel_mask;
         info_.dsd_pcm = true;
+        info_.dsd_rate = d.dsd_rate;   // the file's DSD rate (rate is the PCM rate it is converted to)
         info_.frames = d.frames / step_;
         info_.codec = d.codec + " (DSD" + std::to_string(d.dsd_rate / base) + " -> PCM)";
         buf_.resize(static_cast<size_t>(kChunk) * step_ * ch_);

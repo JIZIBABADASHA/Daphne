@@ -491,7 +491,7 @@ int cmd_play(std::vector<std::wstring> args) {
         daphne::PlayCallbacks cb;
         daphne::OutputApi api = cfg.out.api;
         cb.on_start = [&](const daphne::PlayReport& r) {
-            if (r.source.dsd_rate > 0)
+            if (r.source.dsd_rate > 0 && !r.source.dsd_pcm)
                 std::cout << "  source: " << r.source.codec << " DSD" << r.source.dsd_rate / 44100 << " (" << r.source.dsd_rate << " Hz), "
                           << r.source.channels << " ch\n";
             else
