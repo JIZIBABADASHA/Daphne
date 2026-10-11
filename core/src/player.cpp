@@ -1590,8 +1590,10 @@ struct Player::Impl {
             worker.join();
         }
         prep_threads.clear();
-        if (dev && !dev->failed() && dsdenc && dsdenc->dop() && !ended_flag) {
-            // stopped (or failed) before the end: stop quickly, but still with PCM silence
+        if (dev && !dev->failed() && dsdenc && !ended_flag) {
+            // stopped (or failed) before the end: stop quickly, but on silence. DoP: PCM silence (the DAC
+            // leaves DSD mode). Native DSD: DSD silence (0x69, what the feeder writes once the ring is
+            // empty) reaches the DAC before the stream stops, not a cut in the middle of the music
             if (dev->paused() || cancel) {
                 ring->clear();
                 dev->set_paused(false);
@@ -1602,6 +1604,9 @@ struct Player::Impl {
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
             while (!dev->drained() && !dev->failed() && std::chrono::steady_clock::now() < deadline)
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            if (!dsdenc->dop() && dev->drained() && rep.device.frame_rate() > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(
+                    static_cast<int>(dev->latency_ms()) + 2 * dev->buffer_frames() * 1000 / rep.device.frame_rate() + 5));
         }
         if (ok && dev && ended_flag) {
             // the device buffer plays out (the ring has drained)

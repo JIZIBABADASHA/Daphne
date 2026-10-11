@@ -19,8 +19,13 @@
 //   - the driver DLL is never unloaded (a driver thread still running after Release can crash the
 //     host process)
 //   - DSD mode: buffers the ring runs short of are filled with DSD silence (0x69), not zeros
-//   - after native DSD, close() runs a 0.2 s PCM 44.1 kHz session of zeros so the DAC leaves DSD
-//     mode (some DACs otherwise beep on one channel)
+//   - both buffers hold silence (zeros, DSD 0x69) before start, so the first period the driver plays
+//     before the first callback is not whatever createBuffers left there
+//   - native DSD never ends with a switch to PCM (on some DACs that switch pops, and after a PCM
+//     session at close the next native DSD stream can stay silent): the DAC is left in DSD mode, and
+//     the next PCM or DoP stream starts with 0.2 s of PCM zeros at its own rate so the DAC leaves it
+//     (some DACs beep on one channel when DoP follows native DSD). The first PCM / DoP stream in a
+//     process starts that way too (what the DAC was left in is not known)
 // Needs the Steinberg ASIO SDK at build time (third_party/asiosdk); without it open() fails.
 
 #include <atomic>
@@ -74,7 +79,6 @@ public:
     long on_message(long selector, long value);
 
 private:
-    void pcm_silence_session();
     void note(const std::string& s);
 
 public:

@@ -43,6 +43,10 @@ namespace {
 
 AsioOutput* g_out = nullptr;   // ASIO callbacks carry no context
 
+// The DAC may be in native DSD mode: a native DSD stream ended (closes never switch it to PCM), or
+// nothing has played in this process yet. The next PCM / DoP stream starts with PCM zeros.
+std::atomic<bool> g_dac_in_dsd{true};
+
 void cb_buffer_switch(long index, ASIOBool) {
     if (g_out) g_out->on_buffer(index);
 }
@@ -127,9 +131,8 @@ struct AsioOutput::Impl {
     bool buffers = false;
     bool running = false;
     bool output_ready = false;
-    bool dsd_started = false;   // a native DSD stream ran: close() returns the DAC to PCM
-    bool pcm_flush = false;     // the callback writes zeros (PCM silence session)
-    std::vector<size_t> flush_bytes;
+    bool dsd_started = false;   // a native DSD stream ran (the DAC is left in DSD mode)
+    long lead_zero_frames = 0;  // PCM zeros before the stream (the DAC may be in DSD mode)
     std::vector<ASIOBufferInfo> infos;
     LARGE_INTEGER freq{}, last{}, started{};
 };
@@ -187,6 +190,11 @@ bool AsioOutput::open(const AsioOptions& opt, int rate, int channels, std::strin
     long hw_in = 0, hw_out = 0;
     if (!asio_ok(drv->getChannels(&hw_in, &hw_out)) || hw_out <= 0) return fail("driver reports 0 physical output channels");
     const int nch = std::min(channels, static_cast<int>(hw_out));   // clamp: the chain downmixes
+
+    // the DAC may still be in native DSD mode: unless this stream is native DSD too, it starts with
+    // 0.2 s of PCM zeros at its own rate (see on_buffer), not a session of its own at 44.1 kHz (one
+    // more mode and rate change for the DAC: a pop)
+    const bool lead_zeros = !opt.dsd && g_dac_in_dsd.load();
 
     ASIOIoFormat io{};
     io.FormatType = opt.dsd ? kASIODSDFormat : kASIOPCMFormat;
@@ -257,6 +265,8 @@ bool AsioOutput::open(const AsioOptions& opt, int rate, int channels, std::strin
     tmp_.assign(static_cast<size_t>(buffer_frames_) * fmt_.block_align(), 0);
     period_us_ = fmt_.frame_rate() > 0 ? static_cast<int64_t>(buffer_frames_) * 1000000 / fmt_.frame_rate() : 0;
     matched_ = fmt_.rate == rate && fmt_.channels == channels;
+    impl_->lead_zero_frames = lead_zeros ? fmt_.frame_rate() / 5 : 0;
+    if (lead_zeros) g_dac_in_dsd = false;
     QueryPerformanceFrequency(&impl_->freq);
     (void)how;
     return true;
@@ -276,6 +286,11 @@ bool AsioOutput::start(ByteRing* ring, const std::atomic<bool>* eof, std::string
     stats_.callbacks = 0, stats_.underruns = 0, stats_.max_interval_us = 0, stats_.late_callbacks = 0;   // a new stream
     QueryPerformanceCounter(&impl_->started);
     feeder_.configure(fmt_);
+    // both halves start as silence: the driver may play one before the first callback
+    const size_t half = static_cast<size_t>(buffer_frames_) * (fmt_.container_bits / 8);
+    for (auto& bi : impl_->infos)
+        for (void* b : bi.buffers)
+            if (b) std::memset(b, is_dsd(fmt_.type) ? 0x69 : 0, half);
     const ASIOError r = impl_->drv->start();
     if (!asio_ok(r)) {
         char msg[128] = {};
@@ -289,12 +304,16 @@ bool AsioOutput::start(ByteRing* ring, const std::atomic<bool>* eof, std::string
 }
 
 void AsioOutput::on_buffer(long index) {
-    if (impl_->pcm_flush) {
-        for (size_t c = 0; c < impl_->infos.size(); ++c) std::memset(impl_->infos[c].buffers[index], 0, impl_->flush_bytes[c]);
+    if (!ring_) return;
+    if (impl_->lead_zero_frames > 0) {
+        // after native DSD: plain PCM zeros first so the DAC leaves DSD mode (the ring waits meanwhile)
+        const size_t half = static_cast<size_t>(buffer_frames_) * (fmt_.container_bits / 8);
+        for (auto& bi : impl_->infos) std::memset(bi.buffers[index], 0, half);
+        impl_->lead_zero_frames -= buffer_frames_;
         if (impl_->output_ready) impl_->drv->outputReady();
+        stats_.callbacks++;
         return;
     }
-    if (!ring_) return;
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     if (impl_->last.QuadPart) {
@@ -356,7 +375,7 @@ long AsioOutput::on_message(long selector, long value) {
         // reopen the device. The driver must not be reopened inside its own callback: the player
         // does it. Drivers send one while starting up: ignored.
         const char* what = selector == kAsioResetRequest ? "reset request" : "buffer size change";
-        if (impl_->pcm_flush || !impl_->running) {
+        if (!impl_->running) {
             note(std::string("asio: ") + what + " while not playing: ignored");
             return 1;
         }
@@ -396,47 +415,11 @@ void AsioOutput::stop() {
     }
 }
 
-// After native DSD some DACs mishandle what follows until they receive PCM (a DoP stream right after
-// it made one channel beep without end): a short PCM 44.1 kHz session that writes only zeros,
-// through the normal callback path.
-void AsioOutput::pcm_silence_session() {
-    IASIO* drv = impl_->drv;
-    ASIOIoFormat io{};
-    io.FormatType = kASIOPCMFormat;
-    drv->future(kAsioSetIoFormat, &io);
-    drv->setSampleRate(44100.0);
-    long bmin = 0, bmax = 0, bpref = 0, bgran = 0;
-    if (!asio_ok(drv->getBufferSize(&bmin, &bmax, &bpref, &bgran)) || bpref <= 0) bpref = 512;
-    const size_t nch = impl_->infos.size();
-    impl_->flush_bytes.assign(nch, static_cast<size_t>(bpref) * 4);
-    for (size_t c = 0; c < nch; ++c) {
-        ASIOChannelInfo ci{};
-        ci.channel = static_cast<long>(c);
-        ci.isInput = ASIOFalse;
-        DeviceFormat f;
-        if (asio_ok(drv->getChannelInfo(&ci)) && map_type(ci.type, f))
-            impl_->flush_bytes[c] = static_cast<size_t>(bpref) * f.container_bits / 8;
-        impl_->infos[c].isInput = ASIOFalse;
-        impl_->infos[c].channelNum = static_cast<long>(c);
-    }
-    impl_->pcm_flush = true;
-    g_out = this;
-    if (asio_ok(drv->createBuffers(impl_->infos.data(), static_cast<long>(nch), bpref, &g_callbacks))) {
-        impl_->output_ready = drv->outputReady() == ASE_OK;
-        if (asio_ok(drv->start())) {
-            Sleep(200);
-            drv->stop();
-        }
-        drv->disposeBuffers();
-    }
-    impl_->pcm_flush = false;
-}
-
 void AsioOutput::close() {
     stop();
     if (impl_->drv) {
         if (impl_->buffers) impl_->drv->disposeBuffers();
-        if (impl_->buffers && impl_->dsd_started) pcm_silence_session();
+        if (impl_->dsd_started) g_dac_in_dsd = true;   // left in DSD mode: the next PCM / DoP stream leads with zeros
         impl_->dsd_started = false;
         impl_->buffers = false;
         impl_->drv->Release();

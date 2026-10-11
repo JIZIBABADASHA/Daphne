@@ -36,7 +36,9 @@
 - 驅動要求重設或改變緩衝大小時重新開啟裝置（播放器在原位置繼續）。啟動後 0.5 s 內的一次會被忽略（驅動啟動時常會送一次）。10 秒內超過 3 次視為失敗。取樣率改變則停止播放並說明原因。
 - 驅動 DLL 永不卸載：經由 COM 釋放時會在 CoUninitialize 卸載，若驅動的執行緒還在收尾，就會在已釋放的程式碼中執行而當機。
 - DSD 模式：環不夠時以 DSD 靜音（0x69）填補，不是 0。
-- 原生 DSD 之後，`close()` 先跑 0.2 s、44.1 kHz、全為 0 的 PCM 工作階段，讓 DAC 離開 DSD 模式（有些 DAC 否則會在某一聲道持續發出嗶聲）。
+- 原生 DSD 結束時不切回 PCM（有些 DAC 在原生 DSD → PCM 的切換會爆音，而且關閉時跑一段 PCM 工作階段後，下一次原生 DSD 可能沒有聲音）：DAC 留在 DSD 模式，下一個 PCM 或 DoP 串流在自己的取樣率先送 0.2 s 全為 0 的 PCM，讓 DAC 離開 DSD 模式（有些 DAC 在原生 DSD 之後直接接 DoP 會在某一聲道持續發出嗶聲）。同一個程序裡的第一個 PCM / DoP 串流也這樣開始（不知道 DAC 之前停在什麼模式）。
+- 開始前兩個 buffer 都先填靜音（PCM 為 0、DSD 為 0x69），驅動程式在第一次 callback 之前播放的那一段不會是 createBuffers 留下的內容。
+- 原生 DSD 在播完之前被停止時，先讓 DSD 靜音（0x69）送到 DAC 再停止，不在音樂中間切斷。
 - 需要建置時有 Steinberg ASIO SDK（`third_party/asiosdk`，`scripts/fetch_asiosdk.ps1`）；沒有時 `open()` 回報失敗，其他輸出不受影響。
 
 ## 裝置列表（`devices.h`）
