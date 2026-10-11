@@ -207,9 +207,19 @@
     watch(host, () => App.settings.dsdMode + '|' + App.settings.outputMode);
   }
 
-  // the petal: pointed at both ends, widest in the middle (9 x 14)
-  const PETAL = '<svg viewBox="0 0 9 14" width="9" height="14" aria-hidden="true"><path fill="#E58FB7" d="M4.5 0C7.9 3.2 8.6 9.6 4.5 14C.4 9.6 1.1 3.2 4.5 0Z"/></svg>';
-  /** Daphne's mark in the signal path card: the petal and DAPHNE (解碼, the DSP section's title). */
+  // The tonos: the petal on the icon's α, the one standard for every petal. Traced from the 2048 px icon in GFS Didot
+  // font units around the α (glyph origin and baseline at 0, y down); its box is 253.5 -769.0 121.9 225.8 (x y w h).
+  const TONOS_D = 'M367.4 -769.0 L368.1 -769.0 L371.1 -758.3 L374.2 -742.2 L375.4 -729.1 L375.3 -708.3 L373.5 -692.8 L369.4 -673.8 L364.6 -658.9 L357.5 -642.2 L348.6 -625.5 L339.5 -611.9 L328.3 -597.6 L316.2 -584.7 L304.9 -574.3 L288.8 -561.7 L273.4 -551.6 L257.9 -543.2 L255.3 -555.3 L253.5 -571.4 L253.5 -590.4 L254.8 -604.1 L257.8 -621.4 L262.5 -639.2 L268.4 -655.9 L275.5 -672.0 L284.6 -688.6 L294.2 -703.5 L303.5 -716.0 L315.5 -729.7 L327.7 -741.6 L340.0 -751.8 L351.9 -760.2Z';
+  const tonosSvg = cls => '<svg class="' + cls + '" viewBox="253.5 -769.0 121.9 225.8" aria-hidden="true"><path fill="#E58FB7" d="' + TONOS_D + '"/></svg>';
+  const fromHtml = s => { const t = document.createElement('template'); t.innerHTML = s; return t.content.firstChild; };
+  /** α with its petal (GFS Didot): the petal is placed on the α in em (daphne.css .dp-tonos). */
+  const alpha = () => h('span', { class: 'dp-alpha' }, 'α', fromHtml(tonosSvg('dp-tonos')));
+  /** Δάφνη in GFS Didot, its accent the petal. */
+  const greek = () => h('span', { class: 'dp-greek', role: 'img', 'aria-label': 'Δάφνη' }, 'Δ', alpha(), 'φνη');
+  /** The app icon: the tile and its α with the petal. */
+  const icon = () => h('span', { class: 'dp-icon', role: 'img', 'aria-label': 'Daphne' }, h('span', { class: 'dp-icon-a' }, alpha()));
+  // the petal before DAPHNE: the same petal, as tall as DAPHNE's capitals (daphne.css .dp-petal-svg)
+  const PETAL = tonosSvg('');
   const mark = () => h('span', { class: 'dp-mark' }, h('span', { class: 'dp-petal-svg', html: PETAL }), 'DAPHNE');
 
   /**
@@ -286,9 +296,9 @@
         if (ui.core.id !== 'daphne') return;
         const card = ui.section(null);
         card.classList.add('dp-sect');
-        // the title artwork; DAPHNE under Δάφνη as text, in the same style and colour as in 關於
+        // the title: Δάφνη (GFS Didot, its petal from the icon) and DAPHNE under it as text; the divider and 再生設置 are artwork
         card.append(h('div', { class: 'dp-sect-h' }, h('span', { class: 'dp-title', role: 'img', 'aria-label': 'Daphne 再生設置' },
-          h('span', { class: 'dp-latin' }, h('i', { class: 'dp-petal' }), 'DAPHNE'))));
+          greek(), h('span', { class: 'dp-latin' }, h('span', { class: 'dp-petal-svg', html: PETAL }), 'DAPHNE'))));
         // WASAPI shared: nothing of it applies (Windows' mixer converts everything; MIKU hides its DSD card too)
         if (App.settings.outputMode === 'shared') card.style.display = 'none';
         else dsdGroup = group(card, ui, 'DSD');
@@ -310,11 +320,11 @@
         // on the right (status, limit, open folder, clear); the explanations are in the controls' tooltips
         const redraw = () => { try { Router.render(false, 'none'); } catch (e) { console.error('[daphne]', e); } };
         const brand = h('div', { class: 'dp-brand' },
-          h('span', { class: 'dp-icon', role: 'img', 'aria-label': 'Daphne' }),
+          icon(),
           h('div', { class: 'lbl' },
-            h('b', { class: 'dp-name' }, h('span', { class: 'dp-wordmark', role: 'img', 'aria-label': 'Δάφνη' })),
+            h('b', { class: 'dp-name' }, h('span', { class: 'dp-wordmark' }, greek())),
             h('small', { class: 'dp-meta' },
-              h('span', { class: 'dp-latin' }, h('i', { class: 'dp-petal' }), 'DAPHNE'),
+              h('span', { class: 'dp-latin' }, h('span', { class: 'dp-petal-svg', html: PETAL }), 'DAPHNE'),
               h('span', { class: 'dp-sep' }),
               h('span', null, '播放核心'),
               Daphne.state.commit ? h('code', { class: 'dp-commit' }, Daphne.state.commit) : h('span', null, '版本不明'))));
