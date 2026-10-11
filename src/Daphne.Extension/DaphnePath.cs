@@ -65,13 +65,12 @@ public sealed partial class DaphneEngine
     }
 
     /// <summary>The card's sections and its notes (warnings).</summary>
-    object BuildPath(Track t, JsonElement src, JsonElement dev, List<string> chain, bool isDsd, bool nativeDsd, bool dop,
+    object BuildPath(Track t, JsonElement src, JsonElement dev, List<string> chain, bool isDsd, bool sentDirect, bool nativeDsd, bool dop,
                      int srcRate, int devRate, string mode, string format, string volumeMode, double rg, List<string> notes)
     {
         var o = _opts;
-        bool dsdOut = nativeDsd || dop;
-        bool dsdFile = isDsd && dsdOut;            // a DSD file sent as DSD
-        bool dsdPcm = isDsd && !dsdOut;            // a DSD file converted to PCM
+        bool dsdFile = sentDirect;                 // a DSD file sent as DSD
+        bool dsdPcm = isDsd && !sentDirect;        // a DSD file converted to PCM (it may leave as DSD again: the modulator)
         int pcmRate = src.GetProperty("rate").GetInt32();   // where the PCM chain starts (DSD → PCM: the converted rate)
         int channels = src.GetProperty("channels").GetInt32();
         int clock = nativeDsd ? devRate : dop ? devRate * 16 : 0;   // the DSD rate sent

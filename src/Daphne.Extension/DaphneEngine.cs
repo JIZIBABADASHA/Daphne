@@ -454,7 +454,10 @@ public sealed partial class DaphneEngine : IAudioEngine
         int devRate = dev.GetProperty("rate").GetInt32();
         int srcRate = dsdRate > 0 ? dsdRate : src.GetProperty("rate").GetInt32();
         string mode = _s.OutputMode switch { "asio" => "ASIO", "shared" => "WASAPI 共享", _ => "WASAPI 獨佔" };
-        bool dsdFile = isDsd && dsdOut;   // a DSD file sent as DSD (PCM → DSD keeps the core's digital volume)
+        // a DSD file sent as DSD: the core's own word for it. A DSD file converted to PCM may still leave as DSD again
+        // (the DSD modulator), which is processed (and PCM → DSD keeps the core's digital volume)
+        bool sentDirect = isDsd && filter.StartsWith("none (DSD file sent directly)");
+        bool dsdFile = sentDirect;
         // DSP: what changes the sound (MIKU's EQ, crossfeed); the volume and ReplayGain have their own rows
         var dsp = chain.Where(x => x is "eq" or "crossfeed").Select(x => x == "eq" ? "EQ" : "Crossfeed").ToList();
         double rg = SettingsMap.ReplayGainDb(_s, t);
@@ -471,7 +474,7 @@ public sealed partial class DaphneEngine : IAudioEngine
             Dop = dop,
             DsdDirect = dsdOut,
             DsdTransport = nativeDsd ? "Native" : dop ? "Dop" : null,
-            Resampled = isDsd ? !dsdOut : dsdOut || devRate != srcRate,   // DSD → PCM, PCM → DSD, another rate
+            Resampled = isDsd ? !sentDirect : dsdOut || devRate != srcRate,   // DSD → PCM (→ DSD), PCM → DSD, another rate
             OutputRate = devRate,
             OutputFormat = format,
             OutputBits = nativeDsd ? 1 : dev.GetProperty("bits").GetInt32(),
@@ -493,8 +496,8 @@ public sealed partial class DaphneEngine : IAudioEngine
         long clipped = _report.TryGetProperty("clipped", out var cl) ? cl.GetInt64() : 0;
         if (clipped > 0) notes.Add($"已有 {clipped:N0} 個樣本超過滿刻度被削波；請調低數位音量或 EQ 前級。");
         info.Note = notes.Count > 0 ? string.Join("\n", notes) : null;
-        info.Custom = BuildPath(t, src, dev, chain, isDsd, nativeDsd, dop, srcRate, devRate, mode, format, volumeMode, rg, notes);
-        info.Quality = Quality(info, _report.GetProperty("bit_perfect").GetBoolean());
+        info.Custom = BuildPath(t, src, dev, chain, isDsd, sentDirect, nativeDsd, dop, srcRate, devRate, mode, format, volumeMode, rg, notes);
+        info.Quality = Quality(info, _report.GetProperty("bit_perfect").GetBoolean(), sentDirect);
         return info;
     }
 
@@ -502,11 +505,11 @@ public sealed partial class DaphneEngine : IAudioEngine
     static string FormatText(string type, int bits, int container) =>
         type.StartsWith("float") ? container + "-bit 浮點" : bits != container ? $"{bits}-bit（{container}-bit 容器）" : $"{bits}-bit";
 
-    string Quality(SignalInfo i, bool bitPerfect)
+    string Quality(SignalInfo i, bool bitPerfect, bool sentDirect)
     {
         if (i.Lossy) return "low";
         if (i.Mode == "WASAPI 共享") return "high";
-        if (i.DsdDirect) return i.Dsd ? "bitperfect" : "enhanced";   // a DSD file sent as DSD; PCM → DSD is processed
+        if (i.DsdDirect) return sentDirect ? "bitperfect" : "enhanced";   // a DSD file sent as DSD; DSD → PCM → DSD, PCM → DSD are processed
         return bitPerfect ? "bitperfect" : "enhanced";
     }
 
