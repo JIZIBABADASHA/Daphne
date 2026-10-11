@@ -1,0 +1,62 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Daphne as a MIKU extension module (MIKU repo: MIKU.Extensibility/README.md). This repository is checked out (or
+    linked) under MIKU's Extensions\Daphne\; MIKU's build runs MikuDeploy, which puts in <MIKU>\ext\daphne\:
+      Daphne.Extension.dll, deps.json
+      daphne_core.dll + the FFmpeg DLLs   (the C++ engine, built here with CMake: scripts/build_for_miku.ps1)
+      web\    (Daphne's settings, its signal path and its row in 關於)
+    A playback core works with MIKU's own types, so this references MIKU itself (MikuOutDir\MIKU.dll, not copied).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>DaphneMiku</RootNamespace>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <MikuExtId>daphne</MikuExtId>
+    <MikuRepo>$(MSBuildThisFileDirectory)..\..\..\..\</MikuRepo>
+    <DaphneRoot>$(MSBuildThisFileDirectory)..\..\</DaphneRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(MikuRepo)MIKU.Extensibility\MIKU.Extensibility.csproj" Private="false" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(MikuOutDir)' != ''">
+    <Reference Include="MIKU">
+      <HintPath>$(MikuOutDir)MIKU.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="NAudio.Wasapi">
+      <HintPath>$(MikuOutDir)NAudio.Wasapi.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="NAudio.Core">
+      <HintPath>$(MikuOutDir)NAudio.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+  <!-- the Daphne commit, shown in Settings → 關於 (AssemblyMetadata "DaphneCommit") -->
+  <Target Name="DaphneCommit" BeforeTargets="GetAssemblyAttributes">
+    <Exec Command="git -C &quot;$(DaphneRoot).&quot; rev-parse --short HEAD" ConsoleToMSBuild="true" IgnoreExitCode="true" IgnoreStandardErrorWarningFormat="true" StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="DaphneCommit" />
+    </Exec>
+    <ItemGroup Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(DaphneCommit)', '^[0-9a-f]{7,40}$'))">
+      <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+        <_Parameter1>DaphneCommit</_Parameter1>
+        <_Parameter2>$(DaphneCommit)</_Parameter2>
+      </AssemblyAttribute>
+    </ItemGroup>
+  </Target>
+  <Target Name="MikuDeploy" DependsOnTargets="Build">
+    <PropertyGroup>
+      <_Dst>$(MikuOutDir)ext\$(MikuExtId)\</_Dst>
+    </PropertyGroup>
+    <ItemGroup>
+      <_Bin Include="$(TargetDir)*.dll;$(TargetDir)*.deps.json" Exclude="$(TargetDir)MIKU.dll;$(TargetDir)MIKU.Extensibility.dll;$(TargetDir)NAudio*.dll" />
+      <_Web Include="$(MSBuildThisFileDirectory)web\**\*" />
+    </ItemGroup>
+    <!-- the C++ engine: CMake build of daphne_core.dll (fetches FFmpeg and the ASIO SDK the first time) -->
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(DaphneRoot)scripts\build_for_miku.ps1&quot; -Out &quot;$(_Dst).&quot;" />
+    <Copy SourceFiles="@(_Bin)" DestinationFolder="$(_Dst)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_Web)" DestinationFiles="@(_Web->'$(_Dst)web\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+    <Message Importance="high" Text="daphne deployed to $(_Dst)" />
+  </Target>
+</Project>
