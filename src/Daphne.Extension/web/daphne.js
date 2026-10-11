@@ -233,7 +233,8 @@
         const fold = () => {
           if (!more && line.scrollWidth <= line.clientWidth + 1) return;
           el.classList.add('dp-fold');
-          el.onclick = () => el.classList.toggle('dp-open');
+          // opening a row is not a click on the card (on an upsampled track a click on the card turns it over)
+          el.onclick = e => { e.stopPropagation(); el.classList.toggle('dp-open'); };
         };
         if (more) fold(); else requestAnimationFrame(fold);   // a long line folds once it is laid out
         box.append(el);
