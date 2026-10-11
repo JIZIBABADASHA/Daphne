@@ -53,7 +53,7 @@ void usage() {
               << "  daphne devices [--probe]                list WASAPI endpoints (--probe: exclusive formats) and ASIO drivers\n"
               << "  daphne play [--settings file] [--device id|index] [--shared|--exclusive|--asio [driver]]\n"
               << "              [--start S] [--length S] [--next file] [--watch] [--script t:cmd,...] files...\n"
-              << "  daphne render-dsp <in> <out.wav> [--settings file] [--channels N] [--float]\n"
+              << "  daphne render-dsp <in> <out.wav> [--settings file] [--channels N] [--bits 16|24|32] [--float]\n"
               << "                                          the whole chain offline (dsd core: the DoP stream)\n"
               << "  daphne decode-test [--md5] files...     decode files; FLAC is checked against its STREAMINFO MD5;\n"
               << "                                          --md5 prints the MD5 of the decoded stream as s32le\n"
@@ -597,22 +597,23 @@ int cmd_play(std::vector<std::wstring> args) {
     return failures ? 2 : 0;
 }
 
-// daphne render-dsp <in> <out.wav> [--settings file] [--channels N] [--float]
+// daphne render-dsp <in> <out.wav> [--settings file] [--channels N] [--bits 16|24|32] [--float]
 // Runs the whole chain offline: a virtual device at the rate the core asks for, N channels (default:
-// the source's), output.bits integer PCM (or float32). dsd core: the DoP stream (32-bit WAV at the
+// the source's), --bits integer PCM (default 24) or float32. dsd core: the DoP stream (32-bit WAV at the
 // DSD clock / 16) as the player sends it.
 int cmd_render_dsp(std::vector<std::wstring> args) {
     daphne::Settings s;
     if (!load_settings_arg(args, s)) return 1;
-    int channels = 0;
+    int channels = 0, bits = 24;
     bool as_float = false;
     std::vector<std::wstring> files;
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == L"--channels" && i + 1 < args.size()) channels = std::stoi(args[++i]);
+        else if (args[i] == L"--bits" && i + 1 < args.size()) bits = std::stoi(args[++i]);
         else if (args[i] == L"--float") as_float = true;
         else files.push_back(args[i]);
     }
-    if (files.size() != 2) {
+    if (files.size() != 2 || (bits != 16 && bits != 24 && bits != 32)) {
         usage();
         return 1;
     }
@@ -627,8 +628,8 @@ int cmd_render_dsp(std::vector<std::wstring> args) {
     dev.rate = daphne::pcm_output_rate(in.rate, s.output.rate);
     dev.channels = channels > 0 ? channels : in.channels;
     if (as_float) dev.type = daphne::SampleType::Float32, dev.container_bits = dev.valid_bits = 32;
-    else if (s.output.bits == 16) dev.type = daphne::SampleType::Int16, dev.container_bits = dev.valid_bits = 16;
-    else if (s.output.bits == 24) dev.type = daphne::SampleType::Packed24, dev.container_bits = dev.valid_bits = 24;
+    else if (bits == 16) dev.type = daphne::SampleType::Int16, dev.container_bits = dev.valid_bits = 16;
+    else if (bits == 24) dev.type = daphne::SampleType::Packed24, dev.container_bits = dev.valid_bits = 24;
     else dev.type = daphne::SampleType::Int32, dev.container_bits = dev.valid_bits = 32;
     constexpr int kChunk = 4096;
     std::unique_ptr<daphne::DsdEncoder> dsd;

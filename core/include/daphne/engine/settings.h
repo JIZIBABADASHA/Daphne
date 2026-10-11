@@ -4,7 +4,7 @@
 //
 // {
 //   "version": 1,
-//   "output":  { "api": "wasapi_exclusive" | "wasapi_shared" | "asio", "device": "", "bits": 16 | 24 | 32,
+//   "output":  { "api": "wasapi_exclusive" | "wasapi_shared" | "asio", "device": "",
 //                "rate": "native" | "auto" | "2x" | "<Hz>", "dsd": "auto" | "native" | "dop" | "pcm",
 //                "dsd_pcm_lowpass": 24 | 30 | 50, "dsd_pcm_limiter": true, "max_dsd": 0 | 64 | ... | 512,
 //                "dsd_lead_in_ms": 0 .. 2000 },
@@ -15,7 +15,7 @@
 //                "bands": [ { "type": "PK" | "LS" | "HS" | "HP" | "HP24" | "LP" | "LP24" | "NOTCH" | "AP" | "BP",
 //                             "f": Hz, "q": 0.01 .. 100, "gain_db": -30 .. 30, "on": true } ] },
 //   "crossfeed": { "enabled": false, "fc": 100 .. 3000, "amount": 0 .. 1 },
-//   "volume":  { "mode": "digital" | "hardware" | "fixed", "db": -120 .. 0 },
+//   "volume":  { "mode": "digital" | "fixed", "db": -120 .. 0 },
 //   "headroom_db": -24 .. 24,
 //   "dsd_modulator": { "order": 5 | 8, "osr": 64 | 128 | 256 | 512 | 1024 },
 //   "design":  { "threads": 0 .. 256, "cache_limit_mb": 0 .. }
@@ -39,12 +39,13 @@ enum class DsdMode { Auto, Native, Dop, Pcm };
 enum class FilterPhase { Linear, Intermediate, Minimum, Custom };
 // EQ band types. HP / LP are 12 dB/oct, HP24 / LP24 two Butterworth sections; BP has a 0 dB peak.
 enum class EqType { PK, LS, HS, HP, HP24, LP, LP24, NOTCH, AP, BP };
-enum class VolumeMode { Digital, Hardware, Fixed };
+// digital: the gain stage applies volume.db; fixed: no volume in the core (a host that controls the
+// device endpoint volume itself sends fixed).
+enum class VolumeMode { Digital, Fixed };
 
 struct OutputSettings {
     OutputApi api = OutputApi::WasapiExclusive;
     std::string device;          // empty = system default
-    int bits = 24;               // 16 | 24 | 32
     // PCM output rate: "native" (the source rate), "auto" (cap 705600 for 44.1 kHz-family sources,
     // else 768000), "2x" (twice the source rate, for every track) or "<Hz>" (cap); with a cap the
     // ratio is the largest power of two <= 32 with ratio * fs_in <= cap.

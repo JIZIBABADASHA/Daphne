@@ -24,7 +24,7 @@ const EnumTable<EqType> kEqType = {{"PK", EqType::PK},       {"LS", EqType::LS},
                                    {"LP24", EqType::LP24},   {"NOTCH", EqType::NOTCH}, {"AP", EqType::AP},
                                    {"BP", EqType::BP}};
 const EnumTable<VolumeMode> kVolumeMode = {
-    {"digital", VolumeMode::Digital}, {"hardware", VolumeMode::Hardware}, {"fixed", VolumeMode::Fixed}};
+    {"digital", VolumeMode::Digital}, {"fixed", VolumeMode::Fixed}};
 
 template <class E>
 const char* to_name(const EnumTable<E>& t, E v) {
@@ -159,10 +159,9 @@ long rate_value(const std::string& r) {
 
 void read_output(Reader& r, const json& o, OutputSettings& s) {
     const std::string p = "output";
-    r.check_keys(o, p, {"api", "device", "bits", "rate", "dsd", "dsd_pcm_lowpass", "dsd_pcm_limiter", "max_dsd", "dsd_lead_in_ms"});
+    r.check_keys(o, p, {"api", "device", "rate", "dsd", "dsd_pcm_lowpass", "dsd_pcm_limiter", "max_dsd", "dsd_lead_in_ms"});
     r.enumeration(o, "api", p, s.api, kOutputApi);
     r.string(o, "device", p, s.device);
-    r.integer(o, "bits", p, s.bits, 0, 0, {16, 24, 32});
     std::string rate = s.rate;
     r.string(o, "rate", p, rate);
     if (rate_value(rate) != -2) s.rate = rate;
@@ -286,7 +285,6 @@ json settings_to_json(const Settings& s) {
         {"output",
          {{"api", to_name(kOutputApi, s.output.api)},
           {"device", s.output.device},
-          {"bits", s.output.bits},
           {"rate", s.output.rate},
           {"dsd", to_name(kDsdMode, s.output.dsd)},
           {"dsd_pcm_lowpass", s.output.dsd_pcm_lowpass},
