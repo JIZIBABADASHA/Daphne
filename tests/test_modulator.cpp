@@ -35,7 +35,7 @@ double tone_level(const std::vector<uint8_t>& out, int channels, int c, double f
 
 TEST_CASE("Modulator: stays within the scaled range and encodes the signal at the reference gain", "[modulator]") {
     const int fs = 44100, n = 8192;
-    for (int order : {5, 8, 9}) {
+    for (int order : {5, 8}) {
         std::vector<double> x(static_cast<size_t>(n) * 2);
         for (int i = 0; i < n; ++i) x[2 * i] = x[2 * i + 1] = 0.9 * std::sin(2 * kPi * 1000 * i / fs);   // -0.9 dBFS
         DsdModulator m(fs, 64, order);

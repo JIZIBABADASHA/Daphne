@@ -40,7 +40,7 @@ inline uint32_t xorshift(uint32_t& s) {
 }
 
 const SdmTable* table_for(int osr_in, int order) {
-    const int run = order >= 9 ? 9 : order >= 8 ? 8 : 5;
+    const int run = order >= 8 ? 8 : 5;
     int osr = 64;
     while (osr < 1024 && osr * 2 <= osr_in) osr *= 2;
     const SdmTable* t = &kTables[0];
@@ -199,7 +199,6 @@ void DsdModulator::run_channel(Ch& h, const double* in, int frames, int channels
 
 void DsdModulator::run(Ch& h, const double* in, int frames, int channels, int c, std::vector<uint8_t>& bytes) {
     switch (n_) {
-        case 9: run_channel<9>(h, in, frames, channels, c, bytes); break;
         case 8: run_channel<8>(h, in, frames, channels, c, bytes); break;
         default: run_channel<5>(h, in, frames, channels, c, bytes); break;
     }

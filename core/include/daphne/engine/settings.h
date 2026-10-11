@@ -17,7 +17,7 @@
 //   "crossfeed": { "enabled": false, "fc": 100 .. 3000, "amount": 0 .. 1 },
 //   "volume":  { "mode": "digital" | "hardware" | "fixed", "db": -120 .. 0 },
 //   "headroom_db": -24 .. 24,
-//   "dsd_modulator": { "order": 5 | 8 | 9, "osr": 64 | 128 | 256 | 512 | 1024 },
+//   "dsd_modulator": { "order": 5 | 8, "osr": 64 | 128 | 256 | 512 | 1024 },
 //   "design":  { "threads": 0 .. 256, "cache_limit_mb": 0 .. }
 // }
 
@@ -111,7 +111,7 @@ struct VolumeSettings {
 };
 
 struct ModulatorSettings {
-    int order = 8;               // 5 | 8 | 9
+    int order = 8;               // 5 (least ultrasonic noise) | 8 (quietest audio band)
     int osr = 128;               // DSD64 .. DSD1024
 };
 

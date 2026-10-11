@@ -21,6 +21,7 @@ target_include_directories(daphne_vendor SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE
 add_subdirectory(dsp)
 add_subdirectory(core)
 add_subdirectory(cli)
+add_subdirectory(capi)
 
 if(DAPHNE_BUILD_TESTS)
     enable_testing()

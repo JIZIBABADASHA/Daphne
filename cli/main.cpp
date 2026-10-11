@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -22,7 +23,11 @@
 #include "daphne/dsp/filter_design.h"
 #include "daphne/dsp/modulator.h"
 #include "daphne/dsp/progress.h"
+#include "daphne/engine/chain.h"
 #include "daphne/engine/decoder.h"
+#include "daphne/engine/devices.h"
+#include "daphne/engine/dsd_output.h"
+#include "daphne/engine/player.h"
 #include "daphne/engine/dsd_file.h"
 #include "daphne/engine/filters.h"
 #include "daphne/engine/settings.h"
@@ -45,11 +50,18 @@ void usage() {
     std::cout << "daphne " << kVersion << "\n\n"
               << "usage:\n"
               << "  daphne version\n"
+              << "  daphne devices [--probe]                list WASAPI endpoints (--probe: exclusive formats) and ASIO drivers\n"
+              << "  daphne play [--settings file] [--device id|index] [--shared|--exclusive|--asio [driver]]\n"
+              << "              [--start S] [--length S] [--next file] [--watch] [--script t:cmd,...] files...\n"
+              << "  daphne render-dsp <in> <out.wav> [--settings file] [--channels N] [--float]\n"
+              << "                                          the whole chain offline (dsd core: the DoP stream)\n"
               << "  daphne decode-test [--md5] files...     decode files; FLAC is checked against its STREAMINFO MD5;\n"
               << "                                          --md5 prints the MD5 of the decoded stream as s32le\n"
-              << "  daphne render <in> <out.wav> [--start F]\n"
-              << "                                          decode to WAV (source bit depth, or float32 for lossy);\n"
-              << "                                          --start: seek to frame F first\n";
+              << "  daphne render <in> <out.wav> [--start F] [--dsd-lowpass 24|30|50]\n"
+              << "                                          decode to WAV (source bit depth, or float32 otherwise);\n"
+              << "                                          --start: seek to frame F first; --dsd-lowpass: DSD -> PCM low-pass\n"
+              << "  daphne settings default [file]          write the default settings (stdout if no file)\n"
+              << "  daphne settings check <file>            validate a settings file\n";
 }
 
 // ---------------------------------------------------------------- MD5 (BCrypt)
@@ -380,6 +392,309 @@ int cmd_resampler_run(std::vector<std::wstring> args) {
     return 0;
 }
 
+// ---------------------------------------------------------------- devices / play / render-dsp
+
+int cmd_devices(bool probe) {
+    std::string err;
+    auto devs = daphne::list_wasapi_devices(probe, &err);
+    std::cout << "WASAPI render endpoints (" << devs.size() << ")\n";
+    if (!err.empty()) std::cout << "  error: " << err << "\n";
+    for (size_t i = 0; i < devs.size(); ++i) {
+        const auto& d = devs[i];
+        std::cout << "  [" << i << "] " << d.name << (d.is_default ? "  (default)" : "") << "\n"
+                  << "      id:  " << d.id << "\n"
+                  << "      mix: " << d.mix_rate << " Hz, " << d.mix_channels << " ch, " << d.mix_bits << "-bit\n";
+        if (probe) {
+            std::cout << "      exclusive:";
+            if (d.exclusive.empty()) std::cout << " (none)";
+            int last_rate = 0;
+            for (const auto& f : d.exclusive) {
+                if (f.rate != last_rate) {
+                    std::cout << "\n        " << f.rate << ":";
+                    last_rate = f.rate;
+                }
+                std::cout << " " << f.bits;
+                if (f.valid_bits != f.bits) std::cout << "/" << f.valid_bits;
+            }
+            std::cout << "\n";
+        }
+    }
+    std::string aerr;
+    auto asio = daphne::list_asio_drivers(&aerr);
+    std::cout << "ASIO drivers (" << asio.size() << ")\n";
+    if (!aerr.empty()) std::cout << "  " << aerr << "\n";
+    for (const auto& a : asio)
+        std::cout << "  " << a.name << (a.description.empty() || a.description == a.name ? "" : "  - " + a.description)
+                  << "\n      clsid: " << a.clsid << "\n";
+    return 0;
+}
+
+struct PlayConfig {
+    daphne::Settings settings;
+    daphne::OutputChoice out;
+    std::vector<std::wstring> files;
+    std::wstring settings_path;
+    bool watch = false;
+    double start = 0.0, length = 0.0;   // --start / --length seconds
+    std::wstring next;                  // --next: gapless next track
+    std::string script;                 // --script "2:pause,3:resume,5:seek=30" (seconds since start)
+};
+
+// Settings file + device options; called again when --watch sees the file change.
+bool play_config(std::vector<std::wstring> args, PlayConfig& c) {
+    for (size_t i = 0; i + 1 < args.size(); ++i)
+        if (args[i] == L"--settings") c.settings_path = args[i + 1];
+    c.settings = {};
+    if (!load_settings_arg(args, c.settings)) return false;
+    c.out.api = c.settings.output.api;
+    c.out.device = c.settings.output.device;
+    c.files.clear();
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == L"--device" && i + 1 < args.size()) c.out.device = daphne::to_utf8(args[++i]);
+        else if (args[i] == L"--shared") c.out.api = daphne::OutputApi::WasapiShared;
+        else if (args[i] == L"--exclusive") c.out.api = daphne::OutputApi::WasapiExclusive;
+        else if (args[i] == L"--watch") c.watch = true;
+        else if (args[i] == L"--start" && i + 1 < args.size()) c.start = std::stod(args[++i]);
+        else if (args[i] == L"--length" && i + 1 < args.size()) c.length = std::stod(args[++i]);
+        else if (args[i] == L"--next" && i + 1 < args.size()) c.next = args[++i];
+        else if (args[i] == L"--script" && i + 1 < args.size()) c.script = daphne::to_utf8(args[++i]);
+        else if (args[i] == L"--asio") {
+            c.out.api = daphne::OutputApi::Asio;
+            // optional driver name / index right after --asio
+            if (i + 1 < args.size() && args[i + 1].rfind(L"--", 0) != 0 && !std::filesystem::exists(args[i + 1]))
+                c.out.device = daphne::to_utf8(args[++i]);
+        } else c.files.push_back(args[i]);
+    }
+    return true;
+}
+
+int cmd_play(std::vector<std::wstring> args) {
+    PlayConfig cfg;
+    if (!play_config(args, cfg)) return 1;
+    if (cfg.files.empty()) {
+        usage();
+        return 1;
+    }
+    if (cfg.watch && cfg.settings_path.empty()) {
+        std::cerr << "--watch needs --settings <file>\n";
+        return 1;
+    }
+    auto mtime = [&]() {
+        std::error_code ec;
+        const auto t = std::filesystem::last_write_time(cfg.settings_path, ec);
+        return ec ? std::filesystem::file_time_type{} : t;
+    };
+    int failures = 0;
+    for (const auto& f : cfg.files) {
+        if (g_cancel) break;
+        std::cout << "\n" << daphne::to_utf8(f) << "\n";
+        daphne::PlayCallbacks cb;
+        daphne::OutputApi api = cfg.out.api;
+        cb.on_start = [&](const daphne::PlayReport& r) {
+            if (r.source.dsd_rate > 0)
+                std::cout << "  source: " << r.source.codec << " DSD" << r.source.dsd_rate / 44100 << " (" << r.source.dsd_rate << " Hz), "
+                          << r.source.channels << " ch\n";
+            else
+                std::cout << "  source: " << r.source.codec << " " << r.source.rate << " Hz, " << r.source.channels << " ch"
+                          << (r.source.bits ? ", " + std::to_string(r.source.bits) + "-bit" : "") << "\n";
+            std::cout << "  device: " << r.device_name << " | "
+                      << (api == daphne::OutputApi::Asio ? "ASIO" : api == daphne::OutputApi::WasapiShared ? "shared" : "exclusive")
+                      << " | " << daphne::describe(r.device) << " | latency " << r.latency_ms << " ms\n"
+                      << "  bit-perfect: " << (r.bit_perfect ? "yes" : "no (" + r.not_bit_perfect_reason + ")") << "\n";
+            std::string chain;
+            for (const auto& st : r.chain) chain += (chain.empty() ? "" : " -> ") + st;
+            std::cout << "  filter: " << r.filter << "\n"
+                      << "  dsp: " << (chain.empty() ? "none" : chain) << std::endl;
+        };
+        bool design_line = false;
+        cb.on_event = [&](const std::string& e) {
+            if (design_line) std::cout << "\n";
+            design_line = false;
+            std::cout << "  * " << e << std::endl;
+        };
+        cb.on_design = [&](double fr) {
+            if (fr >= 1.0) {
+                if (design_line) std::cout << "\r  designing filter done" << std::string(40, ' ') << std::endl;
+                design_line = false;
+                return;
+            }
+            const int pct = static_cast<int>(fr * 100.0);
+            const int bar = static_cast<int>(fr * 30.0);
+            std::cout << "\r  designing filter [" << std::string(bar, '#') << std::string(30 - bar, '.') << "] " << pct << "%   "
+                      << std::flush;
+            design_line = true;
+        };
+        cb.on_track_started = [&](const daphne::PlayReport& r) {
+            std::cout << "  * now playing the next track (" << r.source.codec << ", " << r.source.rate << " Hz)" << std::endl;
+        };
+        daphne::Player player;
+        std::string err;
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!player.start(f, cfg.settings, cfg.out, cb, &err, cfg.start)) {
+            std::cout << "  error: " << err << "\n";
+            ++failures;
+            continue;
+        }
+        auto seen = mtime();
+        if (!cfg.next.empty()) player.set_next(cfg.next);
+        // --script: "t:pause", "t:resume", "t:seek=S" at t seconds after the start
+        struct Step {
+            double t;
+            std::string cmd;
+        };
+        std::vector<Step> steps;
+        for (size_t a = 0; a < cfg.script.size();) {
+            size_t b = cfg.script.find(',', a);
+            if (b == std::string::npos) b = cfg.script.size();
+            const std::string item = cfg.script.substr(a, b - a);
+            const size_t colon = item.find(':');
+            if (colon != std::string::npos) steps.push_back({std::stod(item.substr(0, colon)), item.substr(colon + 1)});
+            a = b + 1;
+        }
+        size_t next_step = 0;
+        while (!player.finished()) {
+            const double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            while (next_step < steps.size() && el >= steps[next_step].t) {
+                const std::string& cmd = steps[next_step++].cmd;
+                if (cmd == "pause") player.pause(true);
+                else if (cmd == "resume") player.pause(false);
+                else if (cmd.rfind("seek=", 0) == 0) player.seek(std::stod(cmd.substr(5)));
+                double ml = 0, mr = 0;
+                player.meter(ml, mr);
+                std::cout << "  > " << cmd << " at " << el << " s (position " << player.position_seconds() << " s, peak " << ml << ")"
+                          << std::endl;
+            }
+            if (g_cancel) player.stop();
+            if (cfg.length > 0 && el > cfg.length) player.stop();
+            Sleep(200);
+            if (cfg.watch && mtime() != seen) {
+                seen = mtime();
+                Sleep(100);   // let the editor finish writing
+                PlayConfig nc;
+                if (play_config(args, nc)) {
+                    api = nc.out.api;
+                    std::cout << "  * settings file changed\n";
+                    player.apply(nc.settings, nc.out);
+                } else {
+                    std::cout << "  * settings file has errors; keeping the current settings\n";
+                }
+            }
+        }
+        const double end_pos = player.position_seconds();
+        const bool ended = player.ended();
+        daphne::PlayReport rep;
+        if (!player.wait(&rep, &err)) {
+            std::cout << "  error: " << err << "\n";
+            ++failures;
+            continue;
+        }
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        std::cout << "  played " << rep.frames_played << " frames in " << secs << " s | underruns " << rep.underruns
+                  << " | event timeouts " << rep.event_timeouts << " | max event interval " << rep.max_interval_us / 1000.0
+                  << " ms | clipped " << rep.clipped << (g_cancel ? " | cancelled" : "") << (ended ? " | ended" : "")
+                  << " | last position " << end_pos << " s\n";
+    }
+    return failures ? 2 : 0;
+}
+
+// daphne render-dsp <in> <out.wav> [--settings file] [--channels N] [--float]
+// Runs the whole chain offline: a virtual device at the rate the core asks for, N channels (default:
+// the source's), output.bits integer PCM (or float32). dsd core: the DoP stream (32-bit WAV at the
+// DSD clock / 16) as the player sends it.
+int cmd_render_dsp(std::vector<std::wstring> args) {
+    daphne::Settings s;
+    if (!load_settings_arg(args, s)) return 1;
+    int channels = 0;
+    bool as_float = false;
+    std::vector<std::wstring> files;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == L"--channels" && i + 1 < args.size()) channels = std::stoi(args[++i]);
+        else if (args[i] == L"--float") as_float = true;
+        else files.push_back(args[i]);
+    }
+    if (files.size() != 2) {
+        usage();
+        return 1;
+    }
+    std::string err;
+    auto d = daphne::open_decoder(files[0], &err);
+    if (!d) {
+        std::cerr << "error: " << err << "\n";
+        return 1;
+    }
+    const auto& in = d->info();
+    daphne::DeviceFormat dev;
+    dev.rate = daphne::pcm_output_rate(in.rate, s.output.rate);
+    dev.channels = channels > 0 ? channels : in.channels;
+    if (as_float) dev.type = daphne::SampleType::Float32, dev.container_bits = dev.valid_bits = 32;
+    else if (s.output.bits == 16) dev.type = daphne::SampleType::Int16, dev.container_bits = dev.valid_bits = 16;
+    else if (s.output.bits == 24) dev.type = daphne::SampleType::Packed24, dev.container_bits = dev.valid_bits = 24;
+    else dev.type = daphne::SampleType::Int32, dev.container_bits = dev.valid_bits = 32;
+    constexpr int kChunk = 4096;
+    std::unique_ptr<daphne::DsdEncoder> dsd;
+    daphne::DeviceFormat chain_fmt = dev;
+    if (s.core == daphne::CoreMode::Dsd) {
+        dev.rate = daphne::dop_rate(daphne::dsd_clock(s.modulator.osr));
+        dev.type = daphne::SampleType::Int32, dev.container_bits = dev.valid_bits = 32;
+        chain_fmt = dev;
+        chain_fmt.rate = daphne::modulator_input_rate(in.rate);
+        chain_fmt.type = daphne::SampleType::Float64, chain_fmt.container_bits = chain_fmt.valid_bits = 64;
+        dsd = std::make_unique<daphne::DsdEncoder>();
+        if (!dsd->init(chain_fmt.rate, s.modulator.osr, s.modulator.order, dev, daphne::DsdTransport::Dop, &err)) {
+            std::cerr << "error: " << err << "\n";
+            return 1;
+        }
+    }
+    daphne::DspChain chain;
+    if (!chain.build(s, in, chain_fmt, kChunk, &err)) {
+        std::cerr << "error: " << err << "\n";
+        return 1;
+    }
+    std::string stages;
+    for (const auto& st : chain.stages()) stages += (stages.empty() ? "" : " -> ") + st;
+    std::cout << in.codec << " " << in.rate << " Hz " << in.channels << " ch -> " << daphne::describe(dev) << "\n"
+              << "dsp: " << (stages.empty() ? "none" : stages) << "\n";
+    if (dsd) std::cout << "dsd: " << dsd->describe() << "\n";
+
+    drwav_data_format fmt{};
+    fmt.container = drwav_container_riff;
+    fmt.format = as_float ? DR_WAVE_FORMAT_IEEE_FLOAT : DR_WAVE_FORMAT_PCM;
+    fmt.channels = static_cast<drwav_uint32>(dev.channels);
+    fmt.sampleRate = static_cast<drwav_uint32>(dev.rate);
+    fmt.bitsPerSample = static_cast<drwav_uint32>(dev.container_bits);
+    drwav w;
+    if (!drwav_init_file_write_w(&w, files[1].c_str(), &fmt, nullptr)) {
+        std::cerr << "error: cannot write " << daphne::to_utf8(files[1]) << "\n";
+        return 1;
+    }
+    std::vector<double> buf(static_cast<size_t>(kChunk) * in.channels);
+    std::vector<double> out(static_cast<size_t>(chain.max_output_frames()) * dev.channels);
+    std::vector<uint8_t> bytes(static_cast<size_t>(chain.max_output_frames()) * dev.block_align());
+    int64_t total = 0, clipped = 0;
+    std::vector<uint8_t> dop;
+    auto emit = [&](int n) {
+        if (dsd) {
+            dop.clear();
+            dsd->encode(out.data(), n, dop);
+            drwav_write_pcm_frames(&w, static_cast<drwav_uint64>(dop.size() / dev.block_align()), dop.data());
+            total += static_cast<int64_t>(dop.size() / dev.block_align());
+            return;
+        }
+        clipped += daphne::convert_to_device(out.data(), static_cast<size_t>(n) * dev.channels, dev, bytes.data());
+        drwav_write_pcm_frames(&w, static_cast<drwav_uint64>(n), bytes.data());
+        total += n;
+    };
+    for (;;) {
+        const int n = d->read(buf.data(), kChunk);
+        if (n <= 0) break;
+        emit(chain.process(buf.data(), n, out.data()));
+    }
+    emit(chain.flush(out.data()));
+    drwav_uninit(&w);
+    std::cout << "rendered " << total << " frames, clipped " << clipped << "\n";
+    return 0;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -396,6 +711,9 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     }
     if (a[0] == L"decode-test") return cmd_decode_test(rest);
+    if (a[0] == L"devices") return cmd_devices(!rest.empty() && rest[0] == L"--probe");
+    if (a[0] == L"play") return cmd_play(rest);
+    if (a[0] == L"render-dsp") return cmd_render_dsp(rest);
     if (a[0] == L"filter-dump") return cmd_filter_dump(rest);
     if (a[0] == L"resampler-run") return cmd_resampler_run(rest);
     if (a[0] == L"modulator-test") return cmd_modulator_test(rest);

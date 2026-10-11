@@ -2,6 +2,7 @@
 add_library(daphne_engine STATIC
     src/text.cpp
     src/ring_feeder.cpp
+    src/player.cpp
     src/wasapi_output.cpp
     src/asio_output.cpp
     src/devices_wasapi.cpp

@@ -154,10 +154,10 @@ H_FIXED = {(8, 128): 1.35}
 
 if __name__ == "__main__":
     rows = []
-    # Orders above 9 cannot be realized as one stable 1-bit loop here (the high-order zero polynomial
-    # is ill-conditioned and every H_inf diverges); 9 is the highest order this realization keeps robust.
+    # Two orders: 5 (least ultrasonic noise) and 8 (the quietest audio band). Higher orders lower an audio-band
+    # noise floor that is already far below any DAC's analog noise, at the cost of more ultrasonic noise.
     for osr in (64, 128, 256, 512, 1024):
-        for order in (5, 8, 9):
+        for order in (5, 8):
             best = None
             hs = (H_FIXED[(order, osr)],) if (order, osr) in H_FIXED else (1.5, 1.45, 1.4, 1.35, 1.3, 1.25, 1.2, 1.15, 1.1)
             for h in hs:

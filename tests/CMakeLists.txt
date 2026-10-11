@@ -5,6 +5,7 @@ if(MSVC)
 endif()
 
 add_executable(daphne_tests
+    test_chain.cpp
     test_decoders.cpp
     test_dsd_file.cpp
     test_dsd_output.cpp

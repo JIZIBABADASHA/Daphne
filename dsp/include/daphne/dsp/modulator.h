@@ -5,7 +5,7 @@
 //               feed-forward to the quantizer) with coefficients from an NTF design (Schreier's
 //               synthesizeNTF, optimized zeros) and diagonal state scaling, so every state stays
 //               within +-1 up to the maximum stable input (tools/sdm_design.py, sdm_tables.inc).
-//               Orders 5, 8 and 9; the table for the DSD multiple (64 .. 1024) is picked.
+//               Orders 5 and 8; the table for the DSD multiple (64 .. 1024) is picked.
 //   input       gain 0.5 (full scale -> 50% modulation, the SACD reference level), a DC blocker
 //               (3.5 Hz), and a clip at 0.95 x the maximum stable input (the chain's limiter keeps
 //               the signal below it; the clip is protection)
@@ -34,7 +34,7 @@ namespace daphne::dsp {
 #endif
 class DsdModulator {
 public:
-    // order 5 | 8 | 9 (others round to the nearest of them), osr 64 .. 1024.
+    // order 5 | 8 (others: 8 from 8 up, else 5), osr 64 .. 1024.
     DsdModulator(int fs_in, int osr, int order);
     ~DsdModulator();
     DsdModulator(const DsdModulator&) = delete;

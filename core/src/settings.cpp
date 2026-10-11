@@ -254,7 +254,7 @@ LoadResult settings_from_json(const json& j) {
     r.number(j, "headroom_db", "", s.headroom_db, -24.0, 24.0);
     if (auto* o = r.object(j, "dsd_modulator", "")) {
         r.check_keys(*o, "dsd_modulator", {"order", "osr"});
-        r.integer(*o, "order", "dsd_modulator", s.modulator.order, 0, 0, {5, 8, 9});
+        r.integer(*o, "order", "dsd_modulator", s.modulator.order, 0, 0, {5, 8});
         r.integer(*o, "osr", "dsd_modulator", s.modulator.osr, 0, 0, {64, 128, 256, 512, 1024});
     }
     if (auto* o = r.object(j, "design", "")) {
