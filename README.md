@@ -52,7 +52,7 @@ flowchart TD
     N1 -->|dsf · dff| N3["N3 DSD files<br/>DSF / DFF reader"]
     N3 -->|"device takes no DSD:<br/>→ PCM, +6 dB"| N5
     N3 -->|device takes DSD: sent as is| N20
-    N2 --> N5["N5 downmix<br/>BS.775, more than 2 channels"]
+    N2 --> N5["N5 downmix<br/>BS.775-based, more than 2 channels"]
     subgraph SR [at the source rate]
         N15["N15 gain<br/>volume + ReplayGain headroom"] --> N16[N16 crossfeed] --> N17[N17 parametric EQ]
     end
@@ -72,7 +72,7 @@ flowchart TD
 | Stage | What it does |
 |---|---|
 | **Decode** (N1–N3) | dr_wav / dr_flac / minimp3 for WAV, AIFF, FLAC and MP3; FFmpeg for everything else (AAC, ALAC, Opus, …), with MP4 gapless trimming. DSF and DFF (uncompressed) are read natively; the DSF block padding and trailing tags are never played. |
-| **Downmix** (N5) | ITU-R BS.775 matrix to stereo for multichannel sources. |
+| **Downmix** (N5) | Multichannel to stereo with the ITU-R BS.775 centre / surround coefficients, plus the LFE at −6 dB (not part of BS.775) and a scale that keeps one full-scale channel from clipping. |
 | **Gain** (N15) | Digital volume plus per-track ReplayGain headroom, in one gliding gain stage. |
 | **Crossfeed** (N16) | Each side gets the other through a one-pole low-pass (100–3000 Hz), so a centred sound keeps its level. |
 | **Parametric EQ** (N17) | Peaking, shelving, low- and high-pass biquads at the source rate, with an automatic preamp. Changes glide or crossfade. |
