@@ -1,6 +1,6 @@
 """Live playback through the VB Hi-Fi Cable (WASAPI exclusive into "Hi-Fi Cable Input", device 0 in `daphne devices`).
 
-  1. bit-perfect: random 24- and 16-bit files (full-scale extremes included), default settings: every sample
+  1. bit-perfect: random 24- and 16-bit files (full-scale extremes included), default processing: every sample
      arrives unchanged
   2. gapless across sample rates: A 44.1 kHz, B 44.1 / 88.2 kHz, one continuous 1 kHz tone, output.rate 176400
      (A x4, B x2, the device stays open); fitted with one continuous sine in 40 ms windows. The linear-phase
@@ -11,6 +11,10 @@
      reported
   4. DoP through pause / resume / seek: the DoP marker sequence never breaks (DSD64, 176.4 kHz)
 
+Every test plays with output.buffer_ms 50: the cable clocks itself by the 15.6 ms system tick (device events come
+31 / 31 / 16 ms apart), and with the default 25 ms buffer it now and then runs short and pads a few ms of zeros
+(about 1 run in 4; 10 ms: every run, 50 ms: none in 16).
+
   python live.py
 """
 import ctypes, json, os, struct, subprocess, threading, time
@@ -20,6 +24,7 @@ from common import EXE, ROOT, path, run
 
 DLL = os.path.join(ROOT, "build", "bin", "Release", "daphne_core.dll")
 fails = 0
+CABLE = {"buffer_ms": 50}   # output settings every test adds (see above)
 
 
 def check(label, ok, detail=""):
@@ -37,10 +42,10 @@ def play(args, rec_fs, max_s=15):
 
 
 # ---------------------------------------------------------------- 1. bit-perfect
-print("1. bit-perfect (44.1 kHz, default settings)")
+print("1. bit-perfect (44.1 kHz, default processing)")
 rng = np.random.default_rng(7)
 js = path("plain.json")
-json.dump({}, open(js, "w"))
+json.dump({"output": CABLE}, open(js, "w"))
 for bits in (24, 16):
     n = 44100 * 4
     lim = 2 ** (bits - 1)
@@ -76,7 +81,7 @@ for rate_b, phase, limit in ((44100, "linear", -120), (88200, "linear", -60), (8
     sf.write(fa, tone(44100, 0.0, SEC), 44100, subtype="PCM_24")
     sf.write(fb, tone(rate_b, SEC, SEC), rate_b, subtype="PCM_24")
     gj = path("gx.json")
-    json.dump({"output": {"rate": "176400"}, "filter": {"phase": phase}}, open(gj, "w"))
+    json.dump({"output": {"rate": "176400", **CABLE}, "filter": {"phase": phase}}, open(gj, "w"))
     r, log = play(["--settings", gj, "--next", fb, fa], RFS)
     y = r[:, 0] / 2 ** 31
     on = np.flatnonzero(np.abs(y) > 0.01)
@@ -116,7 +121,7 @@ poller = []
 
 def start():
     err = ctypes.create_string_buffer(512)
-    st = {"output": {"device": "0"}, "headroom_db": -6.0}
+    st = {"output": {"device": "0", **CABLE}, "headroom_db": -6.0}
     rc = dc.dc_load(p, fa, json.dumps(st).encode(), 0.0, 1, err, len(err))
     if rc != 0:
         print("dc_load failed", rc, err.value)

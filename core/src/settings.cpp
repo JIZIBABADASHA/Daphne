@@ -159,7 +159,7 @@ long rate_value(const std::string& r) {
 
 void read_output(Reader& r, const json& o, OutputSettings& s) {
     const std::string p = "output";
-    r.check_keys(o, p, {"api", "device", "rate", "dsd", "dsd_pcm_lowpass", "dsd_pcm_limiter", "max_dsd", "dsd_lead_in_ms"});
+    r.check_keys(o, p, {"api", "device", "rate", "dsd", "dsd_pcm_lowpass", "dsd_pcm_limiter", "max_dsd", "dsd_lead_in_ms", "buffer_ms"});
     r.enumeration(o, "api", p, s.api, kOutputApi);
     r.string(o, "device", p, s.device);
     std::string rate = s.rate;
@@ -171,6 +171,7 @@ void read_output(Reader& r, const json& o, OutputSettings& s) {
     r.boolean(o, "dsd_pcm_limiter", p, s.dsd_pcm_limiter);
     r.integer(o, "max_dsd", p, s.max_dsd, 0, 0, {0, 64, 128, 256, 512});
     r.integer(o, "dsd_lead_in_ms", p, s.dsd_lead_in_ms, 0, 2000);
+    r.integer(o, "buffer_ms", p, s.buffer_ms, 0, 500);
 }
 
 void read_filter(Reader& r, const json& o, FilterSettings& s) {
@@ -290,7 +291,8 @@ json settings_to_json(const Settings& s) {
           {"dsd_pcm_lowpass", s.output.dsd_pcm_lowpass},
           {"dsd_pcm_limiter", s.output.dsd_pcm_limiter},
           {"max_dsd", s.output.max_dsd},
-          {"dsd_lead_in_ms", s.output.dsd_lead_in_ms}}},
+          {"dsd_lead_in_ms", s.output.dsd_lead_in_ms},
+          {"buffer_ms", s.output.buffer_ms}}},
         {"core", to_name(kCoreMode, s.core)},
         {"filter",
          {{"taps", s.filter.taps},

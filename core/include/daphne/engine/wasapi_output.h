@@ -16,6 +16,9 @@ namespace daphne {
 struct WasapiOptions {
     std::string device;      // endpoint ID, list index ("0", "1", ...) or empty = default
     bool exclusive = true;
+    // Device buffer in ms, 0 = default (exclusive: the device period, at least 25 ms; shared: 100 ms).
+    // Exclusive: a buffer the device does not accept falls back to the default (buffer_fallback()).
+    int buffer_ms = 0;
 };
 
 class WasapiOutput final : public AudioOutput {
@@ -34,6 +37,8 @@ public:
     std::string device_name() const override { return name_; }
     double latency_ms() const override { return latency_ms_; }
     int buffer_frames() const override { return buffer_frames_; }
+    // The buffer asked for (WasapiOptions::buffer_ms) failed to initialize; the default is used.
+    bool buffer_fallback() const { return buffer_fallback_; }
 
     // Start the render thread reading from ring. When eof is set and the ring runs dry,
     // drained() becomes true (the device keeps getting silence until stop()).
@@ -58,6 +63,7 @@ private:
     std::string name_;
     double latency_ms_ = 0;
     int buffer_frames_ = 0;
+    bool buffer_fallback_ = false;
     ByteRing* ring_ = nullptr;
     const std::atomic<bool>* eof_ = nullptr;
     std::atomic<bool> drained_{false};

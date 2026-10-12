@@ -33,14 +33,15 @@ constexpr int kChunk = 4096;
 constexpr double kFadeSeconds = 0.05;
 constexpr double kPi = 3.141592653589793;
 
-std::unique_ptr<AudioOutput> open_output(const OutputChoice& out, int rate, int channels, std::string* error, bool dsd = false) {
+std::unique_ptr<AudioOutput> open_output(const OutputChoice& out, int buffer_ms, int rate, int channels, std::string* error,
+                                         bool dsd = false) {
     if (out.api == OutputApi::Asio) {
         auto a = std::make_unique<AsioOutput>();
         if (!a->open({out.device, dsd}, rate, channels, error)) return nullptr;
         return a;
     }
     auto w = std::make_unique<WasapiOutput>();
-    if (!w->open({out.device, out.api != OutputApi::WasapiShared}, rate, channels, error)) return nullptr;
+    if (!w->open({out.device, out.api != OutputApi::WasapiShared, buffer_ms}, rate, channels, error)) return nullptr;
     return w;
 }
 
@@ -321,6 +322,18 @@ struct Player::Impl {
         return s.empty() ? "none" : s;
     }
 
+    // about 0.5 s, and at least three device buffers (a long output.buffer_ms takes a whole buffer per event)
+    size_t ring_bytes() const {
+        return std::max(static_cast<size_t>(rep.device.frame_rate()) * block / 2, static_cast<size_t>(dev->buffer_frames()) * 3 * block);
+    }
+
+    // output.buffer_ms the device did not take (WASAPI exclusive): it runs with its default buffer
+    void note_buffer_fallback() {
+        if (auto* w = dynamic_cast<WasapiOutput*>(dev.get()); w && w->buffer_fallback())
+            event("output.buffer_ms: the device does not take a " + std::to_string(s.output.buffer_ms) +
+                  " ms buffer, playing with its default (" + std::to_string(std::lround(dev->latency_ms())) + " ms)");
+    }
+
     void event(const std::string& e) {
         if (cb.on_event) cb.on_event(e);
     }
@@ -385,7 +398,7 @@ struct Player::Impl {
             fading = false;
             next.reset();
             fc.clear(), fn.clear(), carry.clear();
-            dev = open_output(out, rates[attempt].rate, src.channels, &e, rates[attempt].native);
+            dev = open_output(out, s.output.buffer_ms, rates[attempt].rate, src.channels, &e, rates[attempt].native);
             if (!dev) {
                 if (fail_attempt()) return false;
                 continue;
@@ -405,6 +418,7 @@ struct Player::Impl {
             rep.device = dev->format();
             rep.device_name = dev->device_name();
             rep.latency_ms = dev->latency_ms();
+            note_buffer_fallback();
             if (auto* a = dynamic_cast<AsioOutput*>(dev.get())) {
                 std::lock_guard<std::mutex> l(diag_m);
                 if (!a->supported_rates().empty()) asio_rates = a->supported_rates();
@@ -475,7 +489,7 @@ struct Player::Impl {
             block = rep.device.block_align();
             abs_out = from * ratio;
             fc.ch = fn.ch = carry.ch = dch;
-            ring = std::make_unique<ByteRing>(static_cast<size_t>(rep.device.frame_rate()) * block / 2);   // about 0.5 s
+            ring = std::make_unique<ByteRing>(ring_bytes());
             dsp.assign(static_cast<size_t>(cur->max_output_frames()) * dch, 0.0);
             tmp_c = dsp;
             tmp_n = dsp;
@@ -1185,9 +1199,12 @@ struct Player::Impl {
         return is_dsd_path(cur_path) && ns.output.dsd_pcm_lowpass != s.output.dsd_pcm_lowpass;
     }
 
+    // the WASAPI device buffer (ASIO: the driver's)
+    bool buffer_changes(const Settings& ns) const { return out.api != OutputApi::Asio && ns.output.buffer_ms != s.output.buffer_ms; }
+
     bool needs_restart(const Settings& ns, const OutputChoice& no) const {
         return !(no == out) || ns.core != s.core || requested_rate(ns, rep.source.rate) != want || modulator_key(ns) != modulator_key(s) ||
-               decoder_changes(ns);
+               decoder_changes(ns) || buffer_changes(ns);
     }
 
     // drain = false: the device is reopened as it is (a driver reset): what is queued is dropped.
@@ -1328,7 +1345,7 @@ struct Player::Impl {
         if (s.output.dsd != DsdMode::Native) at.push_back({di.dsd_rate / 16, false});
         std::string e = at.empty() ? "output.dsd = native needs an ASIO driver with a DSD mode" : "";
         for (const auto& a : at) {
-            dev = open_output(out, a.rate, di.channels, &e, a.native);
+            dev = open_output(out, s.output.buffer_ms, a.rate, di.channels, &e, a.native);
             if (!dev) continue;
             if (dev->format().rate != a.rate || dev->format().channels != di.channels) {
                 e = "the device locked " + describe(dev->format()) + " instead of " + std::to_string(a.rate) + " Hz, " +
@@ -1344,6 +1361,7 @@ struct Player::Impl {
             rep.device = dev->format();
             rep.device_name = dev->device_name();
             rep.latency_ms = dev->latency_ms();
+            note_buffer_fallback();
             crate = di.dsd_rate / 8;
             ratio = 1;
             dch = rep.device.channels;
@@ -1352,7 +1370,7 @@ struct Player::Impl {
             abs_out = from;
             eof = false;
             pend = pend_off = 0;
-            ring = std::make_unique<ByteRing>(static_cast<size_t>(rep.device.frame_rate()) * block / 2);
+            ring = std::make_unique<ByteRing>(ring_bytes());
             dsd_in.assign(static_cast<size_t>(kChunk) * 4 * di.channels, 0);
             bytes.assign(static_cast<size_t>(kChunk) * 4 * block, 0);
             // silence first, so the DAC has switched to DSD and locked before the music (output.dsd_lead_in_ms;
@@ -1399,7 +1417,7 @@ struct Player::Impl {
     // DSD direct: only the output can change (no processing applies to DSD sent directly).
     // reset: a driver reset reopens the device as it is (nothing more is queued for it).
     bool handle_dsd(const Settings& ns, const OutputChoice& no, bool reset = false) {
-        const bool reopen = reset || !(no == out) || ns.output.dsd != s.output.dsd;
+        const bool reopen = reset || !(no == out) || ns.output.dsd != s.output.dsd || buffer_changes(ns);
         s = ns;
         if (!reopen) {
             event("DSD file played directly: DSP settings do not apply");
@@ -1467,7 +1485,7 @@ struct Player::Impl {
                 // shared mode runs at the mixer rate: convert to it when it divides the DSD rate
                 if (out.api == OutputApi::WasapiShared) {
                     std::string pe;
-                    if (auto probe = open_output(out, dsdf->info().dsd_rate / 16, dsdf->info().channels, &pe)) {
+                    if (auto probe = open_output(out, s.output.buffer_ms, dsdf->info().dsd_rate / 16, dsdf->info().channels, &pe)) {
                         const int mix = probe->format().rate;
                         if (mix > 0 && dsdf->info().dsd_rate % (mix * 8) == 0) dsd_pcm_rate = mix;
                     }

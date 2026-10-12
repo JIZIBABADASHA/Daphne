@@ -118,9 +118,9 @@
   /** 升頻 (the upsampler and its target, or the DSD rate and order) → 濾波器 (PCM 升頻 and 轉成 DSD; apodizing first). */
   function coreSettings(host, ui) {
     const op = o();
-    // the core buffers on its own (about 0.5 s ahead of the device): MIKU's 緩衝大小 does not apply to it; it picks its
-    // rate in its own 升頻 group: no 取樣率 card
-    if (ui.hide) { ui.hide('buffer'); ui.hide('rate'); }
+    // MIKU's 緩衝大小 is the WASAPI device buffer (output.buffer_ms); the core picks its rate in its own 升頻 group: no
+    // 取樣率 card
+    if (ui.hide) ui.hide('rate');
     watch(host, () => [App.settings.fixedRate, App.settings.maxDsd, App.settings.outputMode].join('|'));
     if (App.settings.outputMode === 'shared') {
       // WASAPI shared: Windows' mixer converts to the system format, so Daphne neither upsamples nor converts to DSD

@@ -223,16 +223,31 @@ bool WasapiOutput::open(const WasapiOptions& opt, int rate, int channels, std::s
     const DWORD flags = exclusive_ ? AUDCLNT_STREAMFLAGS_EVENTCALLBACK
                         : impl_->autoconvert ? AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
                                              : 0;
-    REFERENCE_TIME duration = exclusive_ ? std::max<REFERENCE_TIME>(def_period, 250000) : 1000000;
-    REFERENCE_TIME period = exclusive_ ? duration : 0;
-    hr = impl_->client->Initialize(mode, flags, duration, period, &impl_->wfx.Format, nullptr);
-    if (hr == kBufferNotAligned) {
-        UINT32 frames = 0;
-        impl_->client->GetBufferSize(&frames);
-        duration = static_cast<REFERENCE_TIME>(10000000.0 * frames / fmt_.rate + 0.5);
-        period = exclusive_ ? duration : 0;
+    // Exclusive: one buffer = one device period. A device whose clock is coarse (a virtual cable timed by
+    // the 15.6 ms system tick) needs a longer one: output.buffer_ms.
+    const REFERENCE_TIME def_duration = exclusive_ ? std::max<REFERENCE_TIME>(def_period, 250000) : 1000000;
+    const REFERENCE_TIME want = opt.buffer_ms > 0
+                                    ? std::max<REFERENCE_TIME>(static_cast<REFERENCE_TIME>(opt.buffer_ms) * 10000, exclusive_ ? def_period : 0)
+                                    : def_duration;
+    auto initialize = [&](REFERENCE_TIME duration) {
+        REFERENCE_TIME period = exclusive_ ? duration : 0;
+        HRESULT r = impl_->client->Initialize(mode, flags, duration, period, &impl_->wfx.Format, nullptr);
+        if (r == kBufferNotAligned) {
+            UINT32 frames = 0;
+            impl_->client->GetBufferSize(&frames);
+            duration = static_cast<REFERENCE_TIME>(10000000.0 * frames / fmt_.rate + 0.5);
+            period = exclusive_ ? duration : 0;
+            r = activate();
+            if (SUCCEEDED(r)) r = impl_->client->Initialize(mode, flags, duration, period, &impl_->wfx.Format, nullptr);
+        }
+        return r;
+    };
+    buffer_fallback_ = false;
+    hr = initialize(want);
+    if (FAILED(hr) && want != def_duration) {   // the device does not take that buffer: the default
         hr = activate();
-        if (SUCCEEDED(hr)) hr = impl_->client->Initialize(mode, flags, duration, period, &impl_->wfx.Format, nullptr);
+        if (SUCCEEDED(hr)) hr = initialize(def_duration);
+        buffer_fallback_ = SUCCEEDED(hr);
     }
     if (FAILED(hr)) return fail(hr_text("Initialize", hr));
 
@@ -286,11 +301,13 @@ void WasapiOutput::render_exclusive() {
     QueryPerformanceFrequency(&freq);
     const size_t bytes = static_cast<size_t>(buffer_frames_) * fmt_.block_align();
     HANDLE waits[2] = {impl_->stop_event, impl_->audio_event};
+    // a stall: no event for two buffers (at least 50 ms)
+    const DWORD stall_ms = std::max<DWORD>(50, static_cast<DWORD>(2000.0 * buffer_frames_ / fmt_.rate));
     for (;;) {
-        const DWORD w = WaitForMultipleObjects(2, waits, FALSE, 50);
+        const DWORD w = WaitForMultipleObjects(2, waits, FALSE, stall_ms);
         if (w == WAIT_OBJECT_0) break;
         if (w == WAIT_TIMEOUT) {
-            stats_.event_timeouts++;   // > 50 ms without a device event: the device clock stalled
+            stats_.event_timeouts++;   // the device clock stalled
             continue;
         }
         QueryPerformanceCounter(&now);

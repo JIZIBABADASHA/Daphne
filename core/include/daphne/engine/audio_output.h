@@ -16,7 +16,7 @@ namespace daphne {
 struct OutputStats {
     std::atomic<int64_t> callbacks{0};
     std::atomic<int64_t> underruns{0};        // callbacks that found too little data before EOF
-    std::atomic<int64_t> event_timeouts{0};   // WASAPI: > 50 ms without a device event
+    std::atomic<int64_t> event_timeouts{0};   // WASAPI: no device event for two buffers (at least 50 ms)
     std::atomic<int64_t> max_interval_us{0};
     std::atomic<int64_t> late_callbacks{0};   // ASIO: callbacks more than 1.5 buffer periods apart
 };

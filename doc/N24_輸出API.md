@@ -13,7 +13,7 @@
 - `reset_requested()`：驅動要求重新開啟（播放器會重開並在原位置繼續）。
 - 暫停 / DoP / 電平委派給 N23 的送料。
 
-統計（`OutputStats`，原子變數）：回呼數、underrun、WASAPI 事件逾時（> 50 ms 沒有裝置事件）、最長回呼間隔、ASIO 遲到回呼（相鄰回呼間隔 > 1.5 個緩衝區週期）。
+統計（`OutputStats`，原子變數）：回呼數、underrun、WASAPI 事件逾時（兩個緩衝長度、至少 50 ms 沒有裝置事件）、最長回呼間隔、ASIO 遲到回呼（相鄰回呼間隔 > 1.5 個緩衝區週期）。
 
 ## WASAPI
 
@@ -22,6 +22,7 @@
 | 獨占 | 事件驅動（`AUDCLNT_STREAMFLAGS_EVENTCALLBACK`）。格式搜尋順序：取樣率為要求值、同家族逐次減半，再試 192k / 96k / 48k / 44.1k；樣本格式為 int32、24-in-32、float32、packed24、int16。每種組合先以 `IsFormatSupported` 檢查 |
 | 共享 | 系統混音器格式；取樣率不同時請 Windows 轉換（`AUTOCONVERTPCM`），以正確速度播放（共享模式本來就不是 bit-perfect） |
 
+- 緩衝長度：`output.buffer_ms`（0–500），0 為預設（獨占：裝置週期、至少 25 ms，一個緩衝等於一個週期；共享：100 ms）。時鐘粗糙的裝置需要較長的緩衝：VB Hi-Fi Cable 以 15.6 ms 的系統計時器計時（事件間隔 31 / 31 / 16 ms 輪流），25 ms 緩衝偶爾來不及，裝置端補幾 ms 的零（約 4 次 1 次；10 ms 每次都有，50 ms 16 次都沒有）。播放器的 underrun 計數看不到這種情形（環形緩衝始終有資料）。裝置不接受指定的長度時退回預設，並記錄一則訊息。MIKU 的「緩衝大小」對應這個設定。
 - 緩衝區未對齊（`AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED`）時，以裝置回報的對齊大小重新初始化。
 - 開始前先送一個緩衝區的靜音（pre-roll）。
 - 裝置失效（`AUDCLNT_E_DEVICE_INVALIDATED`）→ `failed()`。
