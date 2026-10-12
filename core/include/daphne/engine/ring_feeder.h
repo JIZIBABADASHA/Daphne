@@ -10,6 +10,8 @@
 //   underrun        zeros (PCM), 0x69 (native DSD), DoP silence (DoP, before the end of the
 //                   stream; the stream itself ends with PCM silence so the DAC leaves DSD mode)
 //   level meter     peaks of what is being heard (PCM formats), reset when read
+//   fade samples    integer formats are rounded with TPDF dither (the fade changes the level after
+//                   the final quantizer, N21)
 //
 // Everything here runs on the audio thread except the setters / meter(), which are atomic.
 
@@ -43,8 +45,11 @@ public:
 
 private:
     enum { kPlaying, kFadingOut, kPaused, kFadingIn };
+    bool fill_from(uint8_t* dst, int frames, ByteRing* ring, bool eof, OutputStats& stats);
+    void silence(uint8_t* dst, int frames, bool dop);
     double read_sample(const uint8_t* p) const;
-    void write_sample(uint8_t* p, double v) const;
+    void write_sample(uint8_t* p, double v);
+    double tpdf();
     void put_dop_idle(uint8_t* frame);
     uint8_t marker_of(const uint8_t* frame) const;
 
@@ -55,6 +60,7 @@ private:
     std::atomic<int> state_{kPlaying};
     uint8_t last_marker_ = 0;      // DoP marker of the last frame sent
     uint64_t idle_frames_ = 0;     // DoP silence frames since the pause began
+    uint64_t rng_ = 0x9E3779B97F4A7C15ull;   // dither for the pause / resume fades
     std::atomic<uint64_t> peak_l_{0}, peak_r_{0};   // bit patterns of doubles
 };
 

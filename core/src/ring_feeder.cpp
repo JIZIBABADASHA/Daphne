@@ -75,7 +75,20 @@ double RingFeeder::read_sample(const uint8_t* p) const {
     }
 }
 
-void RingFeeder::write_sample(uint8_t* p, double v) const {
+// TPDF dither, +-1 LSB in output units (xorshift64*; audio thread only)
+double RingFeeder::tpdf() {
+    auto next = [this] {
+        rng_ ^= rng_ >> 12, rng_ ^= rng_ << 25, rng_ ^= rng_ >> 27;
+        return static_cast<double>((rng_ * 0x2545F4914F6CDD1Dull) >> 11) * 1.1102230246251565e-16;   // [0, 1)
+    };
+    const double u1 = next(), u2 = next();
+    return u1 - u2;
+}
+
+// v is a faded sample: integer formats are rounded with TPDF dither, as the final quantizer does (N21);
+// the end of a fade (0) stays digital silence
+void RingFeeder::write_sample(uint8_t* p, double v) {
+    const double d = v == 0.0 ? 0.0 : tpdf();
     switch (f_.type) {
         case SampleType::Float32: {
             const float x = static_cast<float>(v);
@@ -84,25 +97,25 @@ void RingFeeder::write_sample(uint8_t* p, double v) const {
         }
         case SampleType::Float64: std::memcpy(p, &v, 8); return;
         case SampleType::Int16: {
-            const int32_t x = static_cast<int32_t>(std::lrint(std::clamp(v * 32768.0, -32768.0, 32767.0)));
+            const int32_t x = static_cast<int32_t>(std::lrint(std::clamp(v * 32768.0 + d, -32768.0, 32767.0)));
             p[0] = static_cast<uint8_t>(x), p[1] = static_cast<uint8_t>(x >> 8);
             return;
         }
         case SampleType::Packed24: {
-            const int32_t x = static_cast<int32_t>(std::lrint(std::clamp(v * 8388608.0, -8388608.0, 8388607.0)));
+            const int32_t x = static_cast<int32_t>(std::lrint(std::clamp(v * 8388608.0 + d, -8388608.0, 8388607.0)));
             p[0] = static_cast<uint8_t>(x), p[1] = static_cast<uint8_t>(x >> 8), p[2] = static_cast<uint8_t>(x >> 16);
             return;
         }
         case SampleType::Int32Low: {
             const double s = std::ldexp(1.0, f_.valid_bits - 1);
-            const int32_t x = static_cast<int32_t>(std::llrint(std::clamp(v * s, -s, s - 1)));
+            const int32_t x = static_cast<int32_t>(std::llrint(std::clamp(v * s + d, -s, s - 1)));
             std::memcpy(p, &x, 4);
             return;
         }
         default: {
             const int32_t valid = f_.type == SampleType::Int24In32 ? 24 : 32;
             const double s = std::ldexp(1.0, valid - 1);
-            int64_t x = std::llrint(std::clamp(v * s, -s, s - 1));
+            int64_t x = std::llrint(std::clamp(v * s + d, -s, s - 1));
             const int32_t y = static_cast<int32_t>(x << (32 - valid));
             std::memcpy(p, &y, 4);
             return;
@@ -135,7 +148,24 @@ void RingFeeder::put_dop_idle(uint8_t* frame) {
     ++idle_frames_;
 }
 
+void RingFeeder::silence(uint8_t* dst, int frames, bool dop) {
+    if (!pcm_) std::memset(dst, 0x69, static_cast<size_t>(frames) * block_);
+    else if (dop)
+        for (int i = 0; i < frames; ++i) put_dop_idle(dst + static_cast<size_t>(i) * block_);
+    else std::memset(dst, 0, static_cast<size_t>(frames) * block_);
+}
+
 bool RingFeeder::fill(uint8_t* dst, int frames, ByteRing* ring, bool eof, OutputStats& stats) {
+    if (!ring->begin_read()) {   // the player is clearing the ring (seek, stop): silence this time
+        silence(dst, frames, dop_.load(std::memory_order_acquire));
+        return false;
+    }
+    const bool drained = fill_from(dst, frames, ring, eof, stats);
+    ring->end_read();
+    return drained;
+}
+
+bool RingFeeder::fill_from(uint8_t* dst, int frames, ByteRing* ring, bool eof, OutputStats& stats) {
     const bool want = want_pause_.load(std::memory_order_acquire);
     const bool dop = dop_.load(std::memory_order_acquire);
     int st = state_.load(std::memory_order_relaxed);
@@ -158,10 +188,7 @@ bool RingFeeder::fill(uint8_t* dst, int frames, ByteRing* ring, bool eof, Output
 
     bool drained = false;
     if (st == kPaused) {
-        if (!pcm_) std::memset(dst, 0x69, static_cast<size_t>(frames) * block_);
-        else if (dop)
-            for (int i = 0; i < frames; ++i) put_dop_idle(dst + static_cast<size_t>(i) * block_);
-        else std::memset(dst, 0, static_cast<size_t>(frames) * block_);
+        silence(dst, frames, dop);
         state_.store(st, std::memory_order_release);
         return false;
     }
