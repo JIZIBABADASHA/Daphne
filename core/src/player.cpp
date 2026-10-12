@@ -171,7 +171,8 @@ struct Player::Impl {
         int64_t at_in = 0;           // stream input frame where the track starts
         AudioInfo info;
         std::wstring path;
-        // gapless across sample rates (the same output, cross_switch): the new chain's output starts at device
+        // gapless through a new chain (another sample rate on the same output, or the same rate with a format
+        // the old chain does not fit; cross_switch): the new chain's output starts at device
         // frame at_out and its first sample is heard new_delay later. Until then the hearing side stays on the
         // old segment, whose parameters are kept here; a seek or restart before it goes back to old_chain.
         bool cross = false;
@@ -184,8 +185,9 @@ struct Player::Impl {
     };
     std::deque<Switch> switches;     // gapless tracks decoded but not yet heard
     int64_t h_base = 0;              // device frame of the heard segment's input frame 0 (gapless across rates)
-    // The next track (set_next) opened ahead on a background thread, and for another sample rate on the same
-    // output its chain built too, so the boundary does not wait for a slow disk or a filter design.
+    // The next track (set_next) opened ahead on a background thread, and its chain built too when the current
+    // one does not fit it (another sample rate on the same output, or the same rate with another format), so
+    // the boundary does not wait for a slow disk or a filter design.
     struct Prep {
         std::wstring path;
         std::atomic<bool> opened{false}, done{false}, cancel{false};
@@ -496,17 +498,26 @@ struct Player::Impl {
         }
         rep.chain = cur->stages();
         rep.filter = current_filter();
+        report_bit_perfect();
+        if (cb.on_start) cb.on_start(rep);
+        kick_cache_trim();
+        return true;
+    }
+
+    // bit_perfect and its reason for the heard track and the chain playing it (PCM path; a DSD file sent
+    // directly sets its own). Again whenever either changes: a gapless track, an in-place change, a new chain.
+    void report_bit_perfect() {
+        const DspChain* c = heard_chain();
+        if (!c) return;
+        const AudioInfo& src = rep.source;
         rep.not_bit_perfect_reason.clear();
         if (src.dsd_pcm) rep.not_bit_perfect_reason = "DSD converted to PCM";
         else if (!src.lossless_int) rep.not_bit_perfect_reason = "source is not integer PCM";
-        else if (!cur->transparent()) rep.not_bit_perfect_reason = "DSP active";
+        else if (!c->transparent()) rep.not_bit_perfect_reason = "DSP active";
         else if (effective_bits(rep.device) < src.bits)
             rep.not_bit_perfect_reason =
                 "device resolution " + std::to_string(effective_bits(rep.device)) + "-bit < source " + std::to_string(src.bits) + "-bit";
         rep.bit_perfect = rep.not_bit_perfect_reason.empty();
-        if (cb.on_start) cb.on_start(rep);
-        kick_cache_trim();
-        return true;
     }
 
     // Mix what both chains have produced during a crossfade into dsp; returns frames.
@@ -540,6 +551,7 @@ struct Player::Impl {
         fading = false;
         rep.chain = cur->stages();
         rep.filter = current_filter();
+        report_bit_perfect();
         event("now playing with filter: " + rep.filter + " | dsp: " + join(rep.chain));
         if (cb.on_changed) cb.on_changed(rep);
     }
@@ -707,6 +719,12 @@ struct Player::Impl {
             if (it->cross) return it->at_out;
         return h_base;
     }
+    // The chain the heard track plays through: before a pending cross switch, the old one it keeps.
+    const DspChain* heard_chain() const {
+        for (const auto& w : switches)
+            if (w.cross) return w.old_chain.get();
+        return cur.get();
+    }
     bool cross_pending() const {
         for (const auto& w : switches)
             if (w.cross) return true;
@@ -740,11 +758,12 @@ struct Player::Impl {
             rep.source = w.info;
             cur_path = w.path;
             switches.pop_front();
-            if (cross) {
-                rep.chain = cur->stages();
-                rep.filter = current_filter();
+            if (!dsdf) {   // a DSD file sent directly has no chain and stays bit-perfect
+                if (cross) rep.filter = current_filter();
+                rep.chain = heard_chain()->stages();   // a cross switch's new chain; the track's own headroom
+                report_bit_perfect();                  // the track's own format
             }
-            event(cross ? "gapless: next track (another sample rate on the same output)" : "gapless: next track");
+            event(cross ? "gapless: next track (through its own chain: another sample rate or format)" : "gapless: next track");
             if (cb.on_track_started) cb.on_track_started(rep);
         }
     }
@@ -756,9 +775,10 @@ struct Player::Impl {
         return settings_to_json(cs).dump() + "|" + describe(cf);
     }
 
-    // Opens the next track (set_next) on a background thread as soon as it is known; for a PCM track at another
-    // sample rate whose chain would play on the same output, also builds that chain. The boundary uses what is
-    // ready (try_gapless) and otherwise behaves as without it.
+    // Opens the next track (set_next) on a background thread as soon as it is known; for a PCM track the current
+    // chain does not fit (another sample rate whose chain would play on the same output, or the same rate with
+    // another word length / DSD-to-PCM / layout: DspChain::fits), also builds its chain. The boundary uses what
+    // is ready (try_gapless) and otherwise behaves as without it.
     void kick_prepare() {
         for (auto it = prep_threads.begin(); it != prep_threads.end();) {   // reap the finished ones
             if (it->first->done && it->first != prep) {
@@ -782,8 +802,9 @@ struct Player::Impl {
         const Settings cs = chain_settings(s, run_osr);
         const DeviceFormat cf = chain_fmt;
         const int cr = crate, cch = ch, cur_rate = decoding_info().rate;
+        const DspChain::Shape shape = cur ? cur->shape() : DspChain::Shape{};
         p->key = chain_key(cs, cf);
-        std::thread worker([p, dsd, cs, cf, cr, cch, cur_rate] {
+        std::thread worker([p, dsd, cs, cf, cr, cch, cur_rate, shape] {
             std::string e;
             if (dsd) {
                 auto f = std::make_unique<DsdFile>();
@@ -798,7 +819,9 @@ struct Player::Impl {
             p->dec = std::move(d);   // try_gapless may take it as soon as opened is set
             p->opened = true;
             if (have && !p->cancel) {
-                if (src.rate != cur_rate && src.channels == cch && same_output(cs, src.rate, cr)) {
+                const bool other_rate = src.rate != cur_rate && same_output(cs, src.rate, cr);
+                const bool other_format = src.rate == cur_rate && !DspChain::fits(shape, cs, src);
+                if (src.channels == cch && (other_rate || other_format)) {
                     try {
                         dsp::CancelScope cancel_scope(&p->cancel);
                         auto c = std::make_unique<DspChain>();
@@ -819,7 +842,8 @@ struct Player::Impl {
         prep.reset();
     }
 
-    // Gapless to another sample rate on the same output, joined as one filter would: zeros through the old chain
+    // Gapless through a new chain (another sample rate on the same output, or the same rate with a format the old
+    // chain does not fit), joined as one filter would: zeros through the old chain
     // bring out A's last samples (its content delay) and their ringing; B's start through the new chain (built
     // ahead) is overlap-added so that B's first sample comes exactly one source period after A's last, its
     // pre-ringing over A's end. The hearing side follows when B is heard (check_switch).
@@ -969,7 +993,8 @@ struct Player::Impl {
             std::unique_ptr<Decoder> nd = p ? std::move(p->dec) : nullptr;
             if (!nd) nd = open_decoder(np, &e);
             if (!nd || nd->info().channels != ch) return false;
-            if (nd->info().rate == decoding_info().rate) {
+            const bool fits = cur->fits(chain_settings(s, run_osr), nd->info());
+            if (fits) {
                 Switch w;
                 w.at_in = in_total;
                 w.info = nd->info();
@@ -978,8 +1003,10 @@ struct Player::Impl {
                 dec = std::move(nd);
                 apply_headroom(nh);
             } else {
-                // another sample rate: gapless only on the same output, with the new chain built ahead for the
-                // current settings; otherwise the track ends and the host loads the next one
+                // another sample rate, or the same rate with a format the current chain does not fit (a 24-bit
+                // track after a 16-bit one on a 16-bit device needs the quantizer): gapless only on the same
+                // output, joined through the new chain built ahead for the current settings; otherwise the track
+                // ends and the host loads the next one
                 if (!p || !p->done || !p->chain || fading || building.valid() || p->key != chain_key(chain_settings(s, run_osr), chain_fmt))
                     return false;
                 cross_switch(std::move(nd), std::move(p->chain), np);
@@ -1049,6 +1076,7 @@ struct Player::Impl {
                 fading = false;
                 rep.chain = cur->stages();
                 rep.filter = current_filter();
+                report_bit_perfect();
             }
             cur->reset();
             abs_out = from * ratio;
@@ -1227,8 +1255,10 @@ struct Player::Impl {
             event("applied in place (EQ / crossfeed / volume)");
             // the stages that are active now (EQ switched on / off, volume at 0 dB ...)
             const auto stages = cur->stages();
-            if (stages != rep.chain) {
-                rep.chain = stages;
+            const bool changed_stages = stages != rep.chain, was_bit_perfect = rep.bit_perfect;
+            rep.chain = stages;
+            report_bit_perfect();
+            if (changed_stages || rep.bit_perfect != was_bit_perfect) {
                 if (cb.on_changed) cb.on_changed(rep);
             }
             return true;

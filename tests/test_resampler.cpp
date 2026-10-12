@@ -108,6 +108,12 @@ TEST_CASE("Resampler: double-double convolution, any thread count gives the same
     daphne::dsp::set_design_threads(0);
     CHECK(d1.double_double());
     CHECK(y1 == y8);
+    // the kernel peak (content delay) is the same on both paths, and is the largest coefficient
+    CHECK(d1.peak_index() == plain.peak_index());
+    size_t best = 0;
+    for (size_t i = 1; i < h.size(); ++i)
+        if (std::abs(h[i]) > std::abs(h[best])) best = i;
+    CHECK(plain.peak_index() == static_cast<int>(best));
     REQUIRE(y1.size() == yp.size());
     double diff = 0.0;
     for (size_t i = 0; i < y1.size(); ++i) diff = std::max(diff, std::abs(y1[i] - yp[i]));

@@ -85,6 +85,56 @@ TEST_CASE("Chain: stage order and which stages appear", "[chain]") {
     CHECK(stages(Settings{}, dsd, device(176400, 2, SampleType::Int32, 32)) == std::vector<std::string>{"dsd limiter", "quantizer"});
 }
 
+TEST_CASE("Chain: fits() tells when the next track at the same rate needs its own chain", "[chain]") {
+    Settings s;
+    std::string e;
+    // 16-bit source on a 16-bit device: bit-perfect, no quantizer
+    DspChain c;
+    REQUIRE(c.build(s, source(44100, 2, 16), device(44100, 2, SampleType::Int16, 16), 4096, &e));
+    REQUIRE(c.stages().empty());
+    CHECK(c.fits(s, source(44100, 2, 16)));
+    CHECK_FALSE(c.fits(s, source(44100, 2, 24)));   // needs the quantizer
+    CHECK_FALSE(c.fits(s, source(44100, 2, 0)));    // lossy: needs the quantizer
+    CHECK_FALSE(c.fits(s, source(48000, 2, 16)));   // another rate
+    AudioInfo dsd = source(44100, 2, 0);
+    dsd.dsd_pcm = true;
+    CHECK_FALSE(c.fits(s, dsd));                    // the DSD limiter
+    // what fits() says matches a chain built for the next source
+    for (const AudioInfo& next : {source(44100, 2, 16), source(44100, 2, 24), source(44100, 2, 0)}) {
+        DspChain n;
+        REQUIRE(n.build(s, next, device(44100, 2, SampleType::Int16, 16), 4096, &e));
+        CHECK(c.fits(s, next) == (n.stages() == c.stages()));
+    }
+    // the same, copied out for another thread
+    CHECK(DspChain::fits(c.shape(), s, source(44100, 2, 16)));
+    CHECK_FALSE(DspChain::fits(c.shape(), s, source(44100, 2, 24)));
+    // 24-bit device: a 16- and a 24-bit source both fit it untouched
+    DspChain w;
+    REQUIRE(w.build(s, source(44100, 2, 16), device(44100, 2, SampleType::Int24In32, 24), 4096, &e));
+    CHECK(w.fits(s, source(44100, 2, 24)));
+    CHECK_FALSE(w.fits(s, source(44100, 2, 32)));
+    // already quantizing (volume): any word length fits
+    Settings v = s;
+    v.volume.mode = VolumeMode::Digital;
+    v.volume.db = -6.0;
+    DspChain q;
+    REQUIRE(q.build(v, source(44100, 2, 16), device(44100, 2, SampleType::Int16, 16), 4096, &e));
+    CHECK(q.fits(v, source(44100, 2, 24)));
+    CHECK(q.fits(v, source(44100, 2, 0)));
+    // a float device never quantizes
+    DspChain f;
+    REQUIRE(f.build(s, source(44100, 2, 16), device(44100, 2, SampleType::Float32, 32), 4096, &e));
+    CHECK(f.fits(s, source(44100, 2, 0)));
+    // downmixed: the channel layout is part of the chain
+    AudioInfo a51 = source(44100, 6, 16), a51side = a51;
+    a51.channel_mask = 0x3F;        // 5.1 back
+    a51side.channel_mask = 0x60F;   // 5.1 side
+    DspChain m;
+    REQUIRE(m.build(s, a51, device(44100, 2, SampleType::Float32, 32), 4096, &e));
+    CHECK(m.fits(s, a51));
+    CHECK_FALSE(m.fits(s, a51side));
+}
+
 TEST_CASE("Chain: level changes in place, structural changes need a new chain", "[chain]") {
     Settings s;
     s.volume.mode = VolumeMode::Digital;
