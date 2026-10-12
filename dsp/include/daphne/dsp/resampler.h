@@ -59,8 +59,9 @@ public:
     int ratio() const { return ratio_; }
     bool double_double() const { return dd_; }
     int block() const { return block_; }
-    // Content delay in output frames: the position of the kernel's largest coefficient.
-    int peak_index() const;
+    // Content delay in output frames: the position of the kernel's largest coefficient (found once,
+    // when the kernel is built: the player asks for it on every loop pass).
+    int peak_index() const { return peak_; }
     // Upper bound of the frames process() can return for `frames` input frames.
     int max_output_frames(int frames) const { return (frames + block_) * ratio_; }
 
@@ -68,8 +69,10 @@ private:
     void run_block(double* out, int frames_out);
     void run_block_dd(double* out, int frames_out);
     void build_dd(const std::vector<double>& lo);
+    int find_peak() const;
 
     int ratio_, block_, taps_, parts_;
+    int peak_ = 0;                                                // peak_index()
     bool bypass_ = false;                                          // is_identity(): process() copies
     std::vector<double> kernel_;                                   // scaled coefficients, L
     std::vector<std::vector<std::complex<double>>> spectra_;       // [phase * parts + j], FFT 2B

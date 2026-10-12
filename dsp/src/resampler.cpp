@@ -25,6 +25,7 @@ Resampler::Resampler(std::vector<double> h, int ratio, int block, const std::vec
     kernel_.resize(static_cast<size_t>(taps_) * ratio_, 0.0);
     if (h_lo) {
         build_dd(*h_lo);
+        peak_ = find_peak();
         return;
     }
     // every phase scaled to DC gain 1 (Neumaier-compensated sum; left alone when |sum| <= 1e-15)
@@ -56,6 +57,7 @@ Resampler::Resampler(std::vector<double> h, int ratio, int block, const std::vec
             fft_->run(s.data(), false);
         }
     }
+    peak_ = find_peak();
 }
 
 // The double-double kernel: normalized like the double path but in double-double, then every
@@ -135,7 +137,7 @@ void Resampler::reset() {
     for (auto& v : dfdl_) v.zero();
 }
 
-int Resampler::peak_index() const {
+int Resampler::find_peak() const {
     if (kernel_.empty()) return 0;
     size_t best = 0;
     for (size_t i = 1; i < kernel_.size(); ++i)
