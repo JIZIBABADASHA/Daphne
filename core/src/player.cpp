@@ -22,6 +22,7 @@
 #include "daphne/engine/dsd_output.h"
 #include "daphne/engine/filters.h"
 #include "daphne/dsp/progress.h"
+#include "daphne/dsp/quantizer.h"
 #include "daphne/engine/ring_buffer.h"
 
 namespace daphne {
@@ -509,6 +510,20 @@ struct Player::Impl {
         return true;
     }
 
+    // The crossfade and the fade-in / -out below change the level after the chains' final quantizer: on an
+    // integer device the frame is quantized again, with TPDF dither at the device word length (N21), instead
+    // of being rounded plainly by the conversion. Frames at gain 0 or 1 are not touched.
+    std::unique_ptr<dsp::Quantizer> fade_q;
+    void requantize(double* frame) {
+        if (dsdenc || is_float(rep.device.type) || is_dsd(rep.device.type)) return;   // the modulator / the device take it
+        const int bits = effective_bits(rep.device);
+        if (!fade_q || fade_q->bits() != bits || fade_q->output_format().channels != dch) {
+            fade_q = std::make_unique<dsp::Quantizer>(bits);
+            fade_q->prepare({rep.device.rate, dch, 1});
+        }
+        fade_q->process(frame, 1, frame);
+    }
+
     // Mix what both chains have produced during a crossfade into dsp; returns frames.
     int mix() {
         const int n = std::min({fc.frames(), fn.frames(), static_cast<int>(dsp.size() / dch)});
@@ -522,6 +537,7 @@ struct Player::Impl {
                 const size_t k = static_cast<size_t>(i) * dch + c;
                 dsp[k] = a[k] * ga + b[k] * gb;
             }
+            if (gb > 0.0 && gb < 1.0) requantize(dsp.data() + static_cast<size_t>(i) * dch);
         }
         fc.pop(n);
         fn.pop(n);
@@ -634,6 +650,7 @@ struct Player::Impl {
             for (int i = 0; i < n && ramp_in_left > 0; ++i, --ramp_in_left) {
                 const double g = static_cast<double>(ramp_in_len - ramp_in_left) / static_cast<double>(ramp_in_len);
                 for (int c = 0; c < dch; ++c) dsp[static_cast<size_t>(i) * dch + c] *= g;
+                if (g > 0.0) requantize(dsp.data() + static_cast<size_t>(i) * dch);
             }
         }
         if (fade_out_next) {
@@ -641,6 +658,7 @@ struct Player::Impl {
             for (int i = 0; i < n; ++i) {
                 const double g = i < fade_out_len ? 1.0 - static_cast<double>(i) / static_cast<double>(fade_out_len) : 0.0;
                 for (int c = 0; c < dch; ++c) dsp[static_cast<size_t>(i) * dch + c] *= g;
+                if (g > 0.0 && g < 1.0) requantize(dsp.data() + static_cast<size_t>(i) * dch);
             }
         }
         if (dsdenc) {

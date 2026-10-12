@@ -15,7 +15,11 @@
 //   - a driver reset request or buffer size change reopens the device (the player resumes where it
 //     was); one in the first 0.5 s after start is ignored (drivers send one while starting). A
 //     sample-rate change stops playback with a reason
-//   - driver messages, rate changes and late callbacks go to the host's log (take_notes)
+//   - driver messages, rate changes and late callbacks go to the host's log (take_notes). The driver
+//     can call asioMessage / sampleRateDidChange from its own audio thread, so those callbacks neither
+//     allocate nor block: a note is formatted into a fixed slot taken with try_lock (dropped and
+//     counted when the player is reading the notes at that moment or 64 are queued), the failure
+//     reason into a fixed buffer published by failed(), the latency into an atomic
 //   - the driver DLL is never unloaded (a driver thread still running after Release can crash the
 //     host process)
 //   - DSD mode: buffers the ring runs short of are filled with DSD silence (0x69), not zeros
@@ -28,6 +32,7 @@
 //     process starts that way too (what the DAC was left in is not known)
 // Needs the Steinberg ASIO SDK at build time (third_party/asiosdk); without it open() fails.
 
+#include <array>
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -56,14 +61,14 @@ public:
     const DeviceFormat& format() const override { return fmt_; }
     bool matches_request() const override { return matched_; }
     std::string device_name() const override { return name_; }
-    double latency_ms() const override { return latency_ms_; }
+    double latency_ms() const override { return latency_ms_.load(); }
     int buffer_frames() const override { return buffer_frames_; }
 
     bool start(ByteRing* ring, const std::atomic<bool>* eof, std::string* error) override;
     bool drained() const override { return drained_.load(); }
     void rearm() override { drained_ = false; }
     bool failed() const override { return failed_.load(); }
-    std::string failure() const override { return failure_; }
+    std::string failure() const override;
     void stop() override;
     void close();
 
@@ -79,7 +84,8 @@ public:
     long on_message(long selector, long value);
 
 private:
-    void note(const std::string& s);
+    // printf-style; no allocation, never blocks (see above)
+    void note(const char* fmt, ...);
 
 public:
 
@@ -89,20 +95,22 @@ private:
     DeviceFormat fmt_{};
     bool matched_ = false;
     std::string name_;
-    double latency_ms_ = 0;
+    std::atomic<double> latency_ms_{0.0};
     int buffer_frames_ = 0;
     ByteRing* ring_ = nullptr;
     const std::atomic<bool>* eof_ = nullptr;
     std::atomic<bool> drained_{false};
     std::atomic<bool> failed_{false};
-    std::string failure_;
+    char failure_[160] = {};   // written before failed_ is set (release), read after it (acquire)
     std::vector<uint8_t> tmp_;
     std::vector<int> rates_;
     OutputStats stats_;
     std::atomic<bool> reset_{false};
     int64_t period_us_ = 0;   // one buffer
     std::mutex notes_m_;
-    std::vector<std::string> notes_;
+    std::array<std::array<char, 192>, 64> notes_{};
+    int notes_n_ = 0;
+    std::atomic<int> notes_dropped_{0};
 };
 
 }  // namespace daphne

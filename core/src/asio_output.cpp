@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 
@@ -36,6 +37,7 @@ void AsioOutput::on_buffer(long) {}
 void AsioOutput::on_rate_changed(double) {}
 long AsioOutput::on_message(long, long) { return 0; }
 std::vector<std::string> AsioOutput::take_notes() { return {}; }
+std::string AsioOutput::failure() const { return AudioOutput::failure(); }
 
 #else
 
@@ -280,6 +282,7 @@ bool AsioOutput::start(ByteRing* ring, const std::atomic<bool>* eof, std::string
     ring_ = ring;
     eof_ = eof;
     drained_ = false;
+    failure_[0] = 0;
     failed_ = false;
     impl_->last.QuadPart = 0;
     reset_ = false;
@@ -341,24 +344,41 @@ void AsioOutput::on_buffer(long index) {
     stats_.callbacks++;
 }
 
-void AsioOutput::note(const std::string& s) {
-    std::lock_guard<std::mutex> l(notes_m_);
-    if (notes_.size() < 64) notes_.push_back(s);
+void AsioOutput::note(const char* fmt, ...) {
+    char buf[192];
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    std::unique_lock<std::mutex> l(notes_m_, std::try_to_lock);
+    if (!l.owns_lock() || notes_n_ >= static_cast<int>(notes_.size())) {
+        notes_dropped_++;
+        return;
+    }
+    std::memcpy(notes_[static_cast<size_t>(notes_n_++)].data(), buf, sizeof buf);
 }
 
 std::vector<std::string> AsioOutput::take_notes() {
-    std::lock_guard<std::mutex> l(notes_m_);
     std::vector<std::string> v;
-    v.swap(notes_);
+    {
+        std::lock_guard<std::mutex> l(notes_m_);
+        for (int i = 0; i < notes_n_; ++i) v.emplace_back(notes_[static_cast<size_t>(i)].data());
+        notes_n_ = 0;
+    }
+    if (const int d = notes_dropped_.exchange(0)) v.push_back("asio: " + std::to_string(d) + " driver note(s) dropped");
     return v;
 }
 
+std::string AsioOutput::failure() const {
+    if (failed_.load(std::memory_order_acquire) && failure_[0]) return failure_;
+    return AudioOutput::failure();
+}
+
 void AsioOutput::on_rate_changed(double rate) {
-    note("asio: the driver reports the sample rate " + std::to_string(std::lround(rate)) + " Hz (opened at " +
-         std::to_string(fmt_.rate) + " Hz)");
+    note("asio: the driver reports the sample rate %ld Hz (opened at %d Hz)", std::lround(rate), fmt_.rate);
     if (std::abs(rate - fmt_.rate) >= 1.0) {
-        failure_ = "the ASIO driver changed the sample rate to " + std::to_string(static_cast<int>(rate)) + " Hz";
-        failed_ = true;
+        std::snprintf(failure_, sizeof failure_, "the ASIO driver changed the sample rate to %d Hz", static_cast<int>(rate));
+        failed_.store(true, std::memory_order_release);
     }
 }
 
@@ -376,7 +396,7 @@ long AsioOutput::on_message(long selector, long value) {
         // does it. Drivers send one while starting up: ignored.
         const char* what = selector == kAsioResetRequest ? "reset request" : "buffer size change";
         if (!impl_->running) {
-            note(std::string("asio: ") + what + " while not playing: ignored");
+            note("asio: %s while not playing: ignored", what);
             return 1;
         }
         LARGE_INTEGER now;
@@ -385,9 +405,9 @@ long AsioOutput::on_message(long selector, long value) {
         char b[160];
         std::snprintf(b, sizeof b, "asio: %s (value %ld) %.2f s after start", what, value, since);
         if (since < 0.5) {
-            note(std::string(b) + ": ignored");
+            note("%s: ignored", b);
         } else {
-            note(std::string(b) + ": reopening the device");
+            note("%s: reopening the device", b);
             reset_ = true;
         }
         return 1;
@@ -399,11 +419,11 @@ long AsioOutput::on_message(long selector, long value) {
         long lin = 0, lout = 0;
         if (impl_->drv && asio_ok(impl_->drv->getLatencies(&lin, &lout)) && fmt_.rate > 0)
             latency_ms_ = 1000.0 * lout / fmt_.rate;
-        note("asio: latencies changed (output " + std::to_string(lout) + " samples)");
+        note("asio: latencies changed (output %ld samples)", lout);
         return 1;
     }
     default:
-        note("asio: message " + std::to_string(selector) + " value " + std::to_string(value) + " (not handled)");
+        note("asio: message %ld value %ld (not handled)", selector, value);
         return 0;
     }
 }

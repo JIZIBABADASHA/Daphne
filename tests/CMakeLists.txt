@@ -15,6 +15,7 @@ add_executable(daphne_tests
     test_gain.cpp
     test_modulator.cpp
     test_output_format.cpp
+    test_realtime.cpp
     test_resampler.cpp
 )
 target_link_libraries(daphne_tests PRIVATE daphne_engine catch2_main)
