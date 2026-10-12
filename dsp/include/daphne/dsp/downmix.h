@@ -1,6 +1,9 @@
 #pragma once
-// Downmix to stereo (ITU-R BS.775 coefficients), run right after decoding when the source has more
-// than two channels; a mono source is copied to both sides.
+// Downmix to stereo, run right after decoding when the source has more than two channels; a mono
+// source is copied to both sides. Based on ITU-R BS.775: centre and surround enter at 0.7071 as in its
+// downmix equations. Two parts are this project's own: the LFE at 0.5 (BS.775's equations leave the
+// LFE out) and the overall scale that keeps one full-scale channel from clipping. The LFE counts with
+// the centre, so a 2.1 source also gets the 0.7071 front scale.
 //
 //   3.0 / 3.1 / 2.1   L = 0.7071 (FL + t),                     t = 0.7071 C + 0.5 LFE
 //   quad / 4.0        L = 0.7071 (FL + 0.7071 S)
