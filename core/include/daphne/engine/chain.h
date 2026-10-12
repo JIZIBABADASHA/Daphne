@@ -61,6 +61,22 @@ public:
     // Settings fields that update() cannot change in place.
     static std::string structure_key(const Settings& s);
 
+    // What the chain's stages depend on besides the settings, copied out so that another thread can
+    // compare a source against it (fits()).
+    struct Shape {
+        AudioInfo src{};
+        DeviceFormat dev{};
+        bool pre_transparent = true;
+        bool quantized = false;
+    };
+    Shape shape() const { return {src_, dev_, pre_transparent_, quantized_}; }
+    // A chain built from these settings for `next` would be this one: the same rate and channel count,
+    // the same layout when downmixed, DSD-to-PCM or not, and the final quantizer present or left out
+    // alike (it depends on the source's word length: a 24-bit track after a 16-bit one on a 16-bit
+    // device needs it). False: the next track needs its own chain.
+    static bool fits(const Shape& sh, const Settings& s, const AudioInfo& next);
+    bool fits(const Settings& s, const AudioInfo& next) const { return fits(shape(), s, next); }
+
 private:
     struct Stage {
         std::string name;
@@ -68,7 +84,8 @@ private:
     };
     void add(std::string name, std::unique_ptr<dsp::Block> b, int& frames, int& rate, int& channels);
     int run_from(size_t first, const double* in, int frames, double* out);
-    bool needs_quantizer(const Settings& s) const;
+    bool needs_quantizer(const Settings& s) const { return needs_quantizer(s, src_, dev_, pre_transparent_); }
+    static bool needs_quantizer(const Settings& s, const AudioInfo& src, const DeviceFormat& dev, bool pre_transparent);
 
     std::vector<Stage> st_;
     std::vector<double> a_, b_, flush_;

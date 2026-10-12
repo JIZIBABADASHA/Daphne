@@ -48,10 +48,16 @@ std::string DspChain::structure_key(const Settings& s) {
     return settings_to_json(k).dump();
 }
 
-bool DspChain::needs_quantizer(const Settings& s) const {
-    if (s.core == CoreMode::Dsd || is_float(dev_.type) || is_dsd(dev_.type)) return false;   // the modulator / the device take it
-    const bool fits = src_.lossless_int && src_.bits > 0 && src_.bits <= effective_bits(dev_);
-    return !(pre_transparent_ && level_stages_identity(s) && fits);
+bool DspChain::needs_quantizer(const Settings& s, const AudioInfo& src, const DeviceFormat& dev, bool pre_transparent) {
+    if (s.core == CoreMode::Dsd || is_float(dev.type) || is_dsd(dev.type)) return false;   // the modulator / the device take it
+    const bool fits = src.lossless_int && src.bits > 0 && src.bits <= effective_bits(dev);
+    return !(pre_transparent && level_stages_identity(s) && fits);
+}
+
+bool DspChain::fits(const Shape& sh, const Settings& s, const AudioInfo& next) {
+    if (next.rate != sh.src.rate || next.channels != sh.src.channels || next.dsd_pcm != sh.src.dsd_pcm) return false;
+    if (sh.src.channels != sh.dev.channels && next.channel_mask != sh.src.channel_mask) return false;   // the downmix matrix
+    return needs_quantizer(s, next, sh.dev, sh.pre_transparent) == sh.quantized;
 }
 
 void DspChain::add(std::string name, std::unique_ptr<dsp::Block> b, int& frames, int& rate, int& channels) {
