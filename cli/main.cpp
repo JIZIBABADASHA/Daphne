@@ -682,6 +682,7 @@ int cmd_render_dsp(std::vector<std::wstring> args) {
             return;
         }
         clipped += daphne::convert_to_device(out.data(), static_cast<size_t>(n) * dev.channels, dev, bytes.data());
+        clipped += chain.take_clips();
         drwav_write_pcm_frames(&w, static_cast<drwav_uint64>(n), bytes.data());
         total += n;
     };

@@ -34,7 +34,7 @@ struct PlayReport {
     int64_t frames_played = 0;   // device frames written
     int64_t underruns = 0;
     int64_t event_timeouts = 0;
-    int64_t clipped = 0;
+    int64_t clipped = 0;         // samples clamped to full scale (final quantizer, device conversion) or NaN
     int64_t max_interval_us = 0;
     double latency_ms = 0;
     std::vector<std::string> chain;   // active DSP stages
