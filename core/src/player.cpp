@@ -532,6 +532,7 @@ struct Player::Impl {
     void finish_fade() {
         // the next chain becomes current; what it has produced beyond the mixed part plays next
         abs_out += delay_shift;
+        rep.clipped += cur->take_clips();   // its last mixed block
         cur = std::move(next);
         carry.clear();
         if (fn.frames() > 0) carry.push(fn.data(), fn.frames());
@@ -651,6 +652,7 @@ struct Player::Impl {
             pend = dsd_bytes.size();
         } else {
             rep.clipped += convert_to_device(dsp.data(), static_cast<size_t>(n) * dch, rep.device, bytes.data());
+            rep.clipped += cur->take_clips() + (next ? next->take_clips() : 0);   // clamped by the final quantizer
             pend = static_cast<size_t>(n) * block;
         }
         pend_off = 0;
@@ -875,6 +877,7 @@ struct Player::Impl {
         w.old_ratio = ratio;
         w.old_delay = cur->content_delay();
         w.old_base = latest_base();
+        rep.clipped += cur->take_clips();   // its tail, now in carry
         w.old_chain = std::move(cur);
         switches.push_back(std::move(w));
         cur = std::move(nc);

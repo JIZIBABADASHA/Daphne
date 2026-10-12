@@ -13,6 +13,7 @@
 // The device format (rate, channels, sample type) is decided before the chain is built; for the dsd
 // core it is the modulator's PCM input (modulator_input_rate, float64).
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -26,6 +27,7 @@ namespace daphne::dsp {
 class Gain;
 class Crossfeed;
 class Peq;
+class Quantizer;
 }  // namespace daphne::dsp
 
 namespace daphne {
@@ -57,6 +59,9 @@ public:
     bool transparent() const;
     // Names of the stages that change the signal, in order, for reports.
     std::vector<std::string> stages() const;
+    // Samples the final quantizer clamped to full scale since the last call (0 without a quantizer).
+    // Its output is already inside the device range, so convert_to_device() never sees these.
+    int64_t take_clips();
 
     // Settings fields that update() cannot change in place.
     static std::string structure_key(const Settings& s);
@@ -82,6 +87,8 @@ private:
     dsp::Gain* gain_ = nullptr;
     dsp::Crossfeed* xf_ = nullptr;
     dsp::Peq* peq_ = nullptr;
+    dsp::Quantizer* quant_ = nullptr;
+    int64_t clips_taken_ = 0;
 };
 
 }  // namespace daphne

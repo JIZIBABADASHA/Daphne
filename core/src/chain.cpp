@@ -66,7 +66,8 @@ void DspChain::add(std::string name, std::unique_ptr<dsp::Block> b, int& frames,
 
 bool DspChain::build(const Settings& s, const AudioInfo& src, const DeviceFormat& dev, int chunk, std::string* error) {
     st_.clear();
-    gain_ = nullptr, xf_ = nullptr, peq_ = nullptr;
+    gain_ = nullptr, xf_ = nullptr, peq_ = nullptr, quant_ = nullptr;
+    clips_taken_ = 0;
     src_ = src;
     dev_ = dev;
     max_buf_ = chunk * std::max(src.channels, dev.channels);
@@ -126,7 +127,11 @@ bool DspChain::build(const Settings& s, const AudioInfo& src, const DeviceFormat
 
     // 6. final quantization
     quantized_ = needs_quantizer(s);
-    if (quantized_) add("quantizer", std::make_unique<dsp::Quantizer>(effective_bits(dev)), frames, rate, ch);
+    if (quantized_) {
+        auto q = std::make_unique<dsp::Quantizer>(effective_bits(dev));
+        quant_ = q.get();
+        add("quantizer", std::move(q), frames, rate, ch);
+    }
     if (rate != dev.rate || ch != dev.channels) return fail("internal: chain output does not match the device format");
 
     key_ = structure_key(s);
@@ -187,6 +192,14 @@ int DspChain::flush(double* out) {
 
 void DspChain::reset() {
     for (auto& s : st_) s.block->reset();
+    clips_taken_ = 0;   // the quantizer's count restarts with it
+}
+
+int64_t DspChain::take_clips() {
+    if (!quant_) return 0;
+    const int64_t n = quant_->clip_count() - clips_taken_;
+    clips_taken_ = quant_->clip_count();
+    return n;
 }
 
 bool DspChain::transparent() const {

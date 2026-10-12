@@ -1,6 +1,8 @@
 #include <catch_amalgamated.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -116,4 +118,35 @@ TEST_CASE("Chain: wrong device rates are refused", "[chain]") {
     d.core = CoreMode::Dsd;
     CHECK_FALSE(c.build(d, source(44100, 2, 16), device(352800, 2, SampleType::Float64, 64), 4096, &e));
     CHECK_FALSE(c.build(Settings{}, source(44100, 6, 16), device(44100, 4, SampleType::Int32, 32), 4096, &e));
+}
+
+TEST_CASE("Chain: samples the final quantizer clamps are counted", "[chain]") {
+    // upsampled 2x, a 16-bit fs/4 sine at 45 degrees: every sample at full scale, the waveform
+    // between them at sqrt(2); the resampler keeps those peaks and the quantizer clamps them
+    Settings s;
+    DspChain c;
+    std::string e;
+    REQUIRE(c.build(s, source(44100, 2, 16), device(88200, 2, SampleType::Int24In32, 24), 4096, &e));
+    std::vector<double> x(2 * 4096), y(2 * static_cast<size_t>(c.max_output_frames()));
+    for (int i = 0; i < 4096; ++i) {
+        const double v = std::sin(1.5707963267948966 * i + 0.7853981633974483) * std::sqrt(2.0);
+        x[2 * i] = x[2 * i + 1] = std::round(std::clamp(v, -1.0, 32767.0 / 32768.0) * 32768.0) / 32768.0;
+    }
+    int64_t clamped = 0, counted = 0;
+    for (int k = 0; k < 4; ++k) {
+        const int n = c.process(x.data(), 4096, y.data());
+        for (int i = 0; i < 2 * n; ++i)
+            if (std::abs(y[i]) >= 8388607.0 / 8388608.0) ++clamped;
+        counted += c.take_clips();
+    }
+    CHECK(clamped > 0);
+    // every count is a sample left at a rail (a sample that rounds exactly onto a rail is not a clamp)
+    CHECK(counted > clamped * 9 / 10);
+    CHECK(counted <= clamped);
+    CHECK(c.take_clips() == 0);   // taken
+    // no quantizer (bit-perfect): nothing to count
+    DspChain b;
+    REQUIRE(b.build(s, source(44100, 2, 24), device(44100, 2, SampleType::Int24In32, 24), 4096, &e));
+    b.process(x.data(), 4096, y.data());
+    CHECK(b.take_clips() == 0);
 }

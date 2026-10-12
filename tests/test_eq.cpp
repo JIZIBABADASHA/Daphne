@@ -1,8 +1,10 @@
 #include <catch_amalgamated.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include "daphne/dsp/crossfeed.h"
@@ -201,6 +203,7 @@ TEST_CASE("Crossfeed: one-pole mix, centre level kept, off is identity", "[cross
     CHECK(c.is_identity());
     c.set_params(true, 0.3, 700.0);
     CHECK_FALSE(c.is_identity());
+    c.reset();   // start at the parameters (a change while playing ramps, tested below)
     // a hard-left DC signal: left settles at 0.7, right at 0.3 (the low-passed left)
     std::vector<double> x(2 * 44100), y(2 * 44100);
     for (int i = 0; i < 44100; ++i) x[2 * i] = 1.0;
@@ -219,4 +222,55 @@ TEST_CASE("Crossfeed: one-pole mix, centre level kept, off is identity", "[cross
     m.set_params(true, 0.5, 700.0);
     m.prepare({44100, 1, 16});
     CHECK(m.is_identity());
+}
+
+TEST_CASE("Crossfeed: on / off, amount and fc changes ramp without a step; off is bit-exact again", "[crossfeed]") {
+    constexpr int kRate = 44100, kBlock = 512;
+    constexpr double kPi = 3.14159265358979323846;
+    Crossfeed c;
+    c.prepare({kRate, 2, kBlock});
+    // a hard-left 100 Hz tone
+    std::vector<double> x(2 * kBlock), y(2 * kBlock), out;
+    int t = 0;
+    auto run = [&](int blocks) {
+        for (int b = 0; b < blocks; ++b) {
+            for (int i = 0; i < kBlock; ++i) x[2 * i] = 0.5 * std::sin(2 * kPi * 100.0 * (t + i) / kRate), x[2 * i + 1] = 0.0;
+            c.process(x.data(), kBlock, y.data());
+            out.insert(out.end(), y.begin(), y.end());
+            t += kBlock;
+        }
+    };
+    auto largest_step = [&](size_t from, size_t to) {
+        double m = 0.0;
+        for (size_t f = std::max<size_t>(from, 1); f < to; ++f)
+            for (int ch = 0; ch < 2; ++ch) m = std::max(m, std::abs(out[2 * f + ch] - out[2 * (f - 1) + ch]));
+        return m;
+    };
+    run(20);
+    const double tone_step = largest_step(0, out.size() / 2);   // the tone's own largest frame-to-frame change
+    for (auto [on, amount, fc] : {std::tuple{true, 0.9, 700.0}, {true, 0.2, 700.0}, {true, 0.2, 3000.0}, {false, 0.2, 3000.0}}) {
+        const size_t at = out.size() / 2;
+        c.set_params(on, amount, fc);
+        run(10);
+        CHECK(largest_step(at, out.size() / 2) <= tone_step * 1.05);   // no click at the change
+    }
+    // off again after the ramp: the input passes bit for bit
+    CHECK(c.is_identity());
+    for (int i = 0; i < kBlock; ++i) x[2 * i] = 0.25 * std::sin(0.01 * i), x[2 * i + 1] = -0.5 * std::cos(0.02 * i);
+    c.process(x.data(), kBlock, y.data());
+    CHECK(x == y);
+    // a block size that splits the ramp gives the same samples as one large block
+    Crossfeed a, b;
+    a.prepare({kRate, 2, 4096});
+    b.prepare({kRate, 2, 4096});
+    a.set_params(true, 0.5, 900.0);
+    b.set_params(true, 0.5, 900.0);
+    std::vector<double> in(2 * 4096), ya(2 * 4096), yb(2 * 4096);
+    for (int i = 0; i < 4096; ++i) in[2 * i] = std::sin(0.003 * i), in[2 * i + 1] = 0.3 * std::cos(0.007 * i);
+    a.process(in.data(), 4096, ya.data());
+    for (int off = 0; off < 4096; off += 100) {
+        const int n = std::min(100, 4096 - off);
+        b.process(in.data() + 2 * off, n, yb.data() + 2 * off);
+    }
+    CHECK(ya == yb);
 }
