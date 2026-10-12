@@ -10,7 +10,9 @@ namespace DaphneMiku;
 /// <summary>
 /// Daphne's own signal path card (SignalInfo.Custom, drawn by web/daphne.js with the host's shared layout): sections
 /// 來源 / DSP / 輸出, each row a one-line summary with its details under it (folded when it has details or does not fit).
-/// The DSP rows follow the core's processing chain (report "chain"), in its order.
+/// The DSP rows follow the core's processing chain (report "chain"), in its order. Each stage that hands samples on
+/// shows the format it hands on (a "→" pin: word length and rate), so the card reads as one continuous path from the
+/// file's format to the device's.
 /// </summary>
 public sealed partial class DaphneEngine
 {
@@ -24,6 +26,16 @@ public sealed partial class DaphneEngine
 
     static PathRow Row(string k, string v, bool mod, params string[] more) =>
         new(k, v, mod, more.Where(x => !string.IsNullOrEmpty(x)).ToArray());
+
+    /// <summary>The "→" pin: the format a stage hands to the next one.</summary>
+    static PathPin To(string format) => new("→", format);
+    const string F64 = "64-bit 浮點";
+    static string Pcm(string word, int rate) => $"{word} / {Khz(rate)} kHz";
+    static string Dsd1(int clock) => $"1-bit DSD / {DsdName(clock)}（{Mhz(clock)} MHz）";
+
+    /// <summary>The device's sample format in words: integer or floating point, and its container.</summary>
+    static string DeviceWord(string type, int bits, int container) =>
+        type.StartsWith("float") ? $"{container}-bit 浮點" : bits != container ? $"{bits}-bit 整數（{container}-bit 容器）" : $"{bits}-bit 整數";
 
     static string Khz(int r) => (r / 1000.0).ToString("0.###", CultureInfo.InvariantCulture);
     static string Mhz(int r) => (r / 1e6).ToString("0.####", CultureInfo.InvariantCulture);
@@ -44,7 +56,7 @@ public sealed partial class DaphneEngine
     {
         $"濾波器：{_opts.Taps.ToString("N0", CultureInfo.InvariantCulture)} taps · {PhaseText()}",
         apodize ? "去除錄音振鈴（apodize）：開" : null,
-        _opts.DoubleDouble ? "雙倍精度摺積（double-double）：開" : null,
+        _opts.DoubleDouble ? "運算精度：double-double（約 106-bit），每個輸出捨入回 64-bit 浮點一次" : "運算精度：64-bit 浮點",
     };
 
     static string BandName(string type) => type switch
@@ -52,7 +64,11 @@ public sealed partial class DaphneEngine
         "LSC" => "低頻架", "HSC" => "高頻架", "LP" => "低通", "HP" => "高通", _ => "峰值",
     };
 
-    /// <summary>The 音量 row when the core's gain stage does nothing (0 dB, fixed, hardware, or DSD sent directly).</summary>
+    /// <summary>
+    /// The 音量 row when the core's gain stage does nothing (0 dB, fixed, hardware, or DSD sent directly). Digital 0 dB
+    /// and fixed are the gain stage at the head of the DSP chain passing samples through (shown there); hardware and none
+    /// happen in the DAC, after the device (shown under 輸出).
+    /// </summary>
     PathRow VolumeRow(string volumeMode, bool dsdFile)
     {
         return volumeMode switch
@@ -80,23 +96,33 @@ public sealed partial class DaphneEngine
         // ── 來源
         string srcText = isDsd ? $"{t.Codec} • {DsdName(srcRate)} • {Mhz(srcRate)} MHz"
                                : $"{t.Codec} • {(t.Bits > 0 ? t.Bits + "-bit / " : "")}{Khz(srcRate)} kHz";
+        // 解碼: what the decoder hands on. PCM: the integers become 64-bit floating point, exactly (24-bit fits the
+        // 53-bit mantissa); a DSD file is read as its 1-bit stream (sent as it is, or converted to PCM below)
+        PathRow decode = isDsd
+            ? Row("解碼", "讀取 1-bit DSD 串流", false) with { pin = new[] { To(Dsd1(srcRate)), new PathPin("解碼器", mark: true) } }
+            : Row("解碼", t.IsLossy ? "有損解碼" : t.Bits > 0 ? $"{t.Bits}-bit 整數轉成浮點" : "轉成浮點", false,
+                  t.IsLossy ? "解碼器輸出浮點樣本，轉成 64-bit 浮點" : "整數樣本放進 64-bit 浮點的 53-bit 尾數，數值完全不變")
+              with { pin = new[] { To(Pcm(F64, pcmRate)), new PathPin("解碼器", mark: true) } };
         sections.Add(new
         {
             title = "來源",
             rows = new[]
             {
                 Row("檔案", srcText, false, channels != 2 ? $"聲道：{channels}" : null,
-                    t.IsLossy ? "有損壓縮來源：壓縮時已丟棄部分聲音資訊，無法還原" : null) with { pin = new[] { new PathPin("解碼", mark: true) } },
+                    t.IsLossy ? "有損壓縮來源：壓縮時已丟棄部分聲音資訊，無法還原" : null),
+                decode,
             },
         });
 
         // ── DSP (the core's chain, in its order)
         var proc = new List<PathRow>();
+        // every stage up to the quantizer hands on 64-bit floating point; the rate changes only at the resampler
+        int rateNow = pcmRate;
         if (dsdPcm)
-            proc.Add(Row("DSD 轉 PCM", $"{DsdName(srcRate)} → PCM {Khz(pcmRate)} kHz", true,
+            proc.Add(Row("DSD 轉 PCM", $"{DsdName(srcRate)} → PCM", true,
                 $"低通濾波：{o.DsdPcmLowpass} kHz（濾掉 DSD 的超音波噪聲）",
                 "增益：+6 dB（SACD 0 dB = 0 dBFS，與 PCM 同音量）",
-                o.DsdPcmLimiter ? "限幅器：開（超過滿刻度的峰值壓回，不削波）" : "限幅器：關（超過滿刻度時削波）"));
+                o.DsdPcmLimiter ? "限幅器：開（超過滿刻度的峰值壓回，不削波）" : "限幅器：關（超過滿刻度時削波）") with { pin = new[] { To(Pcm(F64, pcmRate)) } });
         if (chain.Contains("volume"))
         {
             bool digital = _s.VolumeMode == "digital";
@@ -106,13 +132,16 @@ public sealed partial class DaphneEngine
             proc.Add(Row("音量", parts.Count > 0 ? string.Join(" · ", parts) : "增益", true,
                 digital ? "數位音量：" + (_s.Muted ? "靜音" : Db(_s.VolumeDb)) : null,
                 Math.Abs(rg) > 1e-9 ? $"ReplayGain（{(_s.ReplayGain == "album" ? "依專輯" : "依曲目")}）：{Db(rg)}，只在峰值允許的範圍內提高" : null,
-                "64-bit 浮點運算，調整時平滑過渡"));
+                "調整時平滑過渡") with { pin = new[] { To(Pcm(F64, rateNow)) } });
         }
+        // digital 0 dB / fixed: the gain stage is there but passes samples through (not reported in the chain)
+        bool volPass = !chain.Contains("volume") && !dsdFile && volumeMode is not ("hardware" or "none");
+        if (volPass) proc.Add(VolumeRow(volumeMode, dsdFile) with { pin = new[] { To(Pcm(F64, rateNow)) } });
         var d = _s.Dsp;
         if (chain.Contains("crossfeed") && d?.Crossfeed != null)
             proc.Add(Row("Crossfeed", $"{Hz(d.Crossfeed.Fc)} · {d.Crossfeed.Feed.ToString("0.0", CultureInfo.InvariantCulture)} dB", true,
                 $"截止頻率：{Hz(d.Crossfeed.Fc)}（低於此頻率的聲音也送到另一耳）",
-                $"交叉量：{d.Crossfeed.Feed.ToString("0.0", CultureInfo.InvariantCulture)} dB（直接音比交叉音大的幅度）"));
+                $"交叉量：{d.Crossfeed.Feed.ToString("0.0", CultureInfo.InvariantCulture)} dB（直接音比交叉音大的幅度）") with { pin = new[] { To(Pcm(F64, rateNow)) } });
         if (chain.Contains("eq") && d != null)
         {
             var on = d.Bands.Where(b => b.On).ToList();
@@ -120,11 +149,15 @@ public sealed partial class DaphneEngine
             lines.AddRange(on.Select(b => b.Type is "LP" or "HP"
                 ? $"{BandName(b.Type)} {Hz(b.Fc)} · Q {b.Q.ToString("0.##", CultureInfo.InvariantCulture)}"
                 : $"{BandName(b.Type)} {Hz(b.Fc)} · {Db(b.Gain)} · Q {b.Q.ToString("0.##", CultureInfo.InvariantCulture)}"));
-            proc.Add(Row("EQ", $"{on.Count} 段" + (string.IsNullOrEmpty(d.PresetName) ? "" : " · " + d.PresetName), true, lines.ToArray()));
+            proc.Add(Row("EQ", $"{on.Count} 段" + (string.IsNullOrEmpty(d.PresetName) ? "" : " · " + d.PresetName), true, lines.ToArray())
+                with { pin = new[] { To(Pcm(F64, rateNow)) } });
         }
         if (chain.Contains("resampler"))
-            proc.Add(Row("升頻", devRate == pcmRate ? "1 倍 · 只去除錄音振鈴" : $"{Khz(pcmRate)} → {Khz(devRate)} kHz", true,
-                FilterLines(o.Apodize && upsampler)));
+        {
+            rateNow = devRate;
+            proc.Add(Row("升頻", devRate == pcmRate ? "1 倍 · 只去除錄音振鈴" : $"{Khz(pcmRate)} → {Khz(devRate)} kHz（×{devRate / pcmRate}）", true,
+                FilterLines(o.Apodize && upsampler)) with { pin = new[] { To(Pcm(F64, rateNow)) } });
+        }
         if (chain.Contains("modulator pre-filter") || chain.Contains("modulator limiter"))
         {
             int modIn = pcmRate % 44100 == 0 ? 705600 : 768000;
@@ -132,20 +165,30 @@ public sealed partial class DaphneEngine
             lines.AddRange(FilterLines(o.Apodize).Where(x => x != null));
             lines.Add("限幅器：峰值保持在調變器的穩定範圍內");
             if (clock > 0) lines.Add($"調變器：{o.Order} 階 Δ-Σ → {DsdName(clock)}（{Mhz(clock)} MHz）");
-            proc.Add(Row("轉成 DSD", (clock > 0 ? DsdName(clock) + " · " : "") + $"{o.Order} 階調變器", true, lines.ToArray()));
+            proc.Add(Row("轉成 DSD", $"{o.Order} 階 Δ-Σ 調變器", true, lines.ToArray()) with { pin = clock > 0 ? new[] { To(Dsd1(clock)) } : null });
         }
         if (chain.Contains("quantizer"))
         {
             int bits = dev.GetProperty("bits").GetInt32();
-            proc.Add(Row("量化", $"TPDF 抖動 → {bits}-bit", true, $"從 64-bit 浮點量化到裝置的 {bits}-bit，加 TPDF 抖動"));
+            string type = dev.GetProperty("type").GetString() ?? "";
+            string word = DeviceWord(type, bits, dev.GetProperty("container").GetInt32());
+            proc.Add(Row("量化", "TPDF 抖動", true,
+                type.StartsWith("float") ? $"量化到 {bits}-bit 精度（浮點裝置的尾數），加 TPDF 抖動（±1 LSB），不做噪聲整形"
+                                         : $"量化到裝置的 {bits}-bit，加 TPDF 抖動（±1 LSB），不做噪聲整形")
+                with { pin = new[] { To(Pcm(word, devRate)) } });
         }
-        if (proc.Count == 0)
-            proc.Add(Row("DSP", dsdFile ? "無：DSD 原樣送出" : "無：樣本原樣送出", false));
+        if (proc.All(r => !r.mod))
+        {
+            string vol = volPass ? (volumeMode == "digital" ? "數位音量：0 dB，不處理" : "音量：固定 0 dB，不調整數位增益") : null;
+            proc.Clear();
+            proc.Add(Row("DSP", dsdFile ? "無：DSD 原樣送出" : "無：樣本數值不變", false, vol)
+                with { pin = new[] { To(dsdFile ? Dsd1(srcRate) : Pcm(F64, pcmRate)) } });
+        }
         sections.Add(new { title = "DSP", mark = true, rows = proc });   // Daphne's own processing: its mark after the title
 
         // ── 輸出
         var outRows = new List<PathRow>();
-        if (!chain.Contains("volume")) outRows.Add(VolumeRow(volumeMode, dsdFile));
+        if (!chain.Contains("volume") && !volPass) outRows.Add(VolumeRow(volumeMode, dsdFile));   // in the DAC
         double latency = _report.TryGetProperty("latency_ms", out var lm) ? lm.GetDouble() : 0;
         long underruns = _report.TryGetProperty("underruns", out var un) ? un.GetInt64() : 0;
         outRows.Add(Row("裝置", $"{mode} · {_report.GetProperty("device_name").GetString()}", false,
@@ -156,7 +199,11 @@ public sealed partial class DaphneEngine
             outRows.Add(Row("格式", $"DoP · {format} / {Khz(devRate)} kHz", false,
                 $"{DsdName(clock)} 包在 PCM 裡送出（DoP 標記），DAC 解開後以 DSD 播放"));
         else
-            outRows.Add(Row("格式", $"{format} / {Khz(devRate)} kHz", false));
+        {
+            string word = DeviceWord(dev.GetProperty("type").GetString() ?? "", dev.GetProperty("bits").GetInt32(), dev.GetProperty("container").GetInt32());
+            outRows.Add(Row("格式", Pcm(word, devRate), false,
+                chain.Contains("quantizer") ? null : "64-bit 浮點轉回裝置的整數格式，數值不變"));
+        }
         sections.Add(new { title = "輸出", rows = outRows });
 
         return new { ext = "daphne", sections, notes };
