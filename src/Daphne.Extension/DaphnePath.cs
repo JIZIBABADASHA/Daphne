@@ -197,7 +197,9 @@ public sealed partial class DaphneEngine
 
         // ── 輸出
         var outRows = new List<PathRow>();
-        if (!chain.Contains("volume") && !volPass) outRows.Add(VolumeRow(volumeMode, dsdFile));   // in the DAC
+        // the volume that happens in the DAC (hardware, none), also when the gain stage carries only ReplayGain; DSD sent
+        // directly has no gain stage at all. The digital volume is always in DSP above.
+        if (!volPass && (volumeMode is "hardware" or "none" || !chain.Contains("volume"))) outRows.Add(VolumeRow(volumeMode, dsdFile));
         double latency = _report.TryGetProperty("latency_ms", out var lm) ? lm.GetDouble() : 0;
         long underruns = _report.TryGetProperty("underruns", out var un) ? un.GetInt64() : 0;
         outRows.Add(Row("裝置", $"{mode} · {_report.GetProperty("device_name").GetString()}", false,
