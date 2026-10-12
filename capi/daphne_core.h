@@ -89,6 +89,15 @@ DC_API long long dc_filter_cache_prune(const char* settings, int limit_mb);
 /* Output devices as JSON: {"wasapi": [{"id","name","default"}], "asio": [{"name","clsid"}]}. */
 DC_API int dc_devices(char* json, int len);
 
+/* Live input (a browser page's audio tap): the host's shared ring, read by dc_load with the path L"live:".
+ * Layout: uint32 write index in frames (wraps) | 12 bytes reserved | float32 stereo frames (cap_frames). The
+ * memory must stay valid until dc_live_bus(NULL, 0, 0) or until no live track plays. rate: the producer's
+ * sample rate (dc_live_rate when it changes). While a live track plays, dc_state has
+ *   "live": {"fill": s buffered in the ring, "read": s read, "resyncs": n, "starves": n, "adjust": x}
+ * (seconds from the producer to the DAC: fill + read - position + latency_ms / 1000). */
+DC_API void dc_live_bus(void* base, int cap_frames, int rate);
+DC_API void dc_live_rate(int rate);
+
 #ifdef __cplusplus
 }
 #endif

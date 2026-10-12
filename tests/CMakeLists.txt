@@ -13,6 +13,7 @@ add_executable(daphne_tests
     test_eq.cpp
     test_filter_design.cpp
     test_gain.cpp
+    test_live.cpp
     test_modulator.cpp
     test_output_format.cpp
     test_realtime.cpp

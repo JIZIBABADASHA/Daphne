@@ -1,0 +1,176 @@
+// Live input decoder (live_source.h).
+#include "daphne/engine/live_source.h"
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <thread>
+
+namespace daphne {
+
+namespace {
+
+constexpr double kTarget = 0.30;     // seconds of buffered input aimed for
+constexpr double kOverflow = 1.2;    // beyond this something stalled: restart near the writer
+constexpr int kWaitMs = 20;          // running: how long to wait for the producer before a starve
+
+std::atomic<uint8_t*> g_base{nullptr};
+std::atomic<int> g_cap{0};
+std::atomic<int> g_rate{48000};
+
+// stats of the open decoder (one live decoder at a time)
+std::atomic<double> g_fill{0}, g_read{0}, g_adjust{0};
+std::atomic<int64_t> g_resyncs{0}, g_starves{0};
+std::atomic<int> g_open{0};
+
+double hermite(double xm1, double x0, double x1, double x2, double t) {
+    const double c1 = 0.5 * (x1 - xm1);
+    const double c2 = xm1 - 2.5 * x0 + 2 * x1 - 0.5 * x2;
+    const double c3 = 0.5 * (x2 - xm1) + 1.5 * (x0 - x1);
+    return ((c3 * t + c2) * t + c1) * t + x0;
+}
+
+class LiveDecoder final : public Decoder {
+public:
+    ~LiveDecoder() override { close(); }
+
+    bool open(const std::wstring&, std::string* error) override {
+        if (!g_base.load() || g_cap.load() <= 0) {
+            if (error) *error = "live input: the host has not shared its ring";
+            return false;
+        }
+        info_ = {};
+        info_.rate = g_rate.load();
+        info_.channels = 2;
+        info_.codec = "Live";
+        info_.frames = -1;
+        pos_ = 0;
+        synced_ = primed_ = false;
+        if (!open_) g_open++;
+        open_ = true;
+        g_resyncs = 0, g_starves = 0, g_read = 0;
+        return true;
+    }
+
+    void close() override {
+        if (open_) g_open--;
+        open_ = false;
+    }
+
+    bool seek(int64_t frame) override {   // a stream: only the position counter moves
+        pos_ = std::max<int64_t>(0, frame);
+        return true;
+    }
+
+    int read(double* out, int frames) override {
+        if (!open_ || frames <= 0) return 0;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kWaitMs);
+        for (;;) {
+            const int n = produce(out, frames);
+            if (n > 0) return advance(n);
+            if (!primed_ || std::chrono::steady_clock::now() >= deadline) {
+                // nothing yet (prefill) or the producer fell behind: silence, so the player does not block
+                const int s = std::min(frames, primed_ ? std::max(1, info_.rate / 200) : frames);
+                std::memset(out, 0, static_cast<size_t>(s) * 2 * sizeof(double));
+                if (primed_) g_starves++;
+                return advance(s);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }
+
+private:
+    int advance(int n) {
+        pos_ += n;
+        g_read = static_cast<double>(pos_) / info_.rate;
+        return n;
+    }
+
+    // Frames interpolated from the ring, or 0 when there is nothing to read now.
+    int produce(double* out, int frames) {
+        uint8_t* base = g_base.load(std::memory_order_acquire);
+        const uint32_t cap = static_cast<uint32_t>(g_cap.load());
+        if (!base || cap == 0) return 0;
+        const uint32_t w = *reinterpret_cast<volatile const uint32_t*>(base);
+        std::atomic_thread_fence(std::memory_order_acquire);   // the frames before the index
+        const float* ring = reinterpret_cast<const float*>(base + 16);
+        const int rate = g_rate.load();
+
+        if (!synced_ || w < read_ || w - read_ > cap - 4096) {
+            // first read, page reloaded, or the writer lapped us: restart close to the writer
+            if (synced_) g_resyncs++;
+            read_ = w, frac_ = 0, synced_ = true, primed_ = false, adj_ = 0;
+            return 0;
+        }
+        int avail = static_cast<int>(w - read_);
+        if (!primed_) {
+            if (avail < kTarget * rate) return 0;
+            primed_ = true;
+        }
+        const double fill = static_cast<double>(avail) / rate;
+        g_fill = fill;
+        if (fill > kOverflow) {
+            g_resyncs++;
+            read_ = w - static_cast<uint32_t>(kTarget * rate), frac_ = 0, adj_ = 0;
+            avail = static_cast<int>(w - read_);
+        }
+        if (avail < 4) return 0;
+
+        // proportional control of the buffer level through a tiny rate change
+        const double want = std::clamp((fill - kTarget) * 0.02, -0.005, 0.005);
+        adj_ += (want - adj_) * 0.02;
+        g_adjust = adj_;
+        const double step = static_cast<double>(rate) / info_.rate * (1 + adj_);
+
+        int produced = 0;
+        while (produced < frames) {
+            const int i0 = static_cast<int>(frac_);
+            if (i0 + 2 >= avail) break;
+            const double t = frac_ - i0;
+            const uint32_t b = read_ + static_cast<uint32_t>(i0);
+            const size_t pm = ((b - 1) % cap) * 2, p0 = (b % cap) * 2, p1 = ((b + 1) % cap) * 2, p2 = ((b + 2) % cap) * 2;
+            out[2 * produced] = hermite(ring[pm], ring[p0], ring[p1], ring[p2], t);
+            out[2 * produced + 1] = hermite(ring[pm + 1], ring[p0 + 1], ring[p1 + 1], ring[p2 + 1], t);
+            ++produced;
+            frac_ += step;
+        }
+        const int whole = static_cast<int>(frac_);
+        read_ += static_cast<uint32_t>(whole);
+        frac_ -= whole;
+        return produced;
+    }
+
+    bool open_ = false;
+    uint32_t read_ = 0;   // integer read position in the ring (frames, wraps like the writer's)
+    double frac_ = 0;     // between read_ and read_ + 1
+    bool synced_ = false, primed_ = false;
+    double adj_ = 0;      // smoothed rate correction
+};
+
+}  // namespace
+
+void set_live_bus(void* base, int cap_frames, int rate) {
+    g_cap = base ? cap_frames : 0;
+    if (rate > 8000) g_rate = rate;
+    g_base.store(static_cast<uint8_t*>(base), std::memory_order_release);
+}
+
+void set_live_rate(int rate) {
+    if (rate > 8000) g_rate = rate;
+}
+
+LiveStats live_stats() {
+    LiveStats s;
+    s.fill = g_fill.load();
+    s.read = g_read.load();
+    s.resyncs = g_resyncs.load();
+    s.starves = g_starves.load();
+    s.adjust = g_adjust.load();
+    s.active = g_open.load() > 0;
+    return s;
+}
+
+std::unique_ptr<Decoder> make_live_decoder() { return std::make_unique<LiveDecoder>(); }
+
+}  // namespace daphne

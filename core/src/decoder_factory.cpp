@@ -3,6 +3,7 @@
 
 #include "daphne/engine/decoder.h"
 #include "daphne/engine/dsd_file.h"
+#include "daphne/engine/live_source.h"
 
 namespace daphne {
 namespace {
@@ -23,6 +24,11 @@ bool any_of(const std::wstring& s, std::initializer_list<const wchar_t*> list) {
 }  // namespace
 
 std::unique_ptr<Decoder> open_decoder(const std::wstring& path, std::string* error) {
+    if (path == kLivePath) {   // the host's live input (live_source.h)
+        auto l = make_live_decoder();
+        if (l->open(path, error)) return l;
+        return nullptr;
+    }
     const std::wstring ext = lower_suffix(path);
     std::unique_ptr<Decoder> d;
     const bool dsd = is_dsd_path(path);

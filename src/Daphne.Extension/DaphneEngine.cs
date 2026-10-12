@@ -21,7 +21,9 @@ namespace DaphneMiku;
 ///   • digital volume, EQ, crossfeed → Daphne (changes glide in place)
 ///   • hardware volume → the WASAPI endpoint volume (also for DSD sent directly, like the MIKU core)
 ///   • ReplayGain → Daphne's gain stage (raised only as far as the peak tag allows)
-///   • not available on this core: balance, invert, YouTube Music
+///   • YouTube Music → the core's live input (MIKU's shared ring, path "live:"): the page's audio goes through the same
+///     chain (upsampling, EQ, crossfeed, the final quantizer) to the same output
+///   • not available on this core: balance, invert
 /// </summary>
 public sealed partial class DaphneEngine : IAudioEngine
 {
@@ -36,6 +38,7 @@ public sealed partial class DaphneEngine : IAudioEngine
     double _pausedAt;
     volatile bool _loaded, _playing;
     double _position, _duration;
+    double? _liveLatency;   // YouTube Music: seconds from the page to the DAC (the core's live stats)
     SignalInfo _signal;
     JsonElement _report;
     List<int> _asioRates;
@@ -79,6 +82,8 @@ public sealed partial class DaphneEngine : IAudioEngine
     public bool IsLoaded => _loaded;
     public DeviceCaps Caps => _caps;
     public double Position => _loaded ? _position : _pausedAt;
+    /// <summary>YouTube Music: what the page wrote and the core has not played yet (the ring, the chain and its ring, the device).</summary>
+    public double? LiveLatency => _track?.IsLive == true && _loaded ? _liveLatency : null;
 
     /// <summary>Daphne's events and state, every 50 ms: gapless switches, the end, failures, position.</summary>
     void PollLoop()
@@ -104,6 +109,15 @@ public sealed partial class DaphneEngine : IAudioEngine
                         _position = r.GetProperty("position").GetDouble();
                         _duration = r.GetProperty("duration").GetDouble();
                         _report = r.GetProperty("report").Clone();
+                        if (r.TryGetProperty("live", out var lv))
+                        {
+                            DaphneNative.dc_live_rate(LiveBus.SourceRate);   // the page reports its rate once it runs
+                            double fill = lv.GetProperty("fill").GetDouble();
+                            double lat = _report.TryGetProperty("latency_ms", out var lm) ? lm.GetDouble() / 1000 : 0;
+                            _liveLatency = Math.Max(0, fill + lv.GetProperty("read").GetDouble() - _position + lat);
+                            LiveBus.Fill = fill;
+                        }
+                        else _liveLatency = null;
                         if (r.TryGetProperty("asio_rates", out var ar) && ar.GetArrayLength() > 0)
                         {
                             var list = ar.EnumerateArray().Select(x => x.GetInt32()).ToList();
@@ -236,11 +250,17 @@ public sealed partial class DaphneEngine : IAudioEngine
         Loading?.Invoke(t);
         if (t.IsLive)
         {
-            _track = t;
-            Failed?.Invoke("Daphne 內核目前不支援 YouTube Music，請在設定中改用 MIKU 內核。");
-            return;
+            if (!LiveBus.Ready)
+            {
+                _track = t;
+                Failed?.Invoke("YouTube Music 的聲音還沒有接上（頁面尚未載入完成）。");
+                return;
+            }
+            // the core reads the page's audio from MIKU's shared ring; a live track has no position to start from
+            DaphneNative.dc_live_bus(LiveBus.Ptr, LiveBus.CapFrames, LiveBus.SourceRate);
+            seek = 0;
         }
-        if (play && ReleaseOthers != null)
+        else if (play && ReleaseOthers != null)
         {
             try { await Task.WhenAny(ReleaseOthers(), Task.Delay(1500)); } catch (Exception ex) { Log.Error("ReleaseOthers", ex); }
         }
@@ -254,7 +274,8 @@ public sealed partial class DaphneEngine : IAudioEngine
             _asioDriver = _s.OutputMode == "asio" ? _s.AsioDriver : null;
             ProbeCaps();
             string json = SettingsFor(t);
-            int r = await Task.Run(() => DaphneNative.Load(_p, t.Path, json, seek, play, out var err) is var code && code == DaphneNative.Ok
+            string path = t.IsLive ? "live:" : t.Path;
+            int r = await Task.Run(() => DaphneNative.Load(_p, path, json, seek, play, out var err) is var code && code == DaphneNative.Ok
                 ? code : Fail(code, err));
             if (r != DaphneNative.Ok) return;
             _loaded = true;
@@ -280,7 +301,7 @@ public sealed partial class DaphneEngine : IAudioEngine
     /// <summary>Gapless: tell the core what follows (it continues without a gap when the format matches).</summary>
     void QueueNext()
     {
-        if (!_loaded || !_s.Gapless) { DaphneNative.dc_set_next(_p, null); return; }
+        if (!_loaded || !_s.Gapless || _track?.IsLive == true) { DaphneNative.dc_set_next(_p, null); return; }   // a live stream has no end
         var n = PeekNext?.Invoke();
         if (n == null || n.IsLive || n.Codec == "CD" || string.IsNullOrEmpty(n.Path)) { _next = null; DaphneNative.dc_set_next(_p, null); return; }
         _next = n;
@@ -305,6 +326,7 @@ public sealed partial class DaphneEngine : IAudioEngine
 
     public Task SeekAsync(double pos)
     {
+        if (_track?.IsLive == true) return Task.CompletedTask;   // YouTube Music seeks in its own page
         if (!_loaded) { _pausedAt = pos; return Task.CompletedTask; }
         DaphneNative.dc_seek(_p, pos);
         _position = pos;
@@ -483,7 +505,7 @@ public sealed partial class DaphneEngine : IAudioEngine
             DspActive = dsp.Count > 0,
             DspSummary = dsp.Count > 0 ? string.Join(" · ", dsp) : null,
             ReplayGainDb = Math.Abs(rg) > 1e-9 ? rg : null,
-            Decoder = "Daphne",
+            Decoder = t.IsLive ? "WebView 音訊" : "Daphne",
             SourceChannels = src.GetProperty("channels").GetInt32(),
             VolumeMode = volumeMode,
         };

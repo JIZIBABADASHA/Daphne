@@ -41,7 +41,7 @@ protected:
     int64_t pos_ = 0;
 };
 
-// Picks the decoder by file extension:
+// Picks the decoder by file extension (kLivePath: the host's live input, live_source.h):
 //   wav / wave / bwf / aiff / aif / aifc -> dr_wav
 //   flac / fla                           -> dr_flac
 //   mp3 / mp2 / mp1                      -> minimp3 (float output)

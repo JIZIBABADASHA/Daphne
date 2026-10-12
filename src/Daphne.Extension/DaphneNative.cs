@@ -40,6 +40,9 @@ static class DaphneNative
     [DllImport(Dll)] static extern int dc_poll_event(IntPtr p, byte[] json, int len);
     [DllImport(Dll)] public static extern void dc_meter(IntPtr p, out double l, out double r);
     [DllImport(Dll)] public static extern double dc_design(IntPtr p);
+    // live input (YouTube Music): MIKU's shared ring (LiveBus) and the page's sample rate
+    [DllImport(Dll)] public static extern void dc_live_bus(IntPtr ringBase, int capFrames, int rate);
+    [DllImport(Dll)] public static extern void dc_live_rate(int rate);
     [DllImport(Dll)] static extern int dc_devices(byte[] json, int len);
     [DllImport(Dll, CharSet = CharSet.Unicode)] static extern int dc_filter_cache_dir(char[] dir, int len);
     [DllImport(Dll)] static extern long dc_filter_cache_prune(byte[] settings, int limitMb);

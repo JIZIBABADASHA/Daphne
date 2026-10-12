@@ -94,11 +94,20 @@ public sealed partial class DaphneEngine
         var sections = new List<object>();
 
         // ── 來源
-        string srcText = isDsd ? $"{t.Codec} • {DsdName(srcRate)} • {Mhz(srcRate)} MHz"
+        string srcText = t.IsLive ? $"YouTube Music • {Khz(srcRate)} kHz"
+                       : isDsd ? $"{t.Codec} • {DsdName(srcRate)} • {Mhz(srcRate)} MHz"
                                : $"{t.Codec} • {(t.Bits > 0 ? t.Bits + "-bit / " : "")}{Khz(srcRate)} kHz";
         // 解碼: what the decoder hands on. PCM: the integers become 64-bit floating point, exactly (24-bit fits the
         // 53-bit mantissa); a DSD file is read as its 1-bit stream (sent as it is, or converted to PCM below)
-        PathRow decode = isDsd
+        // YouTube Music: the browser decodes; its 32-bit float samples come through MIKU's shared ring, read at a
+        // slightly adjusted rate so the browser's clock and the DAC's stay together (the interpolation changes samples)
+        PathRow decode = t.IsLive
+            ? Row("解碼", "瀏覽器解碼 · 32-bit 浮點", true,
+                  "YouTube Music 網頁的聲音由瀏覽器（WebView2）解碼，經共用記憶體送進 Daphne",
+                  "時鐘校正：瀏覽器與 DAC 的時鐘不同，讀取速率微調（最多 ±0.5%）讓緩衝維持約 0.3 秒，以 4 點 Hermite 內插",
+                  "不丟也不重複樣本，所以沒有爆音")
+              with { pin = new[] { To(Pcm(F64, pcmRate)), new PathPin("解碼器", "瀏覽器（WebView2）") } }
+            : isDsd
             ? Row("解碼", "讀取 1-bit DSD 串流", false) with { pin = new[] { To(Dsd1(srcRate)), new PathPin("解碼器", mark: true) } }
             : Row("解碼", t.IsLossy ? "有損解碼" : t.Bits > 0 ? $"{t.Bits}-bit 整數轉成浮點" : "轉成浮點", false,
                   t.IsLossy ? "解碼器輸出浮點樣本，轉成 64-bit 浮點" : "整數樣本放進 64-bit 浮點的 53-bit 尾數，數值完全不變")

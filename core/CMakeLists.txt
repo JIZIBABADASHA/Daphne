@@ -10,6 +10,7 @@ add_library(daphne_engine STATIC
     src/chain.cpp
     src/decoder_factory.cpp
     src/decoder_flac.cpp
+    src/decoder_live.cpp
     src/decoder_wav.cpp
     src/decoder_mp3.cpp
     src/decoder_ffmpeg.cpp

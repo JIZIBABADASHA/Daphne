@@ -12,6 +12,7 @@
 
 #include "daphne/engine/devices.h"
 #include "daphne/engine/filters.h"
+#include "daphne/engine/live_source.h"
 #include "daphne/engine/player.h"
 #include "daphne/engine/sample_format.h"
 #include "daphne/engine/settings.h"
@@ -253,6 +254,8 @@ DC_API int dc_state(dc_player* p, char* out, int len) {
             duration = static_cast<double>(p->report.source.frames) / p->report.source.rate;
         j = {{"state", state}, {"position", position}, {"duration", duration}, {"track", p->track},
              {"design", p->design.load()}, {"error", p->error}, {"report", report_json(p->report)}};
+        if (const auto ls = daphne::live_stats(); ls.active && p->player)
+            j["live"] = {{"fill", ls.fill}, {"read", ls.read}, {"resyncs", ls.resyncs}, {"starves", ls.starves}, {"adjust", ls.adjust}};
         if (p->player) {
             j["asio_rates"] = p->player->asio_rates();
             j["debug"] = json::parse(p->player->debug_json(), nullptr, false);
@@ -274,6 +277,9 @@ DC_API int dc_poll_event(dc_player* p, char* out, int len) {
 }
 
 DC_API double dc_design(dc_player* p) { return p ? p->design.load() : 1.0; }
+
+DC_API void dc_live_bus(void* base, int cap_frames, int rate) { daphne::set_live_bus(base, cap_frames, rate); }
+DC_API void dc_live_rate(int rate) { daphne::set_live_rate(rate); }
 
 DC_API void dc_meter(dc_player* p, double* l, double* r) {
     double a = 0, b = 0;
