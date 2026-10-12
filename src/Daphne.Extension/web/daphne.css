@@ -33,7 +33,12 @@
   background: var(--panel, rgba(30, 30, 34, .96)); color: var(--fg, #eee); box-shadow: 0 8px 28px rgba(0, 0, 0, .35);
   opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity .2s, transform .2s; }
 .dp-design.on { opacity: 1; transform: none; }
-.dp-design-t { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.dp-design-t { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+/* the title: the wordmark (.dp-mark, 14px, the popup's text colour at 85%), 10px, then the text. On one baseline:
+   centring the boxes leaves DAPHNE high (the CJK font's line box has more room above its glyphs). The petal sits on the
+   baseline up to the capital height (it is as tall as the capitals), where centring it on them puts it too. */
+.dp-design-h { display: inline-flex; align-items: baseline; gap: 10px; font-size: 14px; }
+.dp-design-h .dp-mark { align-items: baseline; }
 .dp-design-pct { font-variant-numeric: tabular-nums; opacity: .8; }
 .dp-design-f { margin: 4px 0 8px; font-size: 12px; opacity: .75; word-break: break-all; }
 .dp-design-bar { height: 6px; border-radius: 3px; background: rgba(127, 127, 127, .25); overflow: hidden; }
@@ -103,5 +108,7 @@
    by the petal's own proportions (0.540); the gap follows the text size */
 .dp-petal-svg { flex: none; display: block; width: .374em; height: .692em; }
 .dp-petal-svg svg { display: block; width: 100%; height: 100%; }
+/* in MIKU's 播放方案 menu (its button and its option; both 14px): the mark as it is, in the line's colour at 85% */
+.msel .dp-mark, .msel-menu .dp-mark { vertical-align: baseline; }
 /* after the DSP title (the host's .sp-mark gives the gap: the heading's 8 px plus 2 px, as on 解碼, and the colour) */
 .sigpop .sig-sect .sp-mark .dp-mark { margin-right: calc(4px - .32em); }

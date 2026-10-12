@@ -243,7 +243,8 @@
     show(d) {
       if (!this.el) {
         this.el = h('div', { class: 'dp-design' },
-          h('div', { class: 'dp-design-t' }, h('b', null, 'Daphne 正在設計濾波器'), h('span', { class: 'dp-design-pct' }, '')),
+          // the title starts with the wordmark (petal + DAPHNE), as in the signal path card
+          h('div', { class: 'dp-design-t' }, h('b', { class: 'dp-design-h' }, mark(), '正在設計濾波器'), h('span', { class: 'dp-design-pct' }, '')),
           h('div', { class: 'dp-design-f' }, ''),
           h('div', { class: 'dp-design-bar' }, h('i', null)),
           h('small', null, '播放不中斷，設計完成後會交叉淡入；結果會快取，下次切換就不用再等'));
@@ -266,6 +267,8 @@
       Daphne.state = await api.rpc('state') || Daphne.state;
       api.on('design', d => Design.show(d || {}));
       api.signalPath(drawPath);
+      // the wordmark in place of "Daphne" in MIKU's 播放方案 menu (MIKU builds without coreLabel show the name)
+      if (api.coreLabel) api.coreLabel('daphne', mark);
       // Daphne's own card after the output card, titled with the wordmark: groups of the same rank, DSD (MIKU's DSD
       // card moved in) → 升頻 → 濾波器 …
       let dsdGroup = null;
