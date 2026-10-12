@@ -43,7 +43,7 @@ whenever nothing in the chain needs to change a sample. It ships as a static lib
 
 ## Signal chain
 
-Every stage below is documented, with its measurements, in [`doc/`](doc) (N0–N24, in Chinese).
+Every stage below is documented, with its measurements, in [`doc/`](doc) (N0–N24, in Chinese); the standards, papers and books each design rests on are listed in [`doc/參考文獻.md`](doc/參考文獻.md).
 
 ```mermaid
 flowchart TD
