@@ -109,6 +109,50 @@ TEST_CASE("Chain: level changes in place, structural changes need a new chain", 
     CHECK_FALSE(b.update(s));
 }
 
+TEST_CASE("Chain: content delay and output size come from the blocks' own reports", "[chain]") {
+    // an impulse comes out at content_delay(): the resampler's kernel peak, plus the limiter's delay
+    auto peak_at = [](const Settings& s, const AudioInfo& a, const DeviceFormat& d, int* delay, int* max_out) {
+        DspChain c;
+        std::string e;
+        REQUIRE(c.build(s, a, d, 4096, &e));
+        std::vector<double> x(2 * 4096, 0.0), y;
+        x[2 * 100] = x[2 * 100 + 1] = 0.5;
+        std::vector<double> o(2 * static_cast<size_t>(c.max_output_frames()));
+        for (int k = 0; k < 4; ++k) {
+            const int n = c.process(x.data(), 4096, o.data());
+            REQUIRE(n <= c.max_output_frames());
+            y.insert(y.end(), o.begin(), o.begin() + 2 * n);
+            std::fill(x.begin(), x.end(), 0.0);
+        }
+        size_t best = 0;
+        for (size_t f = 0; f < y.size() / 2; ++f)
+            if (std::abs(y[2 * f]) > std::abs(y[2 * best])) best = f;
+        *delay = c.content_delay();
+        *max_out = c.max_output_frames();
+        return static_cast<int>(best);
+    };
+    Settings s;
+    s.filter.taps = 1024;
+    int delay = 0, max_out = 0;
+    // 2x: impulse at input frame 100 -> output frame 200 + kernel peak
+    int at = peak_at(s, source(44100, 2, 16), device(88200, 2, SampleType::Float32, 32), &delay, &max_out);
+    CHECK(at == 200 + delay);
+    CHECK(delay > 0);
+    CHECK(max_out >= 2 * 4096);   // the resampler's bound, not the input chunk
+    // DSD file converted to PCM: the limiter's 2 ms add to the delay
+    AudioInfo dsd = source(44100, 2, 0);
+    dsd.dsd_pcm = true;
+    const int resampler_only = delay;
+    at = peak_at(s, dsd, device(88200, 2, SampleType::Float32, 32), &delay, &max_out);
+    CHECK(at == 200 + delay);
+    CHECK(delay == resampler_only + 176);   // 2 ms at 88.2 kHz
+    // no resampler (native rate): delay 0, output size = input chunk
+    at = peak_at(Settings{}, source(44100, 2, 16), device(44100, 2, SampleType::Float32, 32), &delay, &max_out);
+    CHECK(at == 100);
+    CHECK(delay == 0);
+    CHECK(max_out == 4096);
+}
+
 TEST_CASE("Chain: wrong device rates are refused", "[chain]") {
     DspChain c;
     std::string e;

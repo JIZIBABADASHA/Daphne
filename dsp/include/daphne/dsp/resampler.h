@@ -53,6 +53,7 @@ public:
     // End of stream: outputs the buffered input (pending * ratio frames) and resets.
     int flush(double* out) override;
     int latency_frames() const override { return 0; }
+    int content_delay_frames() const override { return peak_index(); }
     void reset() override;
     bool is_identity() const override;
 

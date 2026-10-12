@@ -56,8 +56,8 @@ bool DspChain::needs_quantizer(const Settings& s) const {
 
 void DspChain::add(std::string name, std::unique_ptr<dsp::Block> b, int& frames, int& rate, int& channels) {
     b->prepare({rate, channels, frames});
-    if (auto* rs = dynamic_cast<dsp::Resampler*>(b.get())) frames = rs->max_output_frames(frames);
     const dsp::Format f = b->output_format();
+    frames = f.max_frames;
     rate = f.rate;
     channels = f.channels;
     max_buf_ = std::max(max_buf_, frames * channels);
@@ -153,10 +153,7 @@ bool DspChain::update(const Settings& s) {
 
 int DspChain::content_delay() const {
     int d = 0;
-    for (const auto& s : st_) {
-        if (auto* rs = dynamic_cast<const dsp::Resampler*>(s.block.get())) d += rs->peak_index();
-        else d += s.block->latency_frames();
-    }
+    for (const auto& s : st_) d += s.block->content_delay_frames();
     return d;
 }
 

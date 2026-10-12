@@ -15,7 +15,7 @@ namespace daphne::dsp {
 struct Format {
     int rate = 0;
     int channels = 0;
-    int max_frames = 0;   // largest frame count process() will be given
+    int max_frames = 0;   // largest frame count process() will be given (in output_format(): returns)
 };
 
 class Block {
@@ -24,12 +24,17 @@ public:
 
     // Allocate everything; process() must not allocate afterwards.
     virtual void prepare(const Format& in) = 0;
-    // Output format (a resampler changes the rate).
+    // Output format (a resampler changes the rate). Its max_frames is the largest frame count
+    // process() or flush() returns, i.e. what the next block is given.
     virtual Format output_format() const = 0;
     // Returns the number of output frames written to out (in == out allowed when
     // the block does not change the frame count).
     virtual int process(const double* in, int frames, double* out) = 0;
     virtual int latency_frames() const = 0;
+    // Output frames between an input sample and where its content appears in the output: the
+    // latency, plus the filter's own delay for a block that is aligned without one (the resampler:
+    // its kernel peak). Used to align two chains in a crossfade.
+    virtual int content_delay_frames() const { return latency_frames(); }
     // End of stream: writes any output still held back (e.g. a partial block) and returns
     // its frame count. Blocks without internal buffering write nothing.
     virtual int flush(double* out) {
