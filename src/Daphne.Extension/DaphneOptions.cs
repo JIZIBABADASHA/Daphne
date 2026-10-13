@@ -26,17 +26,12 @@ public sealed class DaphneOptions
     public bool DsdPcmLimiter { get; set; } = true;      // DSD → PCM: limiter instead of clipping above full scale
     public int Threads { get; set; }                     // filter design threads, 0 = automatic
     public int CacheLimitMb { get; set; } = 1024;        // filter cache limit: 500 | 1024 | 2048 MB
-    // WASAPI device buffer, ms: 10 .. 200 (null: MIKU's 緩衝大小, clamped to that range). Daphne's own range: MIKU's
-    // slider (40 .. 500 ms) is for MIKU's core; above 200 ms pause and seek wait for a whole buffer (N24).
-    public int? BufferMs { get; set; }
-    public const int BufferMinMs = 10, BufferMaxMs = 200;
 
     public JsonObject ToJson() => new()
     {
         ["upsampler"] = Upsampler, ["target"] = Target, ["fixedRate"] = FixedRate, ["taps"] = Taps, ["phase"] = Phase,
         ["phaseCustom"] = PhaseCustom, ["apodize"] = Apodize, ["doubleDouble"] = DoubleDouble, ["order"] = Order, ["osr"] = Osr,
         ["dsdPcmLowpass"] = DsdPcmLowpass, ["dsdPcmLimiter"] = DsdPcmLimiter, ["threads"] = Threads, ["cacheLimitMb"] = CacheLimitMb,
-        ["bufferMs"] = BufferMs,
     };
 
     public void Load(JsonElement o) => Merge(o);
@@ -62,7 +57,6 @@ public sealed class DaphneOptions
                 case "dsdPcmLimiter": DsdPcmLimiter = v.GetBoolean(); break;
                 case "threads": Threads = Math.Clamp(v.GetInt32(), 0, 256); break;
                 case "cacheLimitMb": CacheLimitMb = v.GetInt32() is 500 or 1024 or 2048 ? v.GetInt32() : 1024; break;
-                case "bufferMs": BufferMs = v.ValueKind == JsonValueKind.Number ? Math.Clamp(v.GetInt32(), BufferMinMs, BufferMaxMs) : null; break;
             }
         }
     }
@@ -104,8 +98,7 @@ static class SettingsMap
             ["api"] = api, ["device"] = device, ["rate"] = Rate(s, o), ["dsd"] = dsd,
             ["dsd_pcm_lowpass"] = o.DsdPcmLowpass, ["dsd_pcm_limiter"] = o.DsdPcmLimiter,
             ["max_dsd"] = s.DsdLimit(),   // MIKU's DAC 最高 DSD
-            // the WASAPI device buffer: Daphne's own setting, else MIKU's 緩衝大小 (ASIO: the driver's buffer applies)
-            ["buffer_ms"] = o.BufferMs ?? Math.Clamp(s.BufferMs, DaphneOptions.BufferMinMs, DaphneOptions.BufferMaxMs),
+            ["buffer_ms"] = Math.Clamp(s.BufferMs, 40, 200),   // MIKU's 緩衝大小, 40 .. 200 ms (WASAPI; ASIO: the driver's)
         };
         j["core"] = Upsampler(s, o) == "dsd" ? "dsd" : "pcm";
         j["filter"] = new JsonObject
