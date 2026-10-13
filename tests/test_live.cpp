@@ -85,7 +85,7 @@ TEST_CASE("Live decoder: silence before the producer starts, then the stream wit
     CHECK(std::abs(st.adjust) <= 0.005);
 }
 
-TEST_CASE("Live decoder: lapped by the writer it restarts close to it; a starve fades out, then 5 ms of silence", "[live]") {
+TEST_CASE("Live decoder: lapped by the writer it restarts close to it; a starve fades out, refills with silence at once, fades in", "[live]") {
     Bus bus(48000);
     std::string e;
     auto d = open_decoder(kLivePath, &e);
@@ -103,8 +103,9 @@ TEST_CASE("Live decoder: lapped by the writer it restarts close to it; a starve 
     bus.write(20000);
     std::vector<double> last;
     int guard = 0;
+    const auto silent = [&](int n) { return std::all_of(out.begin(), out.begin() + 2 * n, [](double v) { return v == 0.0; }); };
     for (int n; (n = d->read(out.data(), 1024)) > 0 && ++guard < 200;) {
-        if (n == 240 && out[0] == 0.0 && out[2 * 239] == 0.0) break;   // the starve's silence
+        if (silent(n)) break;   // the first call after the starve's fade-out
         last.assign(out.begin(), out.begin() + 2 * n);
     }
     REQUIRE(guard < 200);
@@ -112,15 +113,21 @@ TEST_CASE("Live decoder: lapped by the writer it restarts close to it; a starve 
     REQUIRE(last.size() >= 2 * 200);
     CHECK(std::abs(last[last.size() - 2]) < 0.01);
     CHECK(live_stats().starves == 1);
-    // starved: wait about 20 ms, then 240 frames (5 ms) of silence
+    // refilling: all that is asked for, as silence, at once (as at the start), so the player's ring stays full
     const auto t0 = std::chrono::steady_clock::now();
     const int n = d->read(out.data(), 4096);
     const auto waited = std::chrono::steady_clock::now() - t0;
-    CHECK(n == 240);
-    for (int i = 0; i < 2 * n; ++i) CHECK(out[static_cast<size_t>(i)] == 0.0);
-    CHECK(waited >= std::chrono::milliseconds(15));
-    CHECK(waited < std::chrono::milliseconds(200));
+    CHECK(n == 4096);
+    CHECK(silent(n));
+    CHECK(waited < std::chrono::milliseconds(10));
     CHECK(live_stats().starves == 1);   // one event, not one per silent call
+    // 0.3 s buffered again: the audio comes back with a fade-in (starting near zero)
+    bus.write(15000);
+    const int m = d->read(out.data(), 1024);
+    REQUIRE(m > 0);
+    CHECK_FALSE(silent(m));
+    CHECK(std::abs(out[0]) < 0.01);
+    CHECK(live_stats().starves == 1);
 }
 
 namespace {

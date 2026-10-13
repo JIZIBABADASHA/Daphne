@@ -14,7 +14,8 @@
 // The exceptions fade (5 ms) instead of stepping:
 //   - start: silence at once until 0.3 s is buffered (the player prefills its ring), then a fade-in
 //   - starve (the producer fell behind): after waiting up to 20 ms, a fade-out on the last 5 ms held
-//     back for it, then 5 ms of silence per call until 0.3 s is buffered again, then a fade-in
+//     back for it, then silence at once (as at the start, keeping the player's ring full) until 0.3 s
+//     is buffered again, then a fade-in
 //   - more than 1.2 s piled up (a stall: the player was paused): fade out, restart close to the
 //     writer, fade in
 //   - lapped by the writer or the page reloaded: restart close to the writer and fade in (what was

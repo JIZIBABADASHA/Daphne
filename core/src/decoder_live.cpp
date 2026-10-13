@@ -121,11 +121,15 @@ public:
         for (;;) {
             const int n = produce(out, frames, false);
             if (n > 0) return advance(n);
-            if (!running_) return silence(out, frames);   // nothing yet: the player prefills its ring
+            // nothing yet (the player prefills its ring), or refilling after a starve or a restart: silence at once, as
+            // much as the player asks for. It asks only when its ring has room, so the silence keeps that ring full;
+            // waiting here instead (20 ms per 5 ms of silence) drained it, and once the audio came back the player
+            // took its refill out of the jitter buffer, leaving it near empty and the next starve close
+            if (!running_ || (refill_ && gain_ == 0)) return silence(out, frames);
             if (std::chrono::steady_clock::now() >= deadline) {
                 if (gain_ > 0) {
                     // the producer fell behind: fade out on the frames held back for it, then wait for the
-                    // buffer to fill again (silence meanwhile, a little at a time)
+                    // buffer to fill again (silence meanwhile, see above)
                     g_starves++;
                     target_ = 0;
                     const int f = produce(out, frames, true);
