@@ -115,11 +115,28 @@
     field('濾波器設計執行緒', '設計大型濾波器時佔用的 CPU 執行緒；播放時會影響聲音的話請調低', ui.select(threads, op.threads || 0, v => set({ threads: +v })));
   };
 
+  /**
+   * 裝置緩衝 in place of MIKU's 緩衝大小 (hidden): the WASAPI device buffer, 10 .. 200 ms (output.buffer_ms). MIKU's own
+   * slider, 40 .. 500 ms, is for MIKU's core; Daphne prepares 0.5 s ahead anyway, so the device buffer only sets how
+   * fast pause and seek respond, and above 200 ms they wait for a whole buffer. Until it is set here, MIKU's value
+   * (clamped) applies. ASIO uses the driver's buffer: no field.
+   */
+  const BUFFER_MIN = 10, BUFFER_MAX = 200;
+  function bufferField(host, ui) {
+    if (ui.hide) ui.hide('buffer');
+    if (App.settings.outputMode === 'asio') return;
+    const cur = Math.min(BUFFER_MAX, Math.max(BUFFER_MIN, o().bufferMs ?? App.settings.bufferMs ?? 100));
+    const r = h('input', { class: 'range', type: 'range', min: BUFFER_MIN, max: BUFFER_MAX, step: 5, value: cur });
+    const v = h('span', { class: 'num muted', style: { width: '58px', textAlign: 'right' } }, cur + ' ms');
+    r.oninput = () => v.textContent = r.value + ' ms';
+    r.onchange = () => set({ bufferMs: +r.value });
+    host.append(ui.field('裝置緩衝', '較長更穩定（時鐘不穩的裝置、虛擬音效線建議 50 ms 以上）；較短時暫停與搜尋反應較快', [r, v]));
+  }
+
   /** 升頻 (the upsampler and its target, or the DSD rate and order) → 濾波器 (PCM 升頻 and 轉成 DSD; apodizing first). */
   function coreSettings(host, ui) {
     const op = o();
-    // MIKU's 緩衝大小 is the WASAPI device buffer (output.buffer_ms); the core picks its rate in its own 升頻 group: no
-    // 取樣率 card
+    // the core picks its rate in its own 升頻 group: no 取樣率 card
     if (ui.hide) ui.hide('rate');
     watch(host, () => [App.settings.fixedRate, App.settings.maxDsd, App.settings.outputMode].join('|'));
     if (App.settings.outputMode === 'shared') {
@@ -275,6 +292,7 @@
       api.addSettings('core', (host, ui) => {
         dsdGroup = null;
         if (ui.core.id !== 'daphne') return;
+        bufferField(host, ui);   // in MIKU's output card, where its 緩衝大小 was (it applies in shared mode too)
         const card = ui.section(null);
         card.classList.add('dp-sect');
         // the title: Δάφνη (GFS Didot, its petal from the icon) and DAPHNE under it as text; the divider and 再生設置 are artwork

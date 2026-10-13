@@ -173,6 +173,18 @@ TEST_CASE("Settings: defaults round trip, errors and warnings", "[settings]") {
     CHECK_FALSE(daphne::settings_from_string("{ not json").ok());
 }
 
+TEST_CASE("Settings: output.buffer_ms is 0 (the device default) or up to 200 ms", "[settings]") {
+    for (int ms : {0, 10, 50, 200}) {
+        const auto r = daphne::settings_from_string(R"({"output": {"buffer_ms": )" + std::to_string(ms) + "}}");
+        CHECK(r.ok());
+        CHECK(r.settings.output.buffer_ms == ms);
+    }
+    // beyond 200 ms pause and seek would wait for a whole buffer (N24): an error, the default kept
+    const auto r = daphne::settings_from_string(R"({"output": {"buffer_ms": 250}})");
+    CHECK_FALSE(r.ok());
+    CHECK(r.settings.output.buffer_ms == 0);
+}
+
 TEST_CASE("Filter cache: store, load, low parts, prune", "[cache]") {
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);

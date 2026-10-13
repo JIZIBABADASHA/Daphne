@@ -1069,7 +1069,9 @@ struct Player::Impl {
     void do_seek(double sec) {
         if (!dev) return;
         dev->set_paused(true);
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+        // the device fades out at its next callback, one buffer away (output.buffer_ms): wait for two of them
+        const int buf_ms = rep.device.frame_rate() > 0 ? static_cast<int>(1000LL * dev->buffer_frames() / rep.device.frame_rate()) : 0;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(300, 2 * buf_ms + 50));
         while (!dev->paused() && !dev->failed() && std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         ring->clear();

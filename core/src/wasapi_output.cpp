@@ -227,7 +227,8 @@ bool WasapiOutput::open(const WasapiOptions& opt, int rate, int channels, std::s
     // the 15.6 ms system tick) needs a longer one: output.buffer_ms.
     const REFERENCE_TIME def_duration = exclusive_ ? std::max<REFERENCE_TIME>(def_period, 250000) : 1000000;
     const REFERENCE_TIME want = opt.buffer_ms > 0
-                                    ? std::max<REFERENCE_TIME>(static_cast<REFERENCE_TIME>(opt.buffer_ms) * 10000, exclusive_ ? def_period : 0)
+                                    ? std::max<REFERENCE_TIME>(static_cast<REFERENCE_TIME>(std::max(opt.buffer_ms, 10)) * 10000,
+                                                               exclusive_ ? def_period : 0)
                                     : def_duration;
     auto initialize = [&](REFERENCE_TIME duration) {
         REFERENCE_TIME period = exclusive_ ? duration : 0;

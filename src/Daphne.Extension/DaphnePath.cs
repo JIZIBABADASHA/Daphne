@@ -97,6 +97,8 @@ public sealed partial class DaphneEngine
         string srcText = t.IsLive ? $"YouTube Music • {Khz(srcRate)} kHz"
                        : isDsd ? $"{t.Codec} • {DsdName(srcRate)} • {Mhz(srcRate)} MHz"
                                : $"{t.Codec} • {(t.Bits > 0 ? t.Bits + "-bit / " : "")}{Khz(srcRate)} kHz";
+        bool srcLossless = src.TryGetProperty("lossless", out var sl) && sl.ValueKind == JsonValueKind.True;
+        int srcBits = src.TryGetProperty("bits", out var sb) && sb.ValueKind == JsonValueKind.Number ? sb.GetInt32() : 0;
         // 解碼: what the decoder hands on. PCM: the integers become 64-bit floating point, exactly (24-bit fits the
         // 53-bit mantissa); a DSD file is read as its 1-bit stream (sent as it is, or converted to PCM below)
         // YouTube Music: the browser decodes; its 32-bit float samples come through MIKU's shared ring, read at a
@@ -109,8 +111,11 @@ public sealed partial class DaphneEngine
               with { pin = new[] { To(Pcm(F64, pcmRate)), new PathPin("解碼器", "瀏覽器（WebView2）") } }
             : isDsd
             ? Row("解碼", "讀取 1-bit DSD 串流", false) with { pin = new[] { To(Dsd1(srcRate)), new PathPin("解碼器", mark: true) } }
-            : Row("解碼", t.IsLossy ? "有損解碼" : t.Bits > 0 ? $"{t.Bits}-bit 整數轉成浮點" : "轉成浮點", false,
-                  t.IsLossy ? "解碼器輸出浮點樣本，轉成 64-bit 浮點" : "整數樣本放進 64-bit 浮點的 53-bit 尾數，數值完全不變")
+            // the core's report says whether the samples are exact integers (MIKU's track bits also count float files)
+            : Row("解碼", t.IsLossy ? "有損解碼" : srcLossless && srcBits > 0 ? $"{srcBits}-bit 整數轉成浮點" : "浮點樣本", false,
+                  t.IsLossy ? "解碼器輸出浮點樣本，轉成 64-bit 浮點"
+                  : srcLossless ? "整數樣本放進 64-bit 浮點的 53-bit 尾數，數值完全不變"
+                  : "浮點樣本放進 64-bit 浮點，數值不變")
               with { pin = new[] { To(Pcm(F64, pcmRate)), new PathPin("解碼器", mark: true) } };
         sections.Add(new
         {
@@ -211,9 +216,17 @@ public sealed partial class DaphneEngine
                 $"{DsdName(clock)} 包在 PCM 裡送出（DoP 標記），DAC 解開後以 DSD 播放"));
         else
         {
-            string word = DeviceWord(dev.GetProperty("type").GetString() ?? "", dev.GetProperty("bits").GetInt32(), dev.GetProperty("container").GetInt32());
-            outRows.Add(Row("格式", Pcm(word, devRate), false,
-                chain.Contains("quantizer") ? null : "64-bit 浮點轉回裝置的整數格式，數值不變"));
+            string type = dev.GetProperty("type").GetString() ?? "";
+            int container = dev.GetProperty("container").GetInt32();
+            string word = DeviceWord(type, dev.GetProperty("bits").GetInt32(), container);
+            // without a quantizer: an integer device gets bit-perfect samples (the core leaves the quantizer out only
+            // then); a float device never has one, and float32 rounds unless the samples are a source's integers
+            bool bitPerfect = _report.TryGetProperty("bit_perfect", out var bp) && bp.ValueKind == JsonValueKind.True;
+            string conv = chain.Contains("quantizer") ? null
+                : !type.StartsWith("float") ? "64-bit 浮點轉回裝置的整數格式，數值不變"
+                : container >= 64 || bitPerfect ? "64-bit 浮點轉成裝置的浮點格式，數值不變"
+                : $"64-bit 浮點捨入成 {container}-bit 浮點（24-bit 尾數），不加抖動";
+            outRows.Add(Row("格式", Pcm(word, devRate), false, conv));
         }
         sections.Add(new { title = "輸出", rows = outRows });
 

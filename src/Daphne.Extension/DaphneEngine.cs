@@ -17,7 +17,8 @@ namespace DaphneMiku;
 ///
 /// MIKU features on this core:
 ///   • output mode / device / ASIO driver → Daphne's output; DSD 播放方式 → output.dsd (native = ASIO native DSD, else DoP)
-///   • DAC 最高 DSD → output.max_dsd; 緩衝大小 → output.buffer_ms (the WASAPI device buffer)
+///   • DAC 最高 DSD → output.max_dsd; the WASAPI device buffer → output.buffer_ms (Daphne's own 裝置緩衝, 10 .. 200 ms, in place of
+///     MIKU's 緩衝大小)
 ///   • digital volume, EQ, crossfeed → Daphne (changes glide in place)
 ///   • hardware volume → the WASAPI endpoint volume (also for DSD sent directly, like the MIKU core)
 ///   • ReplayGain → Daphne's gain stage (raised only as far as the peak tag allows)
