@@ -268,6 +268,7 @@ struct Player::Impl {
     }
     // the background rebuild can be cancelled when a newer change supersedes it
     std::shared_ptr<std::atomic<bool>> build_cancel;
+    bool build_designs = false;   // the background build designs a filter (not only loads it from the cache)
 
     std::atomic<double> design_prog{0.0};
     std::chrono::steady_clock::time_point design_report{};
@@ -448,12 +449,13 @@ struct Player::Impl {
             crate = chain_fmt.rate;
             if (want_fade_in) ramp_in_left = ramp_in_len = std::max<int64_t>(1, crate / 50);   // 20 ms
             // a filter to design before the first sound: the pcm core's resampler or the modulator's pre-filter
-            const bool pre = s.core == CoreMode::Dsd && chain_fmt.rate != src.rate;
-            if ((s.core == CoreMode::Pcm && rep.device.rate != src.rate) || pre) {
-                const int to = pre ? chain_fmt.rate : rep.device.rate;
-                std::vector<double> h;
-                const std::string key = filter_cache_key(s.filter, src.rate, to);
-                if (!load_cached_filter(key, h))
+            // (the chain's condition). Only a real design reports its progress: a cached filter can take a moment to
+            // load, and the host would show a design popup for it (with the text of the last design).
+            bool designing = false;
+            if (chain_fmt.rate != src.rate || s.filter.apodize) {
+                const int to = chain_fmt.rate;
+                designing = !filter_cached(s.filter, src.rate, to);
+                if (designing)
                     event("designing the filter for " + std::to_string(src.rate) + " -> " + std::to_string(to) +
                           " Hz (long filters can take minutes; the result is cached)");
             }
@@ -474,7 +476,8 @@ struct Player::Impl {
                         return false;
                     }
                 });
-                while (job.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) report_design();
+                while (job.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready)
+                    if (designing) report_design();
                 built = job.get();
                 if (!built) e = be;
                 report_design(true);
@@ -1170,6 +1173,7 @@ struct Player::Impl {
         const Settings cs = chain_settings(ns, run_osr);
         const AudioInfo src = rep.source;
         design_prog = 0.0;
+        build_designs = (chain_fmt.rate != src.rate || cs.filter.apodize) && !filter_cached(cs.filter, src.rate, chain_fmt.rate);
         build_cancel = std::make_shared<std::atomic<bool>>(false);
         building = std::async(std::launch::async, [cs, src, devf = chain_fmt, this, flag = build_cancel]() -> std::unique_ptr<DspChain> {
             // playback is running: stay below it (the design workers take this priority)
@@ -1185,7 +1189,7 @@ struct Player::Impl {
             }
             return c;
         });
-        event("designing " + describe_filter(ns) + " in the background (playback continues)");
+        event((build_designs ? "designing " : "building ") + describe_filter(ns) + " in the background (playback continues)");
     }
 
     // The PCM decoder for a file: DSD files reaching this point are converted to PCM.
@@ -1307,7 +1311,7 @@ struct Player::Impl {
     bool poll_build() {
         if (!building.valid()) return true;
         if (building.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
-            report_design();
+            if (build_designs) report_design();
             return true;
         }
         report_design(true);

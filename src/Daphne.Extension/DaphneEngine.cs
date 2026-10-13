@@ -214,6 +214,7 @@ public sealed partial class DaphneEngine : IAudioEngine
         {
             _designing = false;
             _host.Post("design", new { progress = 1.0, text = Describe(_designText), done = true });
+            _designText = null;   // the next popup names its own design, never this one
         }
     }
 

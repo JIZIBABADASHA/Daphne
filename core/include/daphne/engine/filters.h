@@ -38,6 +38,9 @@ std::string filter_cache_key(const FilterSettings& s, int fs_in, int fs_out);
 // Cache directory, or empty when the cache is disabled.
 std::wstring filter_cache_dir();
 bool load_cached_filter(const std::string& key, std::vector<double>& h);
+// Whether design_filter / make_resampler will find the filter in the cache (with its low parts for
+// double-double; a ratio-1 filter without apodizing is a unit impulse, never designed). Reads the headers only.
+bool filter_cached(const FilterSettings& s, int fs_in, int fs_out);
 void store_cached_filter(const std::string& key, const std::vector<double>& h);
 
 // Cache keys the settings use: the PCM filter and the modulator's pre-filter for the source rates

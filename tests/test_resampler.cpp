@@ -197,6 +197,13 @@ TEST_CASE("Filter cache: store, load, low parts, prune", "[cache]") {
     f.taps = 1024;
     f.phase = daphne::FilterPhase::Minimum;
     std::vector<double> lo1, lo2;
+    CHECK_FALSE(daphne::filter_cached(f, 44100, 176400));
+    daphne::design_filter(f, 44100, 176400);   // without its low parts: not cached for double-double
+    CHECK(daphne::filter_cached(f, 44100, 176400));
+    f.double_double = true;
+    CHECK_FALSE(daphne::filter_cached(f, 44100, 176400));
+    f.double_double = false;
+    CHECK(daphne::filter_cached(f, 44100, 44100));   // a unit impulse: nothing to design
     const auto h1 = daphne::design_filter(f, 44100, 176400, &lo1);
     const auto key = daphne::filter_cache_key(f, 44100, 176400);
     std::vector<double> c;
@@ -207,6 +214,9 @@ TEST_CASE("Filter cache: store, load, low parts, prune", "[cache]") {
     const auto h2 = daphne::design_filter(f, 44100, 176400, &lo2);   // from the cache
     CHECK(h2 == h1);
     CHECK(lo2 == lo1);
+    f.double_double = true;
+    CHECK(daphne::filter_cached(f, 44100, 176400));
+    f.double_double = false;
     // ratio 1 without apodizing is not cached
     daphne::design_filter(f, 44100, 44100);
     CHECK_FALSE(daphne::load_cached_filter(daphne::filter_cache_key(f, 44100, 44100), c));

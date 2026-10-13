@@ -85,6 +85,27 @@ bool load_cached_filter(const std::string& key, std::vector<double>& h) {
     return true;
 }
 
+namespace {
+// the file for key exists and is its own (the header only; load_cached_filter checks the rest)
+bool cache_has(const std::string& key) {
+    const auto path = cache_file(key);
+    if (path.empty()) return false;
+    std::ifstream f(path, std::ios::binary);
+    char magic[8];
+    uint32_t klen = 0;
+    if (!f || !f.read(magic, 8) || std::memcmp(magic, kMagic, 8) != 0 || !f.read(reinterpret_cast<char*>(&klen), 4) || klen > 4096)
+        return false;
+    std::string k(klen, '\0');
+    return f.read(k.data(), klen) && k == key;
+}
+}  // namespace
+
+bool filter_cached(const FilterSettings& s, int fs_in, int fs_out) {
+    if (!cacheable(s, fs_in, fs_out)) return true;
+    const std::string key = filter_cache_key(s, fs_in, fs_out);
+    return cache_has(key) && (!s.double_double || cache_has(key + "_lo"));
+}
+
 void store_cached_filter(const std::string& key, const std::vector<double>& h) {
     const auto path = cache_file(key);
     if (path.empty() || h.empty()) return;
