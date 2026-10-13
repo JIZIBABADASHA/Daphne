@@ -127,8 +127,17 @@
       toast('已清除濾波器暫存（保留目前設定使用的濾波器）');
       rerender();
     } }, '清除暫存');
-    field('濾波器暫存', `目前 ${size(c.bytes || 0)}・${c.files} 個`,
+    // the size follows new filters (a design finishing, the limit pruning) while the page is open
+    const text = k => `目前 ${size((k && k.bytes) || 0)}・${(k && k.files) || 0} 個`;
+    const status = h('span', null, text(c));
+    field('濾波器暫存', status,
       h('div', { class: 'dp-cache-ctl' }, h('span', { class: 'dp-limit-t', title: limitTip }, '上限'), limitSel, open, clear));
+    const update = () => {
+      if (!document.contains(status)) { clearInterval(timer); if (Daphne.cacheChanged === update) Daphne.cacheChanged = null; return; }
+      Daphne.api.rpc('state').then(st => { if (st) { Daphne.state = st; status.textContent = text(st.cache); } }).catch(() => {});
+    };
+    const timer = setInterval(update, 2000);
+    Daphne.cacheChanged = update;   // a design finishing writes the new filter into the cache: at once (Design.show)
   };
 
   const threadsField = (op, field, ui) => {
@@ -278,7 +287,10 @@
       this.el.querySelector('.dp-design-pct').textContent = d.done ? '完成' : pct + '%';
       this.el.querySelector('.dp-design-bar i').style.width = (d.done ? 100 : pct) + '%';
       this.el.classList.add('on');
-      if (d.done) this.hideTimer = setTimeout(() => this.el && this.el.classList.remove('on'), 1200);
+      if (d.done) {
+        this.hideTimer = setTimeout(() => this.el && this.el.classList.remove('on'), 1200);
+        if (Daphne.cacheChanged) Daphne.cacheChanged();   // the settings page's 濾波器暫存 row, when it is open
+      }
     },
   };
 
