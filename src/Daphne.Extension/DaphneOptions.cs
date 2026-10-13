@@ -98,7 +98,7 @@ static class SettingsMap
             ["api"] = api, ["device"] = device, ["rate"] = Rate(s, o), ["dsd"] = dsd,
             ["dsd_pcm_lowpass"] = o.DsdPcmLowpass, ["dsd_pcm_limiter"] = o.DsdPcmLimiter,
             ["max_dsd"] = s.DsdLimit(),   // MIKU's DAC 最高 DSD
-            ["buffer_ms"] = Math.Clamp(s.BufferMs, 30, 500),   // MIKU's 緩衝大小 (WASAPI; ASIO: the driver's; the core takes up to 500)
+            ["buffer_ms"] = Math.Clamp(s.BufferMs, 40, 200),   // MIKU's 緩衝大小, 40 .. 200 ms (WASAPI; ASIO: the driver's)
         };
         j["core"] = Upsampler(s, o) == "dsd" ? "dsd" : "pcm";
         j["filter"] = new JsonObject

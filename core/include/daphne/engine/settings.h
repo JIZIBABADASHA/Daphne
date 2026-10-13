@@ -7,7 +7,7 @@
 //   "output":  { "api": "wasapi_exclusive" | "wasapi_shared" | "asio", "device": "",
 //                "rate": "native" | "auto" | "2x" | "<Hz>", "dsd": "auto" | "native" | "dop" | "pcm",
 //                "dsd_pcm_lowpass": 24 | 30 | 50, "dsd_pcm_limiter": true, "max_dsd": 0 | 64 | ... | 512,
-//                "dsd_lead_in_ms": 0 .. 2000, "buffer_ms": 0 .. 500 },
+//                "dsd_lead_in_ms": 0 .. 2000, "buffer_ms": 0 .. 200 },
 //   "core":    "pcm" | "dsd",
 //   "filter":  { "taps": 16 .. 1048576, "phase": "linear" | "intermediate" | "minimum" | "custom",
 //                "phase_custom": 0 .. 1, "apodize": false, "double_double": false },
@@ -65,10 +65,12 @@ struct OutputSettings {
     // from PCM to DSD mutes while it locks, which would cut the start of the track.
     int dsd_lead_in_ms = 100;
     // WASAPI device buffer in ms, 0 = default (exclusive: the device period, at least 25 ms; shared:
-    // 100 ms). A device clocked coarsely (a virtual cable timed by the 15.6 ms system tick) runs short
-    // with 25 ms buffers and pads the gap with zeros; a longer buffer avoids it. A buffer the device
-    // does not accept falls back to the default. ASIO: the driver's buffer size applies. Up to 500 ms (the
-    // ring holds at least three buffers).
+    // 100 ms), else 10 .. 200 (1 .. 9 count as 10). A device clocked coarsely (a virtual cable timed by
+    // the 15.6 ms system tick) runs short with 25 ms buffers and pads the gap with zeros; 50 ms cured it
+    // in every run. Below 10 ms nothing is gained (the player buffers 0.5 s ahead anyway; the device
+    // buffer only sets how fast pause and seek respond) and few devices take it; above 200 ms pause and
+    // seek wait for a whole buffer. A buffer the device does not accept falls back to the default. ASIO:
+    // the driver's buffer size applies.
     int buffer_ms = 0;
 };
 

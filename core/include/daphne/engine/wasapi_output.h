@@ -16,7 +16,8 @@ namespace daphne {
 struct WasapiOptions {
     std::string device;      // endpoint ID, list index ("0", "1", ...) or empty = default
     bool exclusive = true;
-    // Device buffer in ms, 0 = default (exclusive: the device period, at least 25 ms; shared: 100 ms).
+    // Device buffer in ms, 0 = default (exclusive: the device period, at least 25 ms; shared: 100 ms),
+    // else at least 10 ms and the device's minimum period.
     // Exclusive: a buffer the device does not accept falls back to the default (buffer_fallback()).
     int buffer_ms = 0;
 };

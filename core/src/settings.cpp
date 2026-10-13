@@ -171,7 +171,7 @@ void read_output(Reader& r, const json& o, OutputSettings& s) {
     r.boolean(o, "dsd_pcm_limiter", p, s.dsd_pcm_limiter);
     r.integer(o, "max_dsd", p, s.max_dsd, 0, 0, {0, 64, 128, 256, 512});
     r.integer(o, "dsd_lead_in_ms", p, s.dsd_lead_in_ms, 0, 2000);
-    r.integer(o, "buffer_ms", p, s.buffer_ms, 0, 500);
+    r.integer(o, "buffer_ms", p, s.buffer_ms, 0, 200);
 }
 
 void read_filter(Reader& r, const json& o, FilterSettings& s) {
