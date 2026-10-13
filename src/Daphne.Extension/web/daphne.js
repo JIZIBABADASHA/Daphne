@@ -110,6 +110,27 @@
     };
   }
 
+  /** The filter cache (the last row of 濾波器): its size, the limit, open the folder, clear it. */
+  const cacheField = (field, ui) => {
+    const c = Daphne.state.cache;
+    if (!c) return;
+    if (!c.dir) { field('濾波器暫存', '已停用（DAPHNE_FILTER_CACHE=off）', h('span')); return; }
+    const size = b => b >= 1 << 30 ? (b / (1 << 30)).toFixed(2) + ' GB' : b >= 1 << 20 ? (b / (1 << 20)).toFixed(1) + ' MB' : Math.round(b / 1024) + ' KB';
+    const limit = [500, 1024, 2048].includes(o().cacheLimitMb) ? o().cacheLimitMb : 1024;
+    const limitTip = '濾波器暫存上限：超過時從最久沒用到的濾波器開始刪除，目前設定使用中的濾波器一律保留';
+    const limitSel = ui.select([[500, '500 MB'], [1024, '1 GB'], [2048, '2 GB']], limit, v => set({ cacheLimitMb: +v }).then(rerender));
+    limitSel.title = limitTip;
+    const open = h('button', { class: 'dp-btn', title: c.dir, onclick: () => Daphne.api.rpc('openCache') }, '開啟資料夾');
+    const clear = h('button', { class: 'dp-btn', title: '清除濾波器暫存：只保留目前設定使用中的濾波器', onclick: async () => {
+      clear.disabled = true;
+      Daphne.state = await Daphne.api.rpc('clearCache') || Daphne.state;
+      toast('已清除濾波器暫存（保留目前設定使用的濾波器）');
+      rerender();
+    } }, '清除暫存');
+    field('濾波器暫存', `目前 ${size(c.bytes || 0)}・${c.files} 個`,
+      h('div', { class: 'dp-cache-ctl' }, h('span', { class: 'dp-limit-t', title: limitTip }, '上限'), limitSel, open, clear));
+  };
+
   const threadsField = (op, field, ui) => {
     const threads = [[0, '自動（核心數 − 2）'], [1, '1'], [2, '2'], [4, '4'], [8, '8'], [16, '16']];
     field('濾波器設計執行緒', '設計大型濾波器時佔用的 CPU 執行緒；播放時會影響聲音的話請調低', ui.select(threads, op.threads || 0, v => set({ threads: +v })));
@@ -191,6 +212,7 @@
           ui.sw(!!op.doubleDouble, v => set({ doubleDouble: v })));
         threadsField(op, f.field, ui);
       }
+      cacheField(f.field, ui);
     }
   }
 
@@ -297,9 +319,8 @@
         api.rpc('state').then(s => {   // newer numbers for the next time the page is drawn
           if (s) Daphne.state = s;
         });
-        // the row in 關於: the brand on the left (icon; Δάφνη, under it petal DAPHNE | 播放核心 [commit]), the filter cache
-        // on the right (status, limit, open folder, clear); the explanations are in the controls' tooltips
-        const redraw = () => { try { Router.render(false, 'none'); } catch (e) { console.error('[daphne]', e); } };
+        // the row in 關於: the brand (icon; Δάφνη, under it petal DAPHNE | 播放核心 [commit]); the filter cache is in the
+        // audio settings (濾波器 → 濾波器暫存)
         const brand = h('div', { class: 'dp-brand' },
           icon(),
           h('div', { class: 'lbl' },
@@ -309,34 +330,7 @@
               h('span', { class: 'dp-sep' }),
               h('span', null, '播放核心'),
               Daphne.state.commit ? h('code', { class: 'dp-commit' }, Daphne.state.commit) : h('span', null, '版本不明'))));
-        const c = Daphne.state.cache;
-        const size = b => b >= 1 << 30 ? (b / (1 << 30)).toFixed(2) + ' GB' : b >= 1 << 20 ? (b / (1 << 20)).toFixed(1) + ' MB' : Math.round(b / 1024) + ' KB';
-        let ctl = null;
-        if (c && c.dir) {
-          // the limit: MIKU's menu with 上限 in front (the rule in the tooltip)
-          const limit = [500, 1024, 2048].includes(o().cacheLimitMb) ? o().cacheLimitMb : 1024;
-          const limitSel = ui.select([[500, '500 MB'], [1024, '1 GB'], [2048, '2 GB']], limit,
-            v => set({ cacheLimitMb: +v }).then(redraw));
-          const limitTip = '濾波器暫存上限：超過時從最久沒用到的濾波器開始刪除，目前設定使用中的濾波器一律保留';
-          limitSel.title = limitTip;
-          // 上限 as a plain label in front of MIKU's own menu
-          const limitLabel = h('span', { class: 'dp-limit-t', title: limitTip }, '上限');
-          const open = h('button', { class: 'dp-btn', title: c.dir, onclick: () => api.rpc('openCache') }, '開啟資料夾');
-          const clear = h('button', { class: 'dp-btn', title: '清除濾波器暫存：只保留目前設定使用中的濾波器', onclick: async () => {
-            clear.disabled = true;
-            Daphne.state = await api.rpc('clearCache') || Daphne.state;
-            toast('已清除濾波器暫存（保留目前設定使用的濾波器）');
-            redraw();
-          } }, '清除暫存');
-          // status above, the menu and the two buttons below, right-aligned
-          ctl = h('div', { class: 'dp-cache' },
-            h('small', { class: 'dp-cache-st' }, '濾波器暫存 ', h('b', null, size(c.bytes || 0)), h('span', { class: 'dp-dot' }, '•'), `${c.files} 個`),
-            h('div', { class: 'dp-cache-ctl' }, limitLabel, limitSel, open, clear));
-        } else if (c) {
-          ctl = h('div', { class: 'dp-cache' }, h('small', { class: 'dp-cache-st', title: 'DAPHNE_FILTER_CACHE=off' }, '濾波器暫存已停用'));
-        }
-        // the inner row is the flex line; the field is its size container (narrow: the controls go below the brand)
-        host.append(h('div', { class: 'field dp-about' }, h('div', { class: 'dp-row' }, brand, ctl)));
+        host.append(h('div', { class: 'field dp-about' }, h('div', { class: 'dp-row' }, brand)));
       });
     },
   });
