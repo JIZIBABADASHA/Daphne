@@ -20,7 +20,9 @@
 #include "daphne/dsp/quantizer.h"
 #include "daphne/engine/ring_buffer.h"
 #include "daphne/platform/platform.h"
+#include "player/change_plan.h"
 #include "player/common.h"
+#include "player/output_session.h"
 #include "player/report.h"
 #include "player/timeline.h"
 
@@ -38,6 +40,7 @@ struct Player::Impl {
     PlayReport& rep = report.rep;      // the report's parts, used throughout
     PlayCallbacks& cb = report.cb;
     Timeline tl;
+    OutputSession io;                  // the device, its ring and the chunk being pushed
 
     // threading
     std::thread th;
@@ -53,17 +56,14 @@ struct Player::Impl {
 
     // playback (DSP thread only)
     std::unique_ptr<Decoder> dec;
-    std::unique_ptr<AudioOutput> dev;
     std::unique_ptr<DspChain> cur, next;
     std::future<std::unique_ptr<DspChain>> building;
     std::optional<std::pair<Settings, OutputChoice>> build_target, queued;
-    std::unique_ptr<ByteRing> ring;
     std::vector<double> pcm, dsp, tmp_c, tmp_n, hist_tmp;
-    std::vector<uint8_t> bytes;
     std::vector<double> hist;
     int hist_cap = 1 << 17;
     int64_t in_total = 0;    // source frames read since the start of the track
-    int ratio = 1, ch = 0, dch = 0, block = 0, want = 0;
+    int ratio = 1, ch = 0, dch = 0, want = 0;
     // chain output rate / format (= the device's, except for the dsd core: the modulator's PCM)
     int crate = 0;
     DeviceFormat chain_fmt{};
@@ -101,21 +101,19 @@ struct Player::Impl {
     void update_diag() {
         if (!report.diag_due()) return;
         char b[512];
-        const OutputStats* st = dev ? &dev->stats() : nullptr;
+        const OutputStats* st = io.dev ? &io.dev->stats() : nullptr;
         std::snprintf(b, sizeof b,
                       "{\"ring\":%zu,\"ring_cap\":%zu,\"pend\":%zu,\"eof\":%d,\"fading\":%d,\"building\":%d,\"paused\":%d,"
                       "\"dev_paused\":%d,\"callbacks\":%lld,\"underruns\":%lld,\"drained\":%d,\"failed\":%d,\"late\":%lld,\"tl.abs_out\":%lld,\"in\":%lld}",
-                      ring ? ring->readable() : 0, ring ? ring->capacity() : 0, pend - pend_off, eof.load() ? 1 : 0, fading ? 1 : 0,
-                      building.valid() ? 1 : 0, want_pause.load() ? 1 : 0, dev && dev->paused() ? 1 : 0,
+                      io.ring ? io.ring->readable() : 0, io.ring ? io.ring->capacity() : 0, io.pend - io.pend_off, io.eof.load() ? 1 : 0, fading ? 1 : 0,
+                      building.valid() ? 1 : 0, want_pause.load() ? 1 : 0, io.dev && io.dev->paused() ? 1 : 0,
                       st ? static_cast<long long>(st->callbacks.load()) : -1LL, st ? static_cast<long long>(st->underruns.load()) : -1LL,
-                      dev && dev->drained() ? 1 : 0, dev && dev->failed() ? 1 : 0,
+                      io.dev && io.dev->drained() ? 1 : 0, io.dev && io.dev->failed() ? 1 : 0,
                       st ? static_cast<long long>(st->late_callbacks.load()) : -1LL, static_cast<long long>(tl.abs_out), static_cast<long long>(in_total));
         report.set_diag(b);
     }
     std::vector<uint8_t> dsd_bytes;
     bool flushed = false;
-    std::atomic<bool> eof{false};
-    size_t pend = 0, pend_off = 0;
     Fifo fc, fn, carry;
     bool fading = false;
     int64_t fade_pos = 0, fade_len = 0, drop_next = 0;
@@ -156,17 +154,6 @@ struct Player::Impl {
 
     std::unique_ptr<AudioOutput> open_output(const OutputRequest& req, std::string* error) { return deps.open_output(req, error); }
 
-    // about 0.5 s, and at least three device buffers (a long output.buffer_ms takes a whole buffer per event)
-    size_t ring_bytes() const {
-        return std::max(static_cast<size_t>(rep.device.frame_rate()) * block / 2, static_cast<size_t>(dev->buffer_frames()) * 3 * block);
-    }
-
-    // output.buffer_ms the device did not take (WASAPI exclusive): it runs with its default buffer
-    void note_buffer_fallback() {
-        if (dev->buffer_fallback())
-            event("output.buffer_ms: the device does not take a " + std::to_string(s.output.buffer_ms) +
-                  " ms buffer, playing with its default (" + std::to_string(std::lround(dev->latency_ms())) + " ms)");
-    }
 
     void event(const std::string& e) const { report.event(e); }
 
@@ -218,40 +205,40 @@ struct Player::Impl {
             const bool last = attempt + 1 == rates.size();
             std::string e;
             auto fail_attempt = [&]() {
-                dev.reset();
+                io.dev.reset();
                 if (last && error) *error = e;
                 return last;
             };
             dec->seek(from);
             in_total = from;
             flushed = false;
-            eof = false;
-            pend = pend_off = 0;
+            io.eof = false;
+            io.pend = io.pend_off = 0;
             fading = false;
             next.reset();
             fc.clear(), fn.clear(), carry.clear();
-            dev = open_output({out, s.output.buffer_ms, rates[attempt].rate, src.channels, rates[attempt].native}, &e);
-            if (!dev) {
+            io.dev = open_output({out, s.output.buffer_ms, rates[attempt].rate, src.channels, rates[attempt].native}, &e);
+            if (!io.dev) {
                 if (fail_attempt()) return false;
                 continue;
             }
-            if (dev->probe_before_design()) {
+            if (io.dev->probe_before_design()) {
                 // some drivers accept a rate they cannot stream: try it before designing the filter
                 // (DoP: DoP silence, so the DAC does not see a stretch of PCM before the stream)
                 ByteRing probe(1 << 12);
                 std::atomic<bool> probe_eof{false};
-                dev->set_dop(s.core == CoreMode::Dsd && !rates[attempt].native);
-                if (!dev->start(&probe, &probe_eof, &e)) {
+                io.dev->set_dop(s.core == CoreMode::Dsd && !rates[attempt].native);
+                if (!io.dev->start(&probe, &probe_eof, &e)) {
                     if (fail_attempt()) return false;
                     continue;
                 }
-                dev->stop();
+                io.dev->stop();
             }
-            rep.device = dev->format();
-            rep.device_name = dev->device_name();
-            rep.latency_ms = dev->latency_ms();
-            note_buffer_fallback();
-            if (auto rates_ok = dev->supported_rates(); !rates_ok.empty()) report.set_asio_rates(std::move(rates_ok));
+            rep.device = io.dev->format();
+            rep.device_name = io.dev->device_name();
+            rep.latency_ms = io.dev->latency_ms();
+            io.note_buffer_fallback(report, s.output.buffer_ms);
+            if (auto rates_ok = io.dev->supported_rates(); !rates_ok.empty()) report.set_asio_rates(std::move(rates_ok));
             chain_fmt = rep.device;
             dsdenc.reset();
             run_osr = 0;
@@ -317,26 +304,26 @@ struct Player::Impl {
             ratio = std::max(1, crate / src.rate);
             tl.h_base = 0;
             dch = rep.device.channels;
-            block = rep.device.block_align();
+            io.block = rep.device.block_align();
             tl.abs_out = from * ratio;
             fc.ch = fn.ch = carry.ch = dch;
-            ring = std::make_unique<ByteRing>(ring_bytes());
+            io.ring = std::make_unique<ByteRing>(io.ring_bytes(rep.device.frame_rate()));
             dsp.assign(static_cast<size_t>(cur->max_output_frames()) * dch, 0.0);
             tmp_c = dsp;
             tmp_n = dsp;
-            bytes.assign(dsdenc ? dsdenc->max_bytes(cur->max_output_frames()) : static_cast<size_t>(cur->max_output_frames()) * block, 0);
+            io.bytes.assign(dsdenc ? dsdenc->max_bytes(cur->max_output_frames()) : static_cast<size_t>(cur->max_output_frames()) * io.block, 0);
             // DSD: silence first, so the DAC has switched to DSD and locked before the music (output.dsd_lead_in_ms)
             if (dsdenc) push_dsd_idle(s.output.dsd_lead_in_ms);
-            while (!cancel && ring->writable() >= bytes.size()) {   // prefill
+            while (!cancel && io.ring->writable() >= io.bytes.size()) {   // prefill
                 if (!produce()) {
-                    eof = true;
+                    io.eof = true;
                     break;
                 }
-                push();
+                io.push();
             }
-            dev->set_dop(dsdenc && dsdenc->dop());
-            dev->set_paused(want_pause.load());
-            if (!dev->start(ring.get(), &eof, &e)) {
+            io.dev->set_dop(dsdenc && dsdenc->dop());
+            io.dev->set_paused(want_pause.load());
+            if (!io.dev->start(io.ring.get(), &io.eof, &e)) {
                 if (fail_attempt()) return false;
                 continue;
             }
@@ -447,7 +434,7 @@ struct Player::Impl {
         const size_t need = std::max(tmp_n.size(), tmp_c.size());
         if (dsp.size() < need) {
             dsp.resize(need);
-            bytes.resize(dsdenc ? dsdenc->max_bytes(static_cast<int>(need / dch)) : need / dch * block);
+            io.bytes.resize(dsdenc ? dsdenc->max_bytes(static_cast<int>(need / dch)) : need / dch * io.block);
         }
         fade_len = std::max<int64_t>(1, static_cast<int64_t>(crate * kFadeSeconds));
         fade_pos = 0;
@@ -456,7 +443,7 @@ struct Player::Impl {
 
     // One chunk into bytes; false at the end of the stream.
     bool produce() {
-        if (pend_off < pend) return true;
+        if (io.pend_off < io.pend) return true;
         int n = 0;
         while (n == 0) {
             if (!fading && carry.frames() > 0) {
@@ -507,15 +494,15 @@ struct Player::Impl {
         if (dsdenc) {
             dsd_bytes.clear();
             dsdenc->encode(dsp.data(), n, dsd_bytes);
-            if (bytes.size() < dsd_bytes.size()) bytes.resize(dsd_bytes.size());
-            std::copy(dsd_bytes.begin(), dsd_bytes.end(), bytes.begin());
-            pend = dsd_bytes.size();
+            if (io.bytes.size() < dsd_bytes.size()) io.bytes.resize(dsd_bytes.size());
+            std::copy(dsd_bytes.begin(), dsd_bytes.end(), io.bytes.begin());
+            io.pend = dsd_bytes.size();
         } else {
-            rep.clipped += convert_to_device(dsp.data(), static_cast<size_t>(n) * dch, rep.device, bytes.data());
+            rep.clipped += convert_to_device(dsp.data(), static_cast<size_t>(n) * dch, rep.device, io.bytes.data());
             rep.clipped += cur->take_clips() + (next ? next->take_clips() : 0);   // clamped by the final quantizer
-            pend = static_cast<size_t>(n) * block;
+            io.pend = static_cast<size_t>(n) * io.block;
         }
-        pend_off = 0;
+        io.pend_off = 0;
         tl.abs_out += n;
         rep.frames_played += n;
         return true;
@@ -526,11 +513,11 @@ struct Player::Impl {
         if (!dsdenc) return;
         dsd_bytes.clear();
         dsdenc->idle(rep.device.frame_rate() * ms / 1000, dsd_bytes);
-        if (bytes.size() < dsd_bytes.size()) bytes.resize(dsd_bytes.size());
-        std::copy(dsd_bytes.begin(), dsd_bytes.end(), bytes.begin());
-        pend = dsd_bytes.size();
-        pend_off = 0;
-        while (!push()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if (io.bytes.size() < dsd_bytes.size()) io.bytes.resize(dsd_bytes.size());
+        std::copy(dsd_bytes.begin(), dsd_bytes.end(), io.bytes.begin());
+        io.pend = dsd_bytes.size();
+        io.pend_off = 0;
+        while (!io.push()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
     // DoP only: about `ms` of plain PCM zeros (no DoP markers) so the DAC leaves its DoP-detected DSD
@@ -538,26 +525,18 @@ struct Player::Impl {
     // when native DSD follows.
     void push_pcm_silence(int ms) {
         if (!dsdenc || !dsdenc->dop()) return;
-        const size_t n = static_cast<size_t>(rep.device.frame_rate()) * ms / 1000 * block;
-        if (bytes.size() < n) bytes.resize(n);
-        std::fill(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(n), 0);
-        pend = n;
-        pend_off = 0;
-        while (!push()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        const size_t n = static_cast<size_t>(rep.device.frame_rate()) * ms / 1000 * io.block;
+        if (io.bytes.size() < n) io.bytes.resize(n);
+        std::fill(io.bytes.begin(), io.bytes.begin() + static_cast<std::ptrdiff_t>(n), 0);
+        io.pend = n;
+        io.pend_off = 0;
+        while (!io.push()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
-    bool push() {   // false when the ring is full
-        while (pend_off < pend) {
-            const size_t n = ring->write(bytes.data() + pend_off, pend - pend_off);
-            pend_off += n;
-            if (n == 0) return false;
-        }
-        return true;
-    }
 
     // Chain frame being heard (the device's queue counted back from abs_out).
     int64_t heard_out() const {
-        int64_t q = ring ? static_cast<int64_t>(ring->readable() / std::max(1, block)) + static_cast<int64_t>((pend - pend_off) / std::max(1, block)) : 0;
+        int64_t q = io.queued_frames();
         if (rep.device.rate > 0 && crate != rep.device.frame_rate()) q = q * crate / rep.device.frame_rate();   // DoP frames -> chain frames
         return tl.abs_out - q;
     }
@@ -676,8 +655,8 @@ struct Player::Impl {
         if (dsp.size() < need) dsp.resize(need);
         if (tmp_c.size() < need) tmp_c.resize(need);
         if (tmp_n.size() < need) tmp_n.resize(need);
-        const size_t nb = dsdenc ? dsdenc->max_bytes(static_cast<int>(need / dch)) : need / dch * block;
-        if (bytes.size() < nb) bytes.resize(nb);
+        const size_t nb = dsdenc ? dsdenc->max_bytes(static_cast<int>(need / dch)) : need / dch * io.block;
+        if (io.bytes.size() < nb) io.bytes.resize(nb);
 
         const int64_t start = tl.abs_out + carry.frames();   // device frame where the joined part begins
         const int64_t a_end = tl.latest_base() + in_total * ratio + cur->content_delay();   // where A's frame K is heard
@@ -846,28 +825,28 @@ struct Player::Impl {
     // queued without blocking, the loop pushes it.
     void queue_end() {
         end_queued = true;
-        eof = true;
+        io.eof = true;
         if (!dsdenc) return;
         dsd_bytes.clear();
         dsdenc->idle(rep.device.frame_rate() / 10, dsd_bytes);
-        if (dsdenc->dop()) dsd_bytes.resize(dsd_bytes.size() + static_cast<size_t>(rep.device.frame_rate()) / 5 * block, 0);
-        if (bytes.size() < dsd_bytes.size()) bytes.resize(dsd_bytes.size());
-        std::copy(dsd_bytes.begin(), dsd_bytes.end(), bytes.begin());
-        pend = dsd_bytes.size();
-        pend_off = 0;
+        if (dsdenc->dop()) dsd_bytes.resize(dsd_bytes.size() + static_cast<size_t>(rep.device.frame_rate()) / 5 * io.block, 0);
+        if (io.bytes.size() < dsd_bytes.size()) io.bytes.resize(dsd_bytes.size());
+        std::copy(dsd_bytes.begin(), dsd_bytes.end(), io.bytes.begin());
+        io.pend = dsd_bytes.size();
+        io.pend_off = 0;
     }
 
     // Seek with the device open: pause it (PCM fades out), drop what is queued, refill, resume.
     void do_seek(double sec) {
-        if (!dev) return;
-        dev->set_paused(true);
+        if (!io.dev) return;
+        io.dev->set_paused(true);
         // the device fades out at its next callback, one buffer away (output.buffer_ms): wait for two of them
-        const int buf_ms = rep.device.frame_rate() > 0 ? static_cast<int>(1000LL * dev->buffer_frames() / rep.device.frame_rate()) : 0;
+        const int buf_ms = rep.device.frame_rate() > 0 ? static_cast<int>(1000LL * io.dev->buffer_frames() / rep.device.frame_rate()) : 0;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(300, 2 * buf_ms + 50));
-        while (!dev->paused() && !dev->failed() && std::chrono::steady_clock::now() < deadline)
+        while (!io.dev->paused() && !io.dev->failed() && std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        ring->clear();
-        pend = pend_off = 0;
+        io.ring->clear();
+        io.pend = io.pend_off = 0;
         std::string e;
         check_switch();   // a track heard just now is the one the seek is in
         if (!tl.switches.empty()) {
@@ -909,10 +888,10 @@ struct Player::Impl {
         }
         tl.h_base = 0;
         tl.track_origin_in = 0;
-        eof = false;
+        io.eof = false;
         end_queued = false;
-        dev->rearm();
-        while (!cancel && ring->writable() >= bytes.size()) {   // refill
+        io.dev->rearm();
+        while (!cancel && io.ring->writable() >= io.bytes.size()) {   // refill
             if (!(dsdf ? produce_dsd() : produce())) {
                 if (!try_gapless()) {
                     queue_end();
@@ -920,23 +899,14 @@ struct Player::Impl {
                 }
                 continue;
             }
-            push();
+            io.push();
         }
-        push();
-        dev->set_paused(want_pause.load());
+        io.push();
+        io.dev->set_paused(want_pause.load());
         pos = heard_position();
         event("seek to " + std::to_string(sec) + " s");
     }
 
-    // Before the device closes for a restart / at the end: what is queued plays out, or, when
-    // paused, is dropped (nothing would consume it).
-    void drop_if_paused() {
-        if (dev && dev->paused()) {
-            ring->clear();
-            pend = pend_off = 0;
-            dev->set_paused(false);
-        }
-    }
 
     // One pass of the transport requests (DSP thread).
     void service_transport() {
@@ -946,10 +916,10 @@ struct Player::Impl {
             sk.swap(seek_req);
         }
         if (sk) do_seek(*sk);
-        if (dev) {
-            dev->set_paused(want_pause.load());
+        if (io.dev) {
+            io.dev->set_paused(want_pause.load());
             double l = 0, r = 0;
-            dev->meter(l, r);
+            io.dev->meter(l, r);
             if (l > meter_l.load()) meter_l = l;
             if (r > meter_r.load()) meter_r = r;
         }
@@ -989,46 +959,36 @@ struct Player::Impl {
         return d;
     }
 
-    // Settings the decoder is built from.
-    bool decoder_changes(const Settings& ns) const {
-        return is_dsd_path(cur_path) && ns.output.dsd_pcm_lowpass != s.output.dsd_pcm_lowpass;
-    }
-
-    // the WASAPI device buffer (ASIO: the driver's)
-    bool buffer_changes(const Settings& ns) const { return api_takes_buffer_ms(out.api) && ns.output.buffer_ms != s.output.buffer_ms; }
-
-    bool needs_restart(const Settings& ns, const OutputChoice& no) const {
-        return !(no == out) || ns.core != s.core || requested_rate(ns, rep.source.rate) != want || modulator_key(ns) != modulator_key(s) ||
-               decoder_changes(ns) || buffer_changes(ns);
-    }
+    // what plays now, for the change decisions (change_plan.h)
+    Playing playing() const { return {s, out, want, rep.source.rate, cur_path}; }
 
     // drain = false: the device is reopened as it is (a driver reset): what is queued is dropped.
     bool restart(const Settings& ns, const OutputChoice& no, bool drain = true) {
         check_switch();
         if (tl.cross_pending()) drain = false;   // the queue holds the next track at another rate: not played out
         int64_t from = dsdf ? heard_position() : std::max<int64_t>(0, heard_input());   // PCM: stream timeline
-        drop_if_paused();
+        io.drop_if_paused();
         drop_prep();   // built for the old settings / device
-        if (dev && !eof && !dev->failed() && drain) {
+        if (io.dev && !io.eof && !io.dev->failed() && drain) {
             // play what is queued, fade the next chunk out, let the device drain, resume there
-            while (!push()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            while (!io.push()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
             from = std::max<int64_t>(0, (tl.abs_out - (cur ? cur->content_delay() : 0)) / std::max(1, ratio));
             fade_out_len = std::max<int64_t>(1, crate / 50);   // 20 ms
             fade_out_next = true;
             if (produce())
-                while (!push()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                while (!io.push()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
             push_dsd_idle(50);
             push_pcm_silence(200);
-            eof = true;
+            io.eof = true;
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-            while (!dev->drained() && !dev->failed() && std::chrono::steady_clock::now() < deadline)
+            while (!io.dev->drained() && !io.dev->failed() && std::chrono::steady_clock::now() < deadline)
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         want_fade_in = true;
         // `from` is on the stream timeline. With gapless tracks the decoder may have moved on: resume in
         // the track that holds `from`, at its own frame (a later track that was decoded but not reached
         // goes back to being the next track)
-        bool reopen_dec = decoder_changes(ns);
+        bool reopen_dec = decoder_changes(playing(), ns);
         if (!dsdf) {
             while (!tl.switches.empty() && !tl.switches.front().cross && from >= tl.switches.front().at_in) {
                 tl.track_origin_in = tl.switches.front().at_in;
@@ -1048,8 +1008,8 @@ struct Player::Impl {
             from = std::max<int64_t>(0, from - tl.track_origin_in);
             tl.track_origin_in = 0;
         }
-        if (dev) dev->stop();
-        dev.reset();
+        if (io.dev) io.dev->stop();
+        io.dev.reset();
         s = ns;
         out = no;
         if (reopen_dec) {
@@ -1079,7 +1039,7 @@ struct Player::Impl {
             return true;
         }
         dsp::set_design_threads(ns.design.threads);
-        if (needs_restart(ns, no)) return restart(ns, no);
+        if (needs_restart(playing(), ns, no)) return restart(ns, no);
         if (cur->update(chain_settings(ns, run_osr))) {
             s = ns;
             event("applied in place (EQ / crossfeed / volume)");
@@ -1140,48 +1100,48 @@ struct Player::Impl {
         if (s.output.dsd != DsdMode::Native) at.push_back({di.dsd_rate / 16, false});
         std::string e = at.empty() ? "output.dsd = native needs an ASIO driver with a DSD mode" : "";
         for (const auto& a : at) {
-            dev = open_output({out, s.output.buffer_ms, a.rate, di.channels, a.native}, &e);
-            if (!dev) continue;
-            if (dev->format().rate != a.rate || dev->format().channels != di.channels) {
-                e = "the device locked " + describe(dev->format()) + " instead of " + std::to_string(a.rate) + " Hz, " +
+            io.dev = open_output({out, s.output.buffer_ms, a.rate, di.channels, a.native}, &e);
+            if (!io.dev) continue;
+            if (io.dev->format().rate != a.rate || io.dev->format().channels != di.channels) {
+                e = "the device locked " + describe(io.dev->format()) + " instead of " + std::to_string(a.rate) + " Hz, " +
                     std::to_string(di.channels) + " ch";
-                dev.reset();
+                io.dev.reset();
                 continue;
             }
             dsdenc = std::make_unique<DsdEncoder>();
-            if (!dsdenc->init_direct(di.dsd_rate, dev->format(), a.native ? DsdTransport::Native : DsdTransport::Dop, &e)) {
-                dev.reset();
+            if (!dsdenc->init_direct(di.dsd_rate, io.dev->format(), a.native ? DsdTransport::Native : DsdTransport::Dop, &e)) {
+                io.dev.reset();
                 continue;
             }
-            rep.device = dev->format();
-            rep.device_name = dev->device_name();
-            rep.latency_ms = dev->latency_ms();
-            note_buffer_fallback();
+            rep.device = io.dev->format();
+            rep.device_name = io.dev->device_name();
+            rep.latency_ms = io.dev->latency_ms();
+            io.note_buffer_fallback(report, s.output.buffer_ms);
             crate = di.dsd_rate / 8;
             ratio = 1;
             dch = rep.device.channels;
-            block = rep.device.block_align();
+            io.block = rep.device.block_align();
             dsdf->seek(from);
             tl.abs_out = from;
-            eof = false;
-            pend = pend_off = 0;
-            ring = std::make_unique<ByteRing>(ring_bytes());
+            io.eof = false;
+            io.pend = io.pend_off = 0;
+            io.ring = std::make_unique<ByteRing>(io.ring_bytes(rep.device.frame_rate()));
             dsd_in.assign(static_cast<size_t>(kChunk) * 4 * di.channels, 0);
-            bytes.assign(static_cast<size_t>(kChunk) * 4 * block, 0);
+            io.bytes.assign(static_cast<size_t>(kChunk) * 4 * io.block, 0);
             // silence first, so the DAC has switched to DSD and locked before the music (output.dsd_lead_in_ms;
             // at least 30 ms after a restart)
             push_dsd_idle(std::max(s.output.dsd_lead_in_ms, want_fade_in ? 30 : 0));
-            while (!cancel && ring->writable() >= bytes.size()) {
+            while (!cancel && io.ring->writable() >= io.bytes.size()) {
                 if (!produce_dsd()) {
-                    eof = true;
+                    io.eof = true;
                     break;
                 }
-                push();
+                io.push();
             }
-            dev->set_dop(dsdenc->dop());
-            dev->set_paused(want_pause.load());
-            if (!dev->start(ring.get(), &eof, &e)) {
-                dev.reset();
+            io.dev->set_dop(dsdenc->dop());
+            io.dev->set_paused(want_pause.load());
+            if (!io.dev->start(io.ring.get(), &io.eof, &e)) {
+                io.dev.reset();
                 continue;
             }
             rep.chain.clear();
@@ -1195,15 +1155,15 @@ struct Player::Impl {
     }
 
     bool produce_dsd() {
-        if (pend_off < pend) return true;
+        if (io.pend_off < io.pend) return true;
         const int n = dsdf->read(dsd_in.data(), kChunk * 4);
         if (n <= 0) return false;
         dsd_bytes.clear();
         dsdenc->encode_dsd(dsd_in.data(), n, dsd_bytes);
-        if (bytes.size() < dsd_bytes.size()) bytes.resize(dsd_bytes.size());
-        std::copy(dsd_bytes.begin(), dsd_bytes.end(), bytes.begin());
-        pend = dsd_bytes.size();
-        pend_off = 0;
+        if (io.bytes.size() < dsd_bytes.size()) io.bytes.resize(dsd_bytes.size());
+        std::copy(dsd_bytes.begin(), dsd_bytes.end(), io.bytes.begin());
+        io.pend = dsd_bytes.size();
+        io.pend_off = 0;
         tl.abs_out += n;
         rep.frames_played += n;
         return true;
@@ -1212,24 +1172,24 @@ struct Player::Impl {
     // DSD direct: only the output can change (no processing applies to DSD sent directly).
     // reset: a driver reset reopens the device as it is (nothing more is queued for it).
     bool handle_dsd(const Settings& ns, const OutputChoice& no, bool reset = false) {
-        const bool reopen = reset || !(no == out) || ns.output.dsd != s.output.dsd || buffer_changes(ns);
+        const bool reopen = reset || dsd_direct_reopens(playing(), ns, no);
         s = ns;
         if (!reopen) {
             event("DSD file played directly: DSP settings do not apply");
             return true;
         }
         const int64_t from = heard_position();
-        drop_if_paused();
+        io.drop_if_paused();
         if (!reset) {
             push_dsd_idle(50);
             push_pcm_silence(200);
-            eof = true;
+            io.eof = true;
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-            while (dev && !dev->drained() && !dev->failed() && std::chrono::steady_clock::now() < deadline)
+            while (io.dev && !io.dev->drained() && !io.dev->failed() && std::chrono::steady_clock::now() < deadline)
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
-        if (dev) dev->stop();
-        dev.reset();
+        if (io.dev) io.dev->stop();
+        io.dev.reset();
         out = no;
         want_fade_in = true;
         event(reset ? "reopening the device" : "restarting the device for the new output");
@@ -1310,12 +1270,12 @@ struct Player::Impl {
                 }
                 kick_prepare();
                 service_transport();
-                if (!eof) {
+                if (!io.eof) {
                     if (!produce_dsd() && !try_gapless()) queue_end();
                 }
-                if (!push()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                else if (eof && pend_off >= pend) {
-                    if (dev->drained()) {
+                if (!io.push()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                else if (io.eof && io.pend_off >= io.pend) {
+                    if (io.dev->drained()) {
                         ended_flag = true;
                         if (cb.on_ended) cb.on_ended();
                         break;
@@ -1325,7 +1285,7 @@ struct Player::Impl {
                 pos = heard_position();
                 pos_sec = rep.source.rate > 0 ? static_cast<double>(pos) / rep.source.rate : 0.0;
                 if (cb.on_progress) cb.on_progress(pos, rep.source.frames);
-                if (dev->failed()) break;
+                if (io.dev->failed()) break;
                 if (!service_device()) {
                     ok = false;
                     break;
@@ -1381,10 +1341,10 @@ struct Player::Impl {
             }
             kick_prepare();
             service_transport();
-            if (!eof && !produce()) queue_end();
-            if (!push()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            else if (eof && pend_off >= pend) {
-                if (dev->drained()) {
+            if (!io.eof && !produce()) queue_end();
+            if (!io.push()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            else if (io.eof && io.pend_off >= io.pend) {
+                if (io.dev->drained()) {
                     ended_flag = true;
                     if (cb.on_ended) cb.on_ended();
                     break;
@@ -1394,7 +1354,7 @@ struct Player::Impl {
             pos = heard_position();
             pos_sec = rep.source.rate > 0 ? static_cast<double>(pos) / rep.source.rate : 0.0;
             if (cb.on_progress) cb.on_progress(pos, rep.source.frames);
-            if (dev->failed()) break;
+            if (io.dev->failed()) break;
             if (!service_device()) {
                 ok = false;
                 break;
@@ -1403,58 +1363,14 @@ struct Player::Impl {
         finish_playback();
     }
 
-    // The device's notes go to the host log (driver messages, late callbacks); a driver that asks
-    // to be opened again gets reopened, resuming where it was, at most 3 times in 10 s.
-    const AudioOutput* late_dev = nullptr;
-    int64_t late_seen = 0;
-    std::chrono::steady_clock::time_point late_at{};
-    int64_t rate_cb = -1;            // callbacks at the start of the rate window
-    std::chrono::steady_clock::time_point rate_at{};
-    std::deque<std::chrono::steady_clock::time_point> resets;
+    // The device's upkeep (OutputSession::upkeep); a driver that asks to be opened again gets reopened,
+    // resuming where it was.
     bool service_device() {
-        for (const auto& n : dev->take_notes()) event(n);
-        const auto now = std::chrono::steady_clock::now();
-        const OutputStats& st = dev->stats();
-        if (late_dev != dev.get()) {
-            late_dev = dev.get();
-            late_seen = 0;
-            rate_cb = -1;
+        switch (io.upkeep(report, rep.device.frame_rate(), &err)) {
+            case OutputSession::Upkeep::Ok: return true;
+            case OutputSession::Upkeep::Fail: return false;
+            case OutputSession::Upkeep::Reopen: break;
         }
-        // callbacks much faster than the buffer size allows: the driver changed its buffer behind us
-        const int64_t cbs = st.callbacks.load();
-        if (rate_cb < 0 || cbs < rate_cb) {
-            rate_cb = cbs;
-            rate_at = now;
-        } else if (now - rate_at >= std::chrono::seconds(1)) {
-            const double sec = std::chrono::duration<double>(now - rate_at).count();
-            const double got = (cbs - rate_cb) / sec;
-            const double expect = dev->buffer_frames() > 0 ? static_cast<double>(rep.device.frame_rate()) / dev->buffer_frames() : 0;
-            if (expect > 0 && got > expect * 1.5) {
-                char b[160];
-                std::snprintf(b, sizeof b, "device: %.0f callbacks/s, expected %.0f (buffer %d frames)", got, expect, dev->buffer_frames());
-                event(b);
-            }
-            rate_cb = cbs;
-            rate_at = now;
-        }
-        const int64_t late = st.late_callbacks.load();
-        if (late != late_seen && now - late_at >= std::chrono::seconds(1)) {
-            char b[200];
-            std::snprintf(b, sizeof b, "device: %lld late callbacks (total %lld, longest %.1f ms, buffer %.1f ms, underruns %lld)",
-                          static_cast<long long>(late - late_seen), static_cast<long long>(late), st.max_interval_us.load() / 1000.0,
-                          rep.device.frame_rate() > 0 ? dev->buffer_frames() * 1000.0 / rep.device.frame_rate() : 0.0,
-                          static_cast<long long>(st.underruns.load()));
-            event(b);
-            late_seen = late;
-            late_at = now;
-        }
-        if (!dev->reset_requested()) return true;
-        while (!resets.empty() && now - resets.front() > std::chrono::seconds(10)) resets.pop_front();
-        if (resets.size() >= 3) {
-            err = "the output driver keeps asking to be reset";
-            return false;
-        }
-        resets.push_back(now);
         return dsdf ? handle_dsd(s, out, true) : restart(s, out, false);
     }
 
@@ -1465,43 +1381,43 @@ struct Player::Impl {
             worker.join();
         }
         prep_threads.clear();
-        if (dev && !dev->failed() && dsdenc && !ended_flag) {
+        if (io.dev && !io.dev->failed() && dsdenc && !ended_flag) {
             // stopped (or failed) before the end: stop quickly, but on silence. DoP: PCM silence (the DAC
             // leaves DSD mode). Native DSD: DSD silence (0x69, what the feeder writes once the ring is
             // empty) reaches the DAC before the stream stops, not a cut in the middle of the music
-            if (dev->paused() || cancel) {
-                ring->clear();
-                dev->set_paused(false);
+            if (io.dev->paused() || cancel) {
+                io.ring->clear();
+                io.dev->set_paused(false);
             }
-            pend = pend_off = 0;
+            io.pend = io.pend_off = 0;
             push_pcm_silence(200);
-            eof = true;
+            io.eof = true;
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-            while (!dev->drained() && !dev->failed() && std::chrono::steady_clock::now() < deadline)
+            while (!io.dev->drained() && !io.dev->failed() && std::chrono::steady_clock::now() < deadline)
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            if (!dsdenc->dop() && dev->drained() && rep.device.frame_rate() > 0)
+            if (!dsdenc->dop() && io.dev->drained() && rep.device.frame_rate() > 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(
-                    static_cast<int>(dev->latency_ms()) + 2 * dev->buffer_frames() * 1000 / rep.device.frame_rate() + 5));
+                    static_cast<int>(io.dev->latency_ms()) + 2 * io.dev->buffer_frames() * 1000 / rep.device.frame_rate() + 5));
         }
-        if (ok && dev && ended_flag) {
+        if (ok && io.dev && ended_flag) {
             // the device buffer plays out (the ring has drained)
             if (!cancel)
-                std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(dev->latency_ms()) +
-                                                                      2 * dev->buffer_frames() * 1000 / rep.device.frame_rate() + 20));
+                std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(io.dev->latency_ms()) +
+                                                                      2 * io.dev->buffer_frames() * 1000 / rep.device.frame_rate() + 20));
         }
         if (build_cancel) *build_cancel = true;
         if (building.valid()) building.wait();
         stop_cache_trim(true);
-        if (dev) {
-            dev->stop();
-            rep.underruns = dev->stats().underruns;
-            rep.event_timeouts = dev->stats().event_timeouts;
-            rep.max_interval_us = dev->stats().max_interval_us;
-            if (dev->failed()) {
+        if (io.dev) {
+            io.dev->stop();
+            rep.underruns = io.dev->stats().underruns;
+            rep.event_timeouts = io.dev->stats().event_timeouts;
+            rep.max_interval_us = io.dev->stats().max_interval_us;
+            if (io.dev->failed()) {
                 ok = false;
-                err = dev->failure();
+                err = io.dev->failure();
             }
-            dev.reset();
+            io.dev.reset();
         }
         if (!ok && !cancel && cb.on_failed) cb.on_failed(err);
         done = true;
