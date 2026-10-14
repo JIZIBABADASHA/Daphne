@@ -157,4 +157,9 @@ bool seek_file(FILE* f, int64_t offset) { return fseeko(f, static_cast<off_t>(of
 
 uint64_t thread_tag() { return std::hash<std::thread::id>{}(std::this_thread::get_id()); }
 
+// the native path is already bytes (UTF-8 by convention): no conversion, so nothing can fail
+std::filesystem::path path_from_utf8(std::string_view s) { return std::filesystem::path(std::string(s)); }
+
+std::string path_to_utf8(const std::filesystem::path& p) { return p.native(); }
+
 }  // namespace daphne::platform

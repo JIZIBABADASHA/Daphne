@@ -80,6 +80,21 @@ TEST_CASE("WAV seek lands on the requested frame", "[decoder]") {
     std::filesystem::remove(p);
 }
 
+#ifdef _WIN32
+TEST_CASE("a file name with an unpaired surrogate: the extension is read, nothing throws", "[decoder]") {
+    std::wstring w = L"C:\\music\\a";
+    w += static_cast<wchar_t>(0xD800);
+    w += L"b.FLAC";
+    const std::filesystem::path p(w);
+    CHECK(daphne::file_extension(p) == "flac");
+    std::string e;
+    std::unique_ptr<daphne::Decoder> d;
+    CHECK_NOTHROW(d = daphne::open_decoder(p, &e));   // it does not exist: an error, not an exception
+    CHECK_FALSE(d);
+    CHECK_FALSE(e.empty());
+}
+#endif
+
 TEST_CASE("unreadable file reports an error", "[decoder]") {
     const auto p = temp_path("daphne_test_junk.wav");
     FILE* h = daphne::platform::open_file(p, "wb");

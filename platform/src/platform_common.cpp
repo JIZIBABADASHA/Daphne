@@ -42,13 +42,4 @@ uint64_t with_flush_to_zero(uint64_t v) {
 #endif
 }
 
-std::filesystem::path path_from_utf8(std::string_view s) {
-    return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(s.data()), s.size()));
-}
-
-std::string path_to_utf8(const std::filesystem::path& p) {
-    const std::u8string u = p.u8string();
-    return std::string(reinterpret_cast<const char*>(u.data()), u.size());
-}
-
 }  // namespace daphne::platform

@@ -100,4 +100,19 @@ bool seek_file(FILE* f, int64_t offset) { return _fseeki64(f, offset, SEEK_SET) 
 
 uint64_t thread_tag() { return GetCurrentThreadId(); }
 
+// Through the Win32 conversions, which replace invalid sequences with U+FFFD: std::filesystem's own
+// (u8string, the char8_t constructor) throw on them, and NTFS allows names with unpaired surrogates.
+std::filesystem::path path_from_utf8(std::string_view s) {
+    if (s.empty()) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
+    return std::filesystem::path(std::move(w));
+}
+
+std::string path_to_utf8(const std::filesystem::path& p) {
+    const std::wstring& w = p.native();
+    return utf8(w.data(), static_cast<int>(w.size()));
+}
+
 }  // namespace daphne::platform
