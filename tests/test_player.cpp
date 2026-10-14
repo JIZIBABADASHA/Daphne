@@ -1,0 +1,546 @@
+// The player end to end on a fake device (fake_output.h): what it sends for each kind of playback.
+// These pin down the behavior of player.cpp so it can be restructured (N25): every test here must
+// give the same result before and after. With DAPHNE_PLAYER_DUMP=<dir>, the timing-independent ones
+// also write what the device received to <dir>/<name>.bin for a byte-for-byte comparison of two builds.
+#include <catch_amalgamated.hpp>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <fstream>
+#include <map>
+#include <random>
+#include <thread>
+
+#include "daphne/engine/live_source.h"
+#include "daphne/engine/player.h"
+#include "daphne/engine/settings.h"
+#include "fake_output.h"
+#include "test_util.h"
+
+using namespace daphne;
+using test::FakeDevice;
+using test::Signal;
+
+namespace {
+
+constexpr double kPi = 3.141592653589793;
+
+// no filter cache on the test machine
+const bool g_no_cache = [] {
+    const std::filesystem::path off("off");
+    test::set_env("DAPHNE_FILTER_CACHE", &off);
+    return true;
+}();
+
+std::shared_ptr<Signal> int24_noise(int rate, int ch, int64_t frames, uint32_t seed) {
+    auto s = std::make_shared<Signal>();
+    s->info.rate = rate, s->info.channels = ch, s->info.bits = 24, s->info.lossless_int = true;
+    s->info.frames = frames, s->info.codec = "TEST";
+    std::mt19937 g(seed);
+    std::uniform_int_distribution<int32_t> d(-(1 << 23), (1 << 23) - 1);
+    s->x.resize(static_cast<size_t>(frames) * ch);
+    for (auto& v : s->x) v = d(g) / 8388608.0;
+    return s;
+}
+
+std::shared_ptr<Signal> sine(int rate, double freq, double seconds, double amp = 0.5) {
+    auto s = std::make_shared<Signal>();
+    const int64_t frames = static_cast<int64_t>(seconds * rate);
+    s->info.rate = rate, s->info.channels = 2, s->info.frames = frames, s->info.codec = "TEST";
+    s->x.resize(static_cast<size_t>(frames) * 2);
+    for (int64_t i = 0; i < frames; ++i) s->x[2 * i] = s->x[2 * i + 1] = amp * std::sin(2 * kPi * freq * i / rate);
+    return s;
+}
+
+// The player with the fake device and the sources by name (anything else: the real decoders).
+struct Rig {
+    std::shared_ptr<FakeDevice> dev = std::make_shared<FakeDevice>();
+    std::map<std::string, std::shared_ptr<const Signal>> sources;
+    std::mutex m;
+    std::vector<std::string> events;
+    int started = 0, tracks = 0, changed = 0;
+    std::atomic<bool> ended{false};
+    std::unique_ptr<Player> player;
+
+    PlayerDeps deps() {
+        PlayerDeps d;
+        d.open_output = test::fake_opener(dev);
+        d.open_decoder = [this](const std::filesystem::path& p, std::string* e) -> std::unique_ptr<Decoder> {
+            const auto it = sources.find(platform::path_to_utf8(p));
+            if (it == sources.end()) return open_decoder(p, e);
+            return std::make_unique<test::MemoryDecoder>(it->second);
+        };
+        return d;
+    }
+    PlayCallbacks callbacks() {
+        PlayCallbacks cb;
+        cb.on_start = [this](const PlayReport&) {
+            std::lock_guard<std::mutex> l(m);
+            started++;
+        };
+        cb.on_track_started = [this](const PlayReport&) {
+            std::lock_guard<std::mutex> l(m);
+            tracks++;
+        };
+        cb.on_changed = [this](const PlayReport&) {
+            std::lock_guard<std::mutex> l(m);
+            changed++;
+        };
+        cb.on_event = [this](const std::string& e) {
+            std::lock_guard<std::mutex> l(m);
+            events.push_back(e);
+        };
+        cb.on_ended = [this] { ended = true; };
+        return cb;
+    }
+    bool start(const std::string& path, const Settings& s, double at = 0.0) {
+        player = std::make_unique<Player>(deps());
+        std::string e;
+        const bool ok = player->start(platform::path_from_utf8(path), s, OutputChoice{}, callbacks(), &e, at);
+        if (!ok) UNSCOPED_INFO("start failed: " << e);
+        return ok;
+    }
+    // waits for the end (stops it after `limit`); the report
+    PlayReport finish(double limit = 30.0) {
+        const auto t0 = std::chrono::steady_clock::now();
+        while (!player->finished()) {
+            if (std::chrono::steady_clock::now() - t0 > std::chrono::duration<double>(limit)) player->stop();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        PlayReport r;
+        std::string e;
+        player->wait(&r, &e);
+        return r;
+    }
+    bool saw(const std::string& part) {
+        std::lock_guard<std::mutex> l(m);
+        return std::any_of(events.begin(), events.end(), [&](const std::string& e) { return e.find(part) != std::string::npos; });
+    }
+    void dump(const char* name) {
+        const auto dir = platform::get_env("DAPHNE_PLAYER_DUMP");
+        if (!dir) return;
+        const auto b = dev->take();
+        std::ofstream(platform::path_from_utf8(*dir) / (std::string(name) + ".bin"), std::ios::binary)
+            .write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size()));
+    }
+};
+
+void sleep_s(double s) { std::this_thread::sleep_for(std::chrono::duration<double>(s)); }
+
+// frequency from the zero crossings of channel 0 in [from, to) frames
+double frequency(const std::vector<float>& y, int ch, size_t from, size_t to, double rate) {
+    int crossings = 0;
+    size_t first = 0, last = 0;
+    for (size_t i = from + 1; i < to; ++i) {
+        if ((y[(i - 1) * ch] < 0) != (y[i * ch] < 0)) {
+            if (!crossings) first = i;
+            last = i;
+            ++crossings;
+        }
+    }
+    return crossings > 1 ? (crossings - 1) / 2.0 / ((last - first) / rate) : 0.0;
+}
+
+// longest run of frames with |x| < eps (channel 0) in [from, to)
+size_t longest_quiet(const std::vector<float>& y, int ch, size_t from, size_t to, float eps = 1e-4f) {
+    size_t best = 0, run = 0;
+    for (size_t i = from; i < to; ++i) {
+        run = std::abs(y[i * ch]) < eps ? run + 1 : 0;
+        best = std::max(best, run);
+    }
+    return best;
+}
+
+// the source's 24-bit samples as an Int32 device carries them
+int32_t as_int32(double v) { return static_cast<int32_t>(std::lround(v * 8388608.0)) * 256; }
+
+// the first frame of `y` (from `from`) where `want` (32 frames of `src` from frame k) appears, or -1
+int64_t find_frames(const std::vector<int32_t>& y, const Signal& src, int64_t k, size_t from = 0) {
+    const int ch = src.info.channels;
+    const size_t n = 32 * ch;
+    std::vector<int32_t> want(n);
+    for (size_t i = 0; i < n; ++i) want[i] = as_int32(src.x[static_cast<size_t>(k) * ch + i]);
+    auto it = std::search(y.begin() + static_cast<std::ptrdiff_t>(std::min(from * ch, y.size())), y.end(), want.begin(), want.end());
+    return it == y.end() ? -1 : (it - y.begin()) / ch;
+}
+
+void use_float_device(FakeDevice& d) {
+    d.type = SampleType::Float32;
+    d.container_bits = d.valid_bits = 32;
+}
+
+}  // namespace
+
+TEST_CASE("Player: a 24-bit source at its own rate is sent bit-perfectly", "[player]") {
+    Rig r;
+    auto a = int24_noise(44100, 2, 44100, 1);
+    r.sources["a"] = a;
+    Settings s;
+    REQUIRE(r.start("a", s));
+    const auto rep = r.finish();
+    CHECK(r.ended);
+    CHECK(rep.bit_perfect);
+    CHECK(rep.chain.empty());
+    CHECK(rep.device.rate == 44100);
+    const auto y = r.dev->samples32();
+    REQUIRE(y.size() >= a->x.size());
+    size_t diff = 0;
+    for (size_t i = 0; i < a->x.size(); ++i) diff += y[i] != as_int32(a->x[i]);
+    CHECK(diff == 0);
+    for (size_t i = a->x.size(); i < y.size(); ++i) diff += y[i] != 0;
+    CHECK(diff == 0);
+    r.dump("bitperfect");
+}
+
+TEST_CASE("Player: upsampling keeps the speed and the pitch", "[player]") {
+    for (const char* rate : {"2x", "auto"}) {
+        DYNAMIC_SECTION("output.rate " << rate) {
+            Rig r;
+            use_float_device(*r.dev);
+            r.sources["sine"] = sine(44100, 1000.0, 1.0);
+            Settings s;
+            s.output.rate = rate;
+            s.filter.taps = 256;
+            REQUIRE(r.start("sine", s));
+            const auto rep = r.finish();
+            const int ratio = std::string(rate) == "2x" ? 2 : 16;
+            CHECK(rep.device.rate == 44100 * ratio);
+            const auto y = r.dev->samples_f32();
+            const size_t frames = y.size() / 2;
+            REQUIRE(frames >= static_cast<size_t>(44100 * ratio));
+            CHECK(frames <= static_cast<size_t>(44100 * ratio + 2 * 256 * ratio + 2 * r.dev->buffer_frames));
+            CHECK(frequency(y, 2, frames / 4, frames * 3 / 4, rep.device.rate) == Catch::Approx(1000.0).margin(0.5));
+            r.dump(std::string(rate) == "2x" ? "upsample_2x" : "upsample_auto");
+        }
+    }
+}
+
+TEST_CASE("Player: the device rate steps down when the device refuses it", "[player]") {
+    Rig r;
+    use_float_device(*r.dev);
+    std::vector<int> tried;
+    r.dev->accept = [&](const OutputRequest& q) {
+        tried.push_back(q.rate);
+        return q.rate <= 176400;
+    };
+    r.sources["sine"] = sine(44100, 1000.0, 0.5);
+    Settings s;
+    s.output.rate = "auto";
+    s.filter.taps = 256;
+    REQUIRE(r.start("sine", s));
+    const auto rep = r.finish();
+    CHECK(tried == std::vector<int>{705600, 352800, 176400});
+    CHECK(rep.device.rate == 176400);
+    const auto y = r.dev->samples_f32();
+    REQUIRE(y.size() / 2 >= 88200u);
+    CHECK(frequency(y, 2, 10000, 80000, 176400) == Catch::Approx(1000.0).margin(0.5));
+    r.dump("stepdown");
+}
+
+TEST_CASE("Player: gapless at the same rate joins the tracks sample for sample", "[player]") {
+    Rig r;
+    r.dev->speed = 4.0;   // set_next comes after start, as a host does: before the end of the first track
+    auto a = int24_noise(44100, 2, 88200, 2), b = int24_noise(44100, 2, 17640, 3);
+    r.sources["a"] = a;
+    r.sources["b"] = b;
+    REQUIRE(r.start("a", Settings{}));
+    r.player->set_next(platform::path_from_utf8("b"));
+    r.finish();
+    CHECK(r.ended);
+    CHECK(r.tracks == 1);
+    const auto y = r.dev->samples32();
+    REQUIRE(y.size() >= a->x.size() + b->x.size());
+    size_t diff = 0;
+    for (size_t i = 0; i < a->x.size(); ++i) diff += y[i] != as_int32(a->x[i]);
+    for (size_t i = 0; i < b->x.size(); ++i) diff += y[a->x.size() + i] != as_int32(b->x[i]);
+    CHECK(diff == 0);
+    r.dump("gapless_same");
+}
+
+TEST_CASE("Player: gapless to another rate on the same output goes through the new chain", "[player]") {
+    Rig r;
+    use_float_device(*r.dev);
+    r.dev->speed = 4.0;   // long enough for the next chain to be built ahead (kick_prepare)
+    r.sources["a"] = sine(44100, 1000.0, 3.0);
+    r.sources["b"] = sine(88200, 1000.0, 1.0);
+    Settings s;
+    s.output.rate = "176400";
+    s.filter.taps = 256;
+    REQUIRE(r.start("a", s));
+    r.player->set_next(platform::path_from_utf8("b"));
+    r.finish();
+    CHECK(r.ended);
+    CHECK(r.tracks == 1);
+    CHECK(r.dev->opens.size() == 1);
+    CHECK(r.saw("through its own chain"));
+    const auto y = r.dev->samples_f32();
+    const size_t frames = y.size() / 2;
+    REQUIRE(frames >= 4 * 176400u);
+    CHECK(frames <= 4 * 176400u + 4 * 256 * 4 + 2 * 512);
+    // no gap at the join (3 s; the sine crosses zero every 88 frames at 176.4 kHz)
+    CHECK(longest_quiet(y, 2, 1000, 4 * 176400 - 1000) < 10);
+    CHECK(frequency(y, 2, 3 * 176400 + 20000, 4 * 176400 - 20000, 176400) == Catch::Approx(1000.0).margin(0.5));
+    r.dump("gapless_cross");
+}
+
+TEST_CASE("Player: seek resumes at the frame asked for", "[player]") {
+    Rig r;
+    r.dev->speed = 4.0;
+    auto a = int24_noise(44100, 2, 3 * 44100, 4);
+    r.sources["a"] = a;
+    REQUIRE(r.start("a", Settings{}));
+    sleep_s(0.15);
+    r.player->seek(2.0);
+    r.finish();
+    CHECK(r.ended);
+    CHECK(r.saw("seek to 2"));
+    const auto y = r.dev->samples32();
+    // after the 20 ms fade-in the stream is the source from frame 88200 on
+    const int64_t at = find_frames(y, *a, 88200 + 2000);
+    REQUIRE(at > 0);
+    size_t diff = 0;
+    const int64_t n = 3 * 44100 - (88200 + 2000);
+    for (int64_t i = 0; i < n * 2; ++i) diff += y[static_cast<size_t>(at * 2 + i)] != as_int32(a->x[static_cast<size_t>((88200 + 2000) * 2 + i)]);
+    CHECK(diff == 0);
+}
+
+TEST_CASE("Player: pause holds the position, resume goes on from there", "[player]") {
+    Rig r;
+    r.dev->speed = 4.0;
+    auto a = int24_noise(44100, 2, 3 * 44100, 5);
+    r.sources["a"] = a;
+    REQUIRE(r.start("a", Settings{}));
+    sleep_s(0.1);
+    r.player->pause(true);
+    sleep_s(0.15);
+    const int64_t p1 = r.player->position();
+    sleep_s(0.15);
+    const int64_t p2 = r.player->position();
+    CHECK(p1 == p2);
+    CHECK(p1 > 0);
+    r.player->pause(false);
+    r.finish();
+    CHECK(r.ended);
+    // nothing lost or repeated: the tail of the source arrives intact
+    const auto y = r.dev->samples32();
+    const int64_t k = 3 * 44100 - 20000;
+    const int64_t at = find_frames(y, *a, k);
+    REQUIRE(at > 0);
+    size_t diff = 0;
+    for (int64_t i = 0; i < 19000 * 2; ++i) diff += y[static_cast<size_t>(at * 2 + i)] != as_int32(a->x[static_cast<size_t>(k * 2 + i)]);
+    CHECK(diff == 0);
+}
+
+TEST_CASE("Player: a volume change is applied in place", "[player]") {
+    Rig r;
+    use_float_device(*r.dev);
+    r.dev->speed = 4.0;
+    r.sources["sine"] = sine(44100, 1000.0, 2.0);
+    Settings s;
+    s.volume.mode = VolumeMode::Digital;
+    REQUIRE(r.start("sine", s));
+    sleep_s(0.1);
+    s.volume.db = -20.0 * std::log10(2.0);
+    r.player->apply(s, OutputChoice{});
+    r.finish();
+    CHECK(r.saw("applied in place"));
+    CHECK(r.dev->opens.size() == 1);
+    const auto y = r.dev->samples_f32();
+    float peak = 0;
+    for (size_t i = y.size() - 2 * 22050; i < y.size() - 2 * 2000; ++i) peak = std::max(peak, std::abs(y[i]));
+    CHECK(peak == Catch::Approx(0.25).margin(0.002));
+}
+
+TEST_CASE("Player: a new filter is built in the background and crossfaded in", "[player]") {
+    Rig r;
+    use_float_device(*r.dev);
+    r.dev->speed = 4.0;
+    r.sources["sine"] = sine(44100, 1000.0, 6.0);   // long enough for the background build on a slow machine
+    Settings s;
+    s.output.rate = "2x";
+    s.filter.taps = 256;
+    REQUIRE(r.start("sine", s));
+    sleep_s(0.1);
+    s.filter.taps = 512;
+    r.player->apply(s, OutputChoice{});
+    r.finish();
+    CHECK(r.saw("now playing with filter: 512 taps"));
+    CHECK(r.dev->opens.size() == 1);
+    CHECK(r.changed >= 1);
+    const auto y = r.dev->samples_f32();
+    const size_t frames = y.size() / 2;
+    REQUIRE(frames >= 6 * 88200u - 2 * 512);
+    CHECK(frames <= 6 * 88200u + 4 * 512 * 2 + 2 * 512);
+    CHECK(longest_quiet(y, 2, 1000, 6 * 88200 - 2000) < 10);
+}
+
+TEST_CASE("Player: an output rate change restarts the device where it was", "[player]") {
+    Rig r;
+    use_float_device(*r.dev);
+    r.dev->speed = 4.0;
+    r.sources["sine"] = sine(44100, 1000.0, 2.0);
+    Settings s;
+    s.filter.taps = 256;
+    REQUIRE(r.start("sine", s));
+    sleep_s(0.15);
+    s.output.rate = "2x";
+    r.player->apply(s, OutputChoice{});
+    r.finish();
+    CHECK(r.ended);
+    REQUIRE(r.dev->opens.size() == 2);
+    CHECK(r.dev->opens[0].rate == 44100);
+    CHECK(r.dev->opens[1].rate == 88200);
+    CHECK(r.started == 2);
+    // the two parts together cover the track once, plus the restart's last chunk (4096 source frames, 93 ms:
+    // 20 ms fade-out, then zeros), which is played again after the restart with a 20 ms fade-in
+    const double secs = static_cast<double>(r.dev->open_at[1]) / 8 / 44100 + static_cast<double>(r.dev->take().size() - r.dev->open_at[1]) / 8 / 88200;
+    CHECK(secs >= 2.0);
+    CHECK(secs <= 2.0 + 4096.0 / 44100 + 0.03);
+}
+
+TEST_CASE("Player: a driver reset reopens the device and resumes", "[player]") {
+    Rig r;
+    r.dev->speed = 4.0;
+    auto a = int24_noise(44100, 2, 3 * 44100, 6);
+    r.sources["a"] = a;
+    REQUIRE(r.start("a", Settings{}));
+    sleep_s(0.15);
+    r.dev->request_reset = true;
+    r.finish();
+    CHECK(r.ended);
+    CHECK(r.dev->opens.size() == 2);
+    CHECK(r.saw("reopening the device"));
+    const auto y = r.dev->samples32();
+    const int64_t k = 3 * 44100 - 20000;
+    CHECK(find_frames(y, *a, k, r.dev->open_at[1] / 8) > 0);
+}
+
+TEST_CASE("Player: live input plays the producer's stream", "[player][live]") {
+    Rig r;
+    use_float_device(*r.dev);
+    r.dev->speed = 1.0;
+    const int cap = 96000;
+    std::vector<uint8_t> mem(16 + static_cast<size_t>(cap) * 8, 0);
+    set_live_bus(mem.data(), cap, 48000);
+    std::atomic<bool> stop{false};
+    std::thread producer([&] {
+        auto* index = reinterpret_cast<uint32_t*>(mem.data());
+        auto* ring = reinterpret_cast<float*>(mem.data() + 16);
+        int64_t t = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+        while (!stop) {
+            const int64_t due = static_cast<int64_t>(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 48000);
+            for (; t < due; ++t) {
+                const float v = static_cast<float>(0.5 * std::sin(2 * kPi * 1000.0 * t / 48000.0));
+                const size_t k = static_cast<size_t>(t % cap);
+                ring[2 * k] = v, ring[2 * k + 1] = v;
+            }
+            std::atomic_thread_fence(std::memory_order_release);
+            *reinterpret_cast<volatile uint32_t*>(index) = static_cast<uint32_t>(t);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    });
+    REQUIRE(r.start(kLivePath, Settings{}));
+    sleep_s(1.5);
+    r.player->stop();
+    r.finish();
+    stop = true;
+    producer.join();
+    set_live_bus(nullptr, 0, 0);
+    const auto y = r.dev->samples_f32();
+    const size_t frames = y.size() / 2;
+    // silence first (the player's prefill and the live decoder's 0.3 s jitter buffer), then the sine
+    size_t music = 0;
+    while (music < frames && std::abs(y[music * 2]) < 1e-4f) ++music;
+    REQUIRE(music + 16000 < frames);
+    CHECK(frequency(y, 2, music + 1000, music + 15000, 48000) == Catch::Approx(1000.0).margin(3.0));
+    CHECK(longest_quiet(y, 2, music + 1000, music + 15000) < 10);
+}
+
+namespace {
+
+// a DSF file: stereo DSD64, `bytes` per channel of a pattern without 0x69 (DSD silence)
+std::filesystem::path write_dsf(const std::string& name, int64_t bytes) {
+    auto le = [](std::vector<uint8_t>& v, uint64_t x, int n) {
+        for (int k = 0; k < n; ++k) v.push_back(static_cast<uint8_t>(x >> (8 * k)));
+    };
+    const int ch = 2, block = 4096;
+    const int64_t blocks = (bytes + block - 1) / block;
+    const uint64_t data = static_cast<uint64_t>(blocks) * block * ch;
+    std::vector<uint8_t> f;
+    f.insert(f.end(), {'D', 'S', 'D', ' '});
+    le(f, 28, 8), le(f, 28 + 52 + 12 + data, 8), le(f, 0, 8);
+    f.insert(f.end(), {'f', 'm', 't', ' '});
+    le(f, 52, 8), le(f, 1, 4), le(f, 0, 4), le(f, 2, 4), le(f, ch, 4), le(f, 2822400, 4), le(f, 1, 4);
+    le(f, static_cast<uint64_t>(bytes) * 8, 8), le(f, block, 4), le(f, 0, 4);
+    f.insert(f.end(), {'d', 'a', 't', 'a'});
+    le(f, 12 + data, 8);
+    for (int64_t b = 0; b < blocks; ++b)
+        for (int c = 0; c < ch; ++c)
+            for (int i = 0; i < block; ++i) {
+                const int64_t k = b * block + i;
+                uint8_t v = k < bytes ? static_cast<uint8_t>(0x11 + (k * 7 + c * 3) % 0x50) : 0x69;
+                f.push_back(v);
+            }
+    const auto p = test::temp_path(name);
+    std::ofstream(p, std::ios::binary).write(reinterpret_cast<const char*>(f.data()), static_cast<std::streamsize>(f.size()));
+    return p;
+}
+
+// DoP frames (Int32: 24-bit word << 8): the marker byte of channel 0 of every frame
+std::vector<uint8_t> dop_markers(const std::vector<uint8_t>& b, int ch) {
+    std::vector<uint8_t> m;
+    for (size_t i = 0; i + 4 * ch <= b.size(); i += 4 * ch) m.push_back(b[i + 3]);
+    return m;
+}
+
+}  // namespace
+
+TEST_CASE("Player: a DSF file is sent to a DoP device untouched", "[player][dsd]") {
+    Rig r;
+    const int64_t bytes = 2822400 / 8 / 2;   // 0.5 s per channel
+    const auto path = write_dsf("daphne_player_test.dsf", bytes);
+    Settings s;
+    s.output.dsd_lead_in_ms = 20;
+    REQUIRE(r.start(platform::path_to_utf8(path), s));
+    const auto rep = r.finish();
+    CHECK(r.ended);
+    CHECK(rep.device.rate == 176400);
+    CHECK(rep.bit_perfect);
+    const auto b = r.dev->take();
+    const auto m = dop_markers(b, 2);
+    // the markers alternate 0x05 / 0xFA through the lead-in silence and the music
+    size_t music = 0, bad = 0;
+    for (size_t i = 0; i < m.size(); ++i) {
+        if (m[i] != 0x05 && m[i] != 0xFA) break;
+        if (i && m[i] == m[i - 1]) ++bad;
+        const uint8_t hi = b[i * 8 + 2], lo = b[i * 8 + 1];
+        if (hi != 0x69 || lo != 0x69) ++music;
+    }
+    CHECK(bad == 0);
+    CHECK(music == static_cast<size_t>(bytes / 2));
+    std::filesystem::remove(path);
+    r.dump("dsf_dop");
+}
+
+TEST_CASE("Player: the dsd core sends PCM as DoP", "[player][dsd]") {
+    Rig r;
+    r.sources["sine"] = sine(44100, 1000.0, 0.5);
+    Settings s;
+    s.core = CoreMode::Dsd;
+    s.modulator.osr = 64;
+    s.filter.taps = 256;
+    s.output.dsd_lead_in_ms = 20;
+    REQUIRE(r.start("sine", s));
+    const auto rep = r.finish();
+    CHECK(r.ended);
+    CHECK(rep.device.rate == 176400);
+    const auto m = dop_markers(r.dev->take(), 2);
+    size_t bad = 0, n = 0;
+    for (size_t i = 1; i < m.size() && (m[i] == 0x05 || m[i] == 0xFA); ++i, ++n) bad += m[i] == m[i - 1];
+    CHECK(bad == 0);
+    CHECK(n >= 176400 / 2);
+    r.dump("dsd_core");
+}

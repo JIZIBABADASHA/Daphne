@@ -16,6 +16,7 @@ add_executable(daphne_tests
     test_live.cpp
     test_modulator.cpp
     test_output_format.cpp
+    test_player.cpp
     test_realtime.cpp
     test_resampler.cpp
 )
