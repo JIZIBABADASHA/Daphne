@@ -443,7 +443,7 @@ TEST_CASE("Player: live input plays the producer's stream", "[player][live]") {
         }
     });
     REQUIRE(r.start(kLivePath, Settings{}));
-    sleep_s(1.5);
+    sleep_s(2.5);
     r.player->stop();
     r.finish();
     stop = true;
@@ -454,9 +454,9 @@ TEST_CASE("Player: live input plays the producer's stream", "[player][live]") {
     // silence first (the player's prefill and the live decoder's 0.3 s jitter buffer), then the sine
     size_t music = 0;
     while (music < frames && std::abs(y[music * 2]) < 1e-4f) ++music;
-    REQUIRE(music + 16000 < frames);
-    CHECK(frequency(y, 2, music + 1000, music + 15000, 48000) == Catch::Approx(1000.0).margin(3.0));
-    CHECK(longest_quiet(y, 2, music + 1000, music + 15000) < 10);
+    REQUIRE(music + 24000 < frames);   // at least half a second of it
+    CHECK(frequency(y, 2, music + 1000, music + 23000, 48000) == Catch::Approx(1000.0).margin(3.0));
+    CHECK(longest_quiet(y, 2, music + 1000, music + 23000) < 10);
 }
 
 namespace {
@@ -521,7 +521,9 @@ TEST_CASE("Player: a DSF file is sent to a DoP device untouched", "[player][dsd]
     }
     CHECK(bad == 0);
     CHECK(music == static_cast<size_t>(bytes / 2));
-    std::filesystem::remove(path);
+    r.player.reset();   // it keeps the file open (Windows cannot remove an open file)
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
     r.dump("dsf_dop");
 }
 

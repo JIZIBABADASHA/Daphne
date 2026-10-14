@@ -104,6 +104,10 @@ private:
         const int n = d_->buffer_frames;
         const size_t need = static_cast<size_t>(n) * fmt_.block_align();
         std::vector<uint8_t> buf(need);
+        // paced by the clock, not by sleep lengths (sleeps overshoot, more on some systems): buffer k is due at
+        // start + k periods
+        const auto period = std::chrono::duration<double>(d_->speed > 0 ? static_cast<double>(n) / fmt_.frame_rate() / d_->speed : 0.0);
+        auto due = std::chrono::steady_clock::now();
         while (!stop_) {
             // a whole buffer of data (or the end, or a pause) before taking one
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
@@ -117,10 +121,12 @@ private:
                 std::lock_guard<std::mutex> l(d_->m);
                 d_->bytes.insert(d_->bytes.end(), buf.begin(), buf.end());
             }
-            if (d_->speed > 0)
-                std::this_thread::sleep_for(std::chrono::duration<double>(static_cast<double>(n) / fmt_.frame_rate() / d_->speed));
-            else if (was_paused || was_drained)
+            if (d_->speed > 0) {
+                due += std::chrono::duration_cast<std::chrono::steady_clock::duration>(period);
+                std::this_thread::sleep_until(due);
+            } else if (was_paused || was_drained) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
         }
     }
 
