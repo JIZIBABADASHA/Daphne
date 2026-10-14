@@ -1,40 +1,40 @@
 #include <algorithm>
-#include <cwctype>
 
 #include "daphne/engine/decoder.h"
 #include "daphne/engine/dsd_file.h"
 #include "daphne/engine/live_source.h"
+#include "daphne/platform/platform.h"
 
 namespace daphne {
 namespace {
 
-std::wstring lower_suffix(const std::wstring& path) {
-    const auto slash = path.find_last_of(L"\\/");
-    const auto dot = path.find_last_of(L'.');
-    if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash)) return {};
-    std::wstring s = path.substr(dot + 1);
-    std::transform(s.begin(), s.end(), s.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
-    return s;
-}
-
-bool any_of(const std::wstring& s, std::initializer_list<const wchar_t*> list) {
-    return std::any_of(list.begin(), list.end(), [&](const wchar_t* x) { return s == x; });
+bool any_of(const std::string& s, std::initializer_list<const char*> list) {
+    return std::any_of(list.begin(), list.end(), [&](const char* x) { return s == x; });
 }
 
 }  // namespace
 
-std::unique_ptr<Decoder> open_decoder(const std::wstring& path, std::string* error) {
-    if (path == kLivePath) {   // the host's live input (live_source.h)
+std::string file_extension(const std::filesystem::path& path) {
+    const std::string name = platform::path_to_utf8(path.filename());
+    const auto dot = name.find_last_of('.');
+    if (dot == std::string::npos) return {};
+    std::string s = name.substr(dot + 1);
+    std::transform(s.begin(), s.end(), s.begin(), [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; });
+    return s;
+}
+
+std::unique_ptr<Decoder> open_decoder(const std::filesystem::path& path, std::string* error) {
+    if (is_live_path(path)) {   // the host's live input (live_source.h)
         auto l = make_live_decoder();
         if (l->open(path, error)) return l;
         return nullptr;
     }
-    const std::wstring ext = lower_suffix(path);
+    const std::string ext = file_extension(path);
     std::unique_ptr<Decoder> d;
     const bool dsd = is_dsd_path(path);
-    if (any_of(ext, {L"wav", L"wave", L"bwf", L"aiff", L"aif", L"aifc"})) d = make_wav_decoder();
-    else if (any_of(ext, {L"flac", L"fla"})) d = make_flac_decoder();
-    else if (any_of(ext, {L"mp3", L"mp2", L"mp1"})) d = make_mp3_decoder();
+    if (any_of(ext, {"wav", "wave", "bwf", "aiff", "aif", "aifc"})) d = make_wav_decoder();
+    else if (any_of(ext, {"flac", "fla"})) d = make_flac_decoder();
+    else if (any_of(ext, {"mp3", "mp2", "mp1"})) d = make_mp3_decoder();
     else if (dsd) d = make_dsd_pcm_decoder();
     else d = make_ffmpeg_decoder();   // FFmpeg probes the content
     std::string e;

@@ -76,7 +76,8 @@ public:
     std::vector<std::string> take_notes() override;
     bool reset_requested() const override { return reset_.load(); }
     // PCM rates the driver accepts (canSampleRate while opening in PCM mode; empty in DSD mode).
-    const std::vector<int>& supported_rates() const { return rates_; }
+    std::vector<int> supported_rates() const override { return rates_; }
+    bool probe_before_design() const override { return true; }
 
     // driver callbacks (static trampolines forward here)
     void on_buffer(long index);

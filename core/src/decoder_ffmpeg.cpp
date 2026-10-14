@@ -24,7 +24,7 @@ extern "C" {
 #include <cstring>
 #include <vector>
 
-#include "daphne/engine/text.h"
+#include "daphne/platform/platform.h"
 
 namespace daphne {
 namespace {
@@ -42,7 +42,7 @@ class FfmpegDecoder final : public Decoder {
 public:
     ~FfmpegDecoder() override { close(); }
 
-    bool open(const std::wstring& path, std::string* error) override {
+    bool open(const std::filesystem::path& path, std::string* error) override {
         close();
         path_ = path;
         auto fail = [&](const std::string& m) {
@@ -50,7 +50,7 @@ public:
             close();
             return false;
         };
-        if (avformat_open_input(&fmt_, to_utf8(path).c_str(), nullptr, nullptr) < 0) return fail("cannot open file");
+        if (avformat_open_input(&fmt_, platform::path_to_utf8(path).c_str(), nullptr, nullptr) < 0) return fail("cannot open file");
         if (avformat_find_stream_info(fmt_, nullptr) < 0) return fail("no stream info");
         const AVCodec* codec = nullptr;
         stream_ = av_find_best_stream(fmt_, AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
@@ -247,7 +247,7 @@ private:
     int64_t start_ = 0;    // stream start time (time base): frame 0
     int64_t end_ = -1;     // frames to play (MP4 gapless), -1 = until the decoder stops
     int64_t next_ = 0;     // frame index of the next decoded sample
-    std::wstring path_;
+    std::filesystem::path path_;
 };
 
 }  // namespace
@@ -263,7 +263,7 @@ namespace {
 
 class FfmpegUnavailable final : public Decoder {
 public:
-    bool open(const std::wstring&, std::string* error) override {
+    bool open(const std::filesystem::path&, std::string* error) override {
         if (error) *error = "built without FFmpeg (run scripts/fetch_ffmpeg.ps1 and reconfigure)";
         return false;
     }

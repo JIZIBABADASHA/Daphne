@@ -1,6 +1,7 @@
 #pragma once
 // Playback: decoder -> processing chain (chain.h) -> device-format conversion -> lock-free ring ->
-// WASAPI / ASIO.
+// the device output (audio_output.h: WASAPI / ASIO on Windows). The player itself is portable: the
+// device and the decoders come from PlayerDeps (N25).
 //
 // Settings can change during playback (Player::apply), on the processing thread at chunk boundaries:
 //   in place  EQ, crossfeed, volume, headroom: the gain ramps, the EQ glides or crossfades
@@ -11,17 +12,17 @@
 
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
-#include "daphne/engine/asio_output.h"
+#include "daphne/engine/audio_output.h"
 #include "daphne/engine/decoder.h"
 #include "daphne/engine/sample_format.h"
 #include "daphne/engine/settings.h"
-#include "daphne/engine/wasapi_output.h"
 
 namespace daphne {
 
@@ -59,16 +60,39 @@ struct OutputChoice {
     bool operator==(const OutputChoice& o) const { return api == o.api && device == o.device; }
 };
 
+// What the player asks of an output: open `out` at rate / channels (not started).
+struct OutputRequest {
+    OutputChoice out;
+    int buffer_ms = 0;     // output.buffer_ms (WASAPI)
+    int rate = 0;
+    int channels = 0;
+    bool dsd = false;      // native DSD (ASIO)
+};
+using OutputOpener = std::function<std::unique_ptr<AudioOutput>(const OutputRequest&, std::string* error)>;
+using DecoderOpener = std::function<std::unique_ptr<Decoder>(const std::filesystem::path&, std::string* error)>;
+
+// The outputs of this platform (Windows: WASAPI exclusive / shared, ASIO); fails with a message for an
+// API the platform does not have.
+OutputOpener platform_output_opener();
+
+// Where the player gets its device and its PCM decoders from. Tests give a fake device and synthetic
+// sources; empty members take the defaults (platform_output_opener, open_decoder).
+struct PlayerDeps {
+    OutputOpener open_output;
+    DecoderOpener open_decoder;
+};
+
 class Player {
 public:
     Player();
+    explicit Player(PlayerDeps deps);
     ~Player();
     Player(const Player&) = delete;
     Player& operator=(const Player&) = delete;
 
     // Opens the file and the device on the DSP thread; returns once playback has started (or failed).
     // start_seconds: position to start from.
-    bool start(const std::wstring& path, const Settings& s, const OutputChoice& out, PlayCallbacks cb, std::string* error,
+    bool start(const std::filesystem::path& path, const Settings& s, const OutputChoice& out, PlayCallbacks cb, std::string* error,
                double start_seconds = 0.0);
     // New settings, applied by the DSP thread; the latest call wins.
     void apply(const Settings& s, const OutputChoice& out);
@@ -90,7 +114,7 @@ public:
     // Empty clears it. on_track_started reports when it is heard. headroom_db: the next track's own
     // headroom (ReplayGain per track), applied where its first sample is decoded, so a gapless album in
     // track mode gets each track's gain on time; nullopt keeps the current one.
-    void set_next(const std::wstring& path, std::optional<double> headroom_db = std::nullopt);
+    void set_next(const std::filesystem::path& path, std::optional<double> headroom_db = std::nullopt);
     // Ended by reaching the end of the last track (not stopped, not failed).
     bool ended() const;
     // start() failed because the output device could not be opened (not because of the file).
@@ -108,7 +132,7 @@ private:
 };
 
 // Plays one file to the end (or until cancel becomes true). Returns false on error.
-bool play_file(const std::wstring& path, const Settings& s, const OutputChoice& out, const std::atomic<bool>& cancel,
+bool play_file(const std::filesystem::path& path, const Settings& s, const OutputChoice& out, const std::atomic<bool>& cancel,
                const PlayCallbacks& cb, PlayReport* report, std::string* error);
 
 }  // namespace daphne

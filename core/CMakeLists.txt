@@ -3,10 +3,6 @@ add_library(daphne_engine STATIC
     src/text.cpp
     src/ring_feeder.cpp
     src/player.cpp
-    src/wasapi_output.cpp
-    src/asio_output.cpp
-    src/devices_wasapi.cpp
-    src/devices_asio.cpp
     src/chain.cpp
     src/decoder_factory.cpp
     src/decoder_flac.cpp
@@ -22,19 +18,28 @@ add_library(daphne_engine STATIC
     src/stages.cpp
 )
 target_include_directories(daphne_engine PUBLIC include)
-target_link_libraries(daphne_engine PUBLIC daphne_dsp daphne_vendor)
+target_link_libraries(daphne_engine PUBLIC daphne_dsp daphne_platform daphne_vendor)
+# the device outputs (N24, N25): WASAPI and ASIO on Windows; none yet elsewhere
 if(WIN32)
+    target_sources(daphne_engine PRIVATE
+        src/output_win.cpp
+        src/wasapi_output.cpp
+        src/asio_output.cpp
+        src/devices_wasapi.cpp
+        src/devices_asio.cpp)
     target_link_libraries(daphne_engine PRIVATE ole32 advapi32 avrt winmm propsys)
+else()
+    target_sources(daphne_engine PRIVATE src/output_none.cpp)
 endif()
 
 # ASIO (optional): the Steinberg ASIO SDK (dual licence: proprietary / GPLv3) unpacked to
 # third_party/asiosdk (scripts/fetch_asiosdk.ps1); it is not part of the repository.
 set(DAPHNE_ASIO_DIR ${PROJECT_SOURCE_DIR}/third_party/asiosdk)
-if(EXISTS ${DAPHNE_ASIO_DIR}/common/iasiodrv.h)
+if(WIN32 AND EXISTS ${DAPHNE_ASIO_DIR}/common/iasiodrv.h)
     message(STATUS "daphne: ASIO SDK found in ${DAPHNE_ASIO_DIR}")
     target_compile_definitions(daphne_engine PRIVATE DAPHNE_HAVE_ASIO)
     target_include_directories(daphne_engine SYSTEM PRIVATE ${DAPHNE_ASIO_DIR}/common)
-else()
+elseif(WIN32)
     message(STATUS "daphne: ASIO SDK not found (ASIO output disabled); run scripts/fetch_asiosdk.ps1")
 endif()
 
@@ -50,6 +55,19 @@ if(EXISTS ${DAPHNE_FFMPEG_DIR}/include/libavcodec/avcodec.h)
     file(GLOB DAPHNE_FFMPEG_DLLS ${DAPHNE_FFMPEG_DIR}/bin/avformat-*.dll ${DAPHNE_FFMPEG_DIR}/bin/avcodec-*.dll
          ${DAPHNE_FFMPEG_DIR}/bin/avutil-*.dll ${DAPHNE_FFMPEG_DIR}/bin/swresample-*.dll)
     set(DAPHNE_FFMPEG_DLLS ${DAPHNE_FFMPEG_DLLS} PARENT_SCOPE)
+elseif(NOT WIN32)
+    # macOS / Linux: the system's FFmpeg development packages, when installed
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(DAPHNE_FFMPEG QUIET IMPORTED_TARGET libavformat libavcodec libavutil libswresample)
+    endif()
+    if(DAPHNE_FFMPEG_FOUND)
+        message(STATUS "daphne: FFmpeg found with pkg-config")
+        target_compile_definitions(daphne_engine PRIVATE DAPHNE_HAVE_FFMPEG)
+        target_link_libraries(daphne_engine PRIVATE PkgConfig::DAPHNE_FFMPEG)
+    else()
+        message(STATUS "daphne: FFmpeg not found (formats without a dedicated decoder disabled)")
+    endif()
 else()
     message(STATUS "daphne: FFmpeg not found (formats without a dedicated decoder disabled); run scripts/fetch_ffmpeg.ps1")
 endif()

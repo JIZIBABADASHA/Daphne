@@ -1,10 +1,5 @@
 #include "daphne/engine/player.h"
 
-#include <windows.h>
-#include <avrt.h>
-#include <timeapi.h>
-#include <xmmintrin.h>
-
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -24,6 +19,7 @@
 #include "daphne/dsp/progress.h"
 #include "daphne/dsp/quantizer.h"
 #include "daphne/engine/ring_buffer.h"
+#include "daphne/platform/platform.h"
 
 namespace daphne {
 
@@ -33,17 +29,11 @@ constexpr int kChunk = 4096;
 constexpr double kFadeSeconds = 0.05;
 constexpr double kPi = 3.141592653589793;
 
-std::unique_ptr<AudioOutput> open_output(const OutputChoice& out, int buffer_ms, int rate, int channels, std::string* error,
-                                         bool dsd = false) {
-    if (out.api == OutputApi::Asio) {
-        auto a = std::make_unique<AsioOutput>();
-        if (!a->open({out.device, dsd}, rate, channels, error)) return nullptr;
-        return a;
-    }
-    auto w = std::make_unique<WasapiOutput>();
-    if (!w->open({out.device, out.api != OutputApi::WasapiShared, buffer_ms}, rate, channels, error)) return nullptr;
-    return w;
-}
+// What the output API offers, decided before a device is open: native DSD (ASIO), a mixer that is never
+// bit-perfect and cannot carry DSD (WASAPI shared), a buffer length the player sets (WASAPI).
+bool api_has_native_dsd(OutputApi a) { return a == OutputApi::Asio; }
+bool api_is_shared(OutputApi a) { return a == OutputApi::WasapiShared; }
+bool api_takes_buffer_ms(OutputApi a) { return a != OutputApi::Asio; }
 
 // The device rate asked for: pcm core, the output rate for the source; dsd core, the DoP rate
 // (DSD clock / 16).
@@ -78,30 +68,6 @@ Settings chain_settings(const Settings& s, int osr = 0) {
     return c;
 }
 
-// Realtime setup: 1 ms timer resolution, no EcoQoS throttling, MMCSS for the processing thread,
-// denormals flushed (FTZ / DAZ).
-struct RealtimeScope {
-    HANDLE mmcss = nullptr;
-    unsigned int csr = 0;
-    RealtimeScope() {
-        timeBeginPeriod(1);
-        PROCESS_POWER_THROTTLING_STATE pt{};
-        pt.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
-        pt.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
-        pt.StateMask = 0;
-        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof pt);
-        DWORD task = 0;
-        mmcss = AvSetMmThreadCharacteristicsW(L"Audio", &task);
-        csr = _mm_getcsr();
-        _mm_setcsr(csr | 0x8040);   // FTZ (bit 15) + DAZ (bit 6)
-    }
-    ~RealtimeScope() {
-        _mm_setcsr(csr);
-        if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
-        timeEndPeriod(1);
-    }
-};
-
 // Interleaved frame FIFO for the crossfade.
 struct Fifo {
     std::vector<double> d;
@@ -123,7 +89,8 @@ struct Fifo {
 
 struct Player::Impl {
     // setup
-    std::wstring path;
+    PlayerDeps deps;
+    std::filesystem::path path;
     Settings s;
     OutputChoice out;
     PlayCallbacks cb;
@@ -166,13 +133,13 @@ struct Player::Impl {
     // transport requests (under m) and state
     std::atomic<bool> want_pause{false}, ended_flag{false};
     std::optional<double> seek_req;
-    std::wstring next_path;          // gapless candidate (set_next)
+    std::filesystem::path next_path;   // gapless candidate (set_next)
     std::optional<double> next_headroom;   // its headroom_db (ReplayGain), applied at the decode boundary
-    std::wstring cur_path;           // the track being heard
+    std::filesystem::path cur_path;    // the track being heard
     struct Switch {
         int64_t at_in = 0;           // stream input frame where the track starts
         AudioInfo info;
-        std::wstring path;
+        std::filesystem::path path;
         // gapless through a new chain (another sample rate on the same output, or the same rate with a format
         // the old chain does not fit; cross_switch): the new chain's output starts at device
         // frame at_out and its first sample is heard new_delay later. Until then the hearing side stays on the
@@ -191,7 +158,7 @@ struct Player::Impl {
     // one does not fit it (another sample rate on the same output, or the same rate with another format), so
     // the boundary does not wait for a slow disk or a filter design.
     struct Prep {
-        std::wstring path;
+        std::filesystem::path path;
         std::atomic<bool> opened{false}, done{false}, cancel{false};
         std::unique_ptr<Decoder> dec;
         std::unique_ptr<DsdFile> dsdf;
@@ -261,7 +228,7 @@ struct Player::Impl {
         PreJob j;
         j.cancel = flag;
         j.th = std::thread([cfg = s, flag] {
-            SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+            platform::set_thread_priority(platform::Priority::Background);
             if (!*flag) trim_filter_cache(cfg);
         });
         pre_jobs.push_back(std::move(j));
@@ -323,6 +290,8 @@ struct Player::Impl {
         return s.empty() ? "none" : s;
     }
 
+    std::unique_ptr<AudioOutput> open_output(const OutputRequest& req, std::string* error) { return deps.open_output(req, error); }
+
     // about 0.5 s, and at least three device buffers (a long output.buffer_ms takes a whole buffer per event)
     size_t ring_bytes() const {
         return std::max(static_cast<size_t>(rep.device.frame_rate()) * block / 2, static_cast<size_t>(dev->buffer_frames()) * 3 * block);
@@ -330,7 +299,7 @@ struct Player::Impl {
 
     // output.buffer_ms the device did not take (WASAPI exclusive): it runs with its default buffer
     void note_buffer_fallback() {
-        if (auto* w = dynamic_cast<WasapiOutput*>(dev.get()); w && w->buffer_fallback())
+        if (dev->buffer_fallback())
             event("output.buffer_ms: the device does not take a " + std::to_string(s.output.buffer_ms) +
                   " ms buffer, playing with its default (" + std::to_string(std::lround(dev->latency_ms())) + " ms)");
     }
@@ -358,7 +327,7 @@ struct Player::Impl {
         };
         std::vector<Attempt> rates;
         if (s.core == CoreMode::Dsd) {
-            if (out.api == OutputApi::WasapiShared) {
+            if (api_is_shared(out.api)) {
                 if (error) *error = "DSD output (dsd core) needs WASAPI exclusive or ASIO: shared mode mixes everything to PCM";
                 return false;
             }
@@ -370,7 +339,7 @@ struct Player::Impl {
                 event("DSD" + std::to_string(s.modulator.osr) + " is above output.max_dsd: modulating to DSD" + std::to_string(top));
             }
             for (int osr = top; osr >= 64; osr /= 2) {
-                if (out.api == OutputApi::Asio && s.output.dsd != DsdMode::Dop) rates.push_back({dsd_clock(osr), osr, true});
+                if (api_has_native_dsd(out.api) && s.output.dsd != DsdMode::Dop) rates.push_back({dsd_clock(osr), osr, true});
                 if (s.output.dsd != DsdMode::Native) rates.push_back({dop_rate(dsd_clock(osr)), osr, false});
             }
             if (rates.empty()) {
@@ -399,12 +368,12 @@ struct Player::Impl {
             fading = false;
             next.reset();
             fc.clear(), fn.clear(), carry.clear();
-            dev = open_output(out, s.output.buffer_ms, rates[attempt].rate, src.channels, &e, rates[attempt].native);
+            dev = open_output({out, s.output.buffer_ms, rates[attempt].rate, src.channels, rates[attempt].native}, &e);
             if (!dev) {
                 if (fail_attempt()) return false;
                 continue;
             }
-            if (out.api == OutputApi::Asio) {
+            if (dev->probe_before_design()) {
                 // some drivers accept a rate they cannot stream: try it before designing the filter
                 // (DoP: DoP silence, so the DAC does not see a stretch of PCM before the stream)
                 ByteRing probe(1 << 12);
@@ -420,9 +389,9 @@ struct Player::Impl {
             rep.device_name = dev->device_name();
             rep.latency_ms = dev->latency_ms();
             note_buffer_fallback();
-            if (auto* a = dynamic_cast<AsioOutput*>(dev.get())) {
+            if (auto rates_ok = dev->supported_rates(); !rates_ok.empty()) {
                 std::lock_guard<std::mutex> l(diag_m);
-                if (!a->supported_rates().empty()) asio_rates = a->supported_rates();
+                asio_rates = std::move(rates_ok);
             }
             chain_fmt = rep.device;
             dsdenc.reset();
@@ -823,7 +792,7 @@ struct Player::Impl {
                 ++it;
             }
         }
-        std::wstring np;
+        std::filesystem::path np;
         {
             std::lock_guard<std::mutex> l(m);
             np = next_path;
@@ -839,7 +808,7 @@ struct Player::Impl {
         const int cr = crate, cch = ch, cur_rate = decoding_info().rate;
         const DspChain::Shape shape = cur ? cur->shape() : DspChain::Shape{};
         p->key = chain_key(cs, cf);
-        std::thread worker([p, dsd, cs, cf, cr, cch, cur_rate, shape] {
+        std::thread worker([p, dsd, cs, cf, cr, cch, cur_rate, shape, opener = deps.open_decoder] {
             std::string e;
             if (dsd) {
                 auto f = std::make_unique<DsdFile>();
@@ -848,7 +817,7 @@ struct Player::Impl {
                 p->done = true;
                 return;
             }
-            auto d = open_decoder(p->path, &e);
+            auto d = opener(p->path, &e);
             const bool have = d != nullptr;
             const AudioInfo src = have ? d->info() : AudioInfo{};
             p->dec = std::move(d);   // try_gapless may take it as soon as opened is set
@@ -882,7 +851,7 @@ struct Player::Impl {
     // bring out A's last samples (its content delay) and their ringing; B's start through the new chain (built
     // ahead) is overlap-added so that B's first sample comes exactly one source period after A's last, its
     // pre-ringing over A's end. The hearing side follows when B is heard (check_switch).
-    void cross_switch(std::unique_ptr<Decoder> nd, std::unique_ptr<DspChain> nc, const std::wstring& np) {
+    void cross_switch(std::unique_ptr<Decoder> nd, std::unique_ptr<DspChain> nc, const std::filesystem::path& np) {
         const size_t need = static_cast<size_t>(std::max(cur->max_output_frames(), nc->max_output_frames())) * dch;
         if (dsp.size() < need) dsp.resize(need);
         if (tmp_c.size() < need) tmp_c.resize(need);
@@ -984,7 +953,7 @@ struct Player::Impl {
     // gapless: continue with the next track when it has the same format (called at the end of
     // the decoder's data)
     bool try_gapless() {
-        std::wstring np;
+        std::filesystem::path np;
         std::optional<double> nh;
         {
             std::lock_guard<std::mutex> l(m);
@@ -1026,7 +995,7 @@ struct Player::Impl {
             dsdf = std::move(f);
         } else {
             std::unique_ptr<Decoder> nd = p ? std::move(p->dec) : nullptr;
-            if (!nd) nd = open_decoder(np, &e);
+            if (!nd) nd = deps.open_decoder(np, &e);
             if (!nd || nd->info().channels != ch) return false;
             const bool fits = cur->fits(chain_settings(s, run_osr), nd->info());
             if (fits) {
@@ -1177,7 +1146,7 @@ struct Player::Impl {
         build_cancel = std::make_shared<std::atomic<bool>>(false);
         building = std::async(std::launch::async, [cs, src, devf = chain_fmt, this, flag = build_cancel]() -> std::unique_ptr<DspChain> {
             // playback is running: stay below it (the design workers take this priority)
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+            platform::set_thread_priority(platform::Priority::BelowNormal);
             dsp::ProgressScope scope(&design_prog);
             dsp::CancelScope cancel_scope(flag.get());
             auto c = std::make_unique<DspChain>();
@@ -1193,8 +1162,8 @@ struct Player::Impl {
     }
 
     // The PCM decoder for a file: DSD files reaching this point are converted to PCM.
-    std::unique_ptr<Decoder> open_source(const std::wstring& file, const Settings& st, std::string* e) {
-        if (!is_dsd_path(file)) return open_decoder(file, e);
+    std::unique_ptr<Decoder> open_source(const std::filesystem::path& file, const Settings& st, std::string* e) {
+        if (!is_dsd_path(file)) return deps.open_decoder(file, e);
         auto d = make_dsd_pcm_decoder(dsd_pcm_rate, st.output.dsd_pcm_lowpass);
         if (!d->open(file, e)) d.reset();
         return d;
@@ -1206,7 +1175,7 @@ struct Player::Impl {
     }
 
     // the WASAPI device buffer (ASIO: the driver's)
-    bool buffer_changes(const Settings& ns) const { return out.api != OutputApi::Asio && ns.output.buffer_ms != s.output.buffer_ms; }
+    bool buffer_changes(const Settings& ns) const { return api_takes_buffer_ms(out.api) && ns.output.buffer_ms != s.output.buffer_ms; }
 
     bool needs_restart(const Settings& ns, const OutputChoice& no) const {
         return !(no == out) || ns.core != s.core || requested_rate(ns, rep.source.rate) != want || modulator_key(ns) != modulator_key(s) ||
@@ -1347,11 +1316,11 @@ struct Player::Impl {
             if (error) *error = "DSD" + std::to_string(multiple) + " is above output.max_dsd (DSD" + std::to_string(s.output.max_dsd) + ")";
             return false;
         }
-        if (out.api == OutputApi::Asio && s.output.dsd != DsdMode::Dop) at.push_back({di.dsd_rate, true});
+        if (api_has_native_dsd(out.api) && s.output.dsd != DsdMode::Dop) at.push_back({di.dsd_rate, true});
         if (s.output.dsd != DsdMode::Native) at.push_back({di.dsd_rate / 16, false});
         std::string e = at.empty() ? "output.dsd = native needs an ASIO driver with a DSD mode" : "";
         for (const auto& a : at) {
-            dev = open_output(out, s.output.buffer_ms, a.rate, di.channels, &e, a.native);
+            dev = open_output({out, s.output.buffer_ms, a.rate, di.channels, a.native}, &e);
             if (!dev) continue;
             if (dev->format().rate != a.rate || dev->format().channels != di.channels) {
                 e = "the device locked " + describe(dev->format()) + " instead of " + std::to_string(a.rate) + " Hz, " +
@@ -1454,7 +1423,7 @@ struct Player::Impl {
     }
 
     void run() {
-        RealtimeScope rt;
+        platform::RealtimeScope rt;
         dsp::set_design_threads(s.design.threads);
         std::string e;
         bool started_dsd = false;
@@ -1489,9 +1458,9 @@ struct Player::Impl {
                 event(s.output.dsd == DsdMode::Pcm ? "converting the DSD file to PCM (output.dsd = pcm)"
                                                     : "DSD cannot be sent directly (" + de + "): converting the DSD file to PCM");
                 // shared mode runs at the mixer rate: convert to it when it divides the DSD rate
-                if (out.api == OutputApi::WasapiShared) {
+                if (api_is_shared(out.api)) {
                     std::string pe;
-                    if (auto probe = open_output(out, s.output.buffer_ms, dsdf->info().dsd_rate / 16, dsdf->info().channels, &pe)) {
+                    if (auto probe = open_output({out, s.output.buffer_ms, dsdf->info().dsd_rate / 16, dsdf->info().channels, false}, &pe)) {
                         const int mix = probe->format().rate;
                         if (mix > 0 && dsdf->info().dsd_rate % (mix * 8) == 0) dsd_pcm_rate = mix;
                     }
@@ -1719,14 +1688,20 @@ struct Player::Impl {
     }
 };
 
-Player::Player() : impl_(std::make_unique<Impl>()) {}
+Player::Player() : Player(PlayerDeps{}) {}
+
+Player::Player(PlayerDeps deps) : impl_(std::make_unique<Impl>()) {
+    if (!deps.open_output) deps.open_output = platform_output_opener();
+    if (!deps.open_decoder) deps.open_decoder = [](const std::filesystem::path& p, std::string* e) { return open_decoder(p, e); };
+    impl_->deps = std::move(deps);
+}
 
 Player::~Player() {
     stop();
     if (impl_->th.joinable()) impl_->th.join();
 }
 
-bool Player::start(const std::wstring& path, const Settings& s, const OutputChoice& out, PlayCallbacks cb, std::string* error,
+bool Player::start(const std::filesystem::path& path, const Settings& s, const OutputChoice& out, PlayCallbacks cb, std::string* error,
                    double start_seconds) {
     Impl& p = *impl_;
     p.path = path;
@@ -1766,7 +1741,7 @@ void Player::seek(double seconds) {
     impl_->seek_req = seconds;
 }
 
-void Player::set_next(const std::wstring& path, std::optional<double> headroom_db) {
+void Player::set_next(const std::filesystem::path& path, std::optional<double> headroom_db) {
     std::lock_guard<std::mutex> l(impl_->m);
     impl_->next_path = path;
     impl_->next_headroom = headroom_db;
@@ -1797,7 +1772,7 @@ bool Player::wait(PlayReport* report, std::string* error) {
     return impl_->ok;
 }
 
-bool play_file(const std::wstring& path, const Settings& s, const OutputChoice& out, const std::atomic<bool>& cancel,
+bool play_file(const std::filesystem::path& path, const Settings& s, const OutputChoice& out, const std::atomic<bool>& cancel,
                const PlayCallbacks& cb, PlayReport* report, std::string* error) {
     Player p;
     if (!p.start(path, s, out, cb, error)) return false;

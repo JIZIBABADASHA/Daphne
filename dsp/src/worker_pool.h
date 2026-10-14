@@ -12,9 +12,7 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
+#include "daphne/platform/platform.h"
 
 namespace daphne::dsp {
 
@@ -69,9 +67,7 @@ private:
         }
     }
     void loop() {
-#ifdef _WIN32
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-#endif
+        platform::set_thread_priority(platform::Priority::AboveNormal);
         long long seen = 0;
         for (;;) {
             {

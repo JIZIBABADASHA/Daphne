@@ -1,7 +1,5 @@
 #include <catch_amalgamated.hpp>
 
-#include <windows.h>
-
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -10,17 +8,14 @@
 #include <dr_libs/dr_wav.h>
 
 #include "daphne/engine/decoder.h"
+#include "test_util.h"
 
 namespace {
 
-std::wstring temp_path(const wchar_t* name) {
-    wchar_t dir[MAX_PATH];
-    GetTempPathW(MAX_PATH, dir);
-    return std::wstring(dir) + name;
-}
+std::filesystem::path temp_path(const std::string& name) { return test::temp_path(name); }
 
 // writes `frames` frames of a stereo integer ramp at `bits`, returns the samples written
-std::vector<int32_t> write_int_wav(const std::wstring& path, int bits, int frames) {
+std::vector<int32_t> write_int_wav(const std::filesystem::path& path, int bits, int frames) {
     drwav_data_format fmt{};
     fmt.container = drwav_container_riff;
     fmt.format = DR_WAVE_FORMAT_PCM;
@@ -28,7 +23,7 @@ std::vector<int32_t> write_int_wav(const std::wstring& path, int bits, int frame
     fmt.sampleRate = 44100;
     fmt.bitsPerSample = static_cast<drwav_uint32>(bits);
     drwav w;
-    REQUIRE(drwav_init_file_write_w(&w, path.c_str(), &fmt, nullptr));
+    REQUIRE(test::wav_write_open(&w, path, &fmt));
     const int bytes = bits / 8;
     const int64_t full = (int64_t(1) << (bits - 1)) - 1;
     std::vector<int32_t> s(static_cast<size_t>(frames) * 2);
@@ -42,7 +37,7 @@ std::vector<int32_t> write_int_wav(const std::wstring& path, int bits, int frame
     return s;
 }
 
-void check_exact(const std::wstring& path, int bits, const std::vector<int32_t>& want) {
+void check_exact(const std::filesystem::path& path, int bits, const std::vector<int32_t>& want) {
     std::string err;
     auto d = daphne::open_decoder(path, &err);
     REQUIRE(d);
@@ -64,15 +59,15 @@ void check_exact(const std::wstring& path, int bits, const std::vector<int32_t>&
 
 TEST_CASE("WAV integer PCM decodes bit-exactly", "[decoder]") {
     for (int bits : {16, 24, 32}) {
-        const auto p = temp_path((L"daphne_test_" + std::to_wstring(bits) + L".wav").c_str());
+        const auto p = temp_path("daphne_test_" + std::to_string(bits) + ".wav");
         const auto s = write_int_wav(p, bits, 10000);
         check_exact(p, bits, s);
-        DeleteFileW(p.c_str());
+        std::filesystem::remove(p);
     }
 }
 
 TEST_CASE("WAV seek lands on the requested frame", "[decoder]") {
-    const auto p = temp_path(L"daphne_test_seek.wav");
+    const auto p = temp_path("daphne_test_seek.wav");
     const auto s = write_int_wav(p, 24, 10000);
     auto d = daphne::open_decoder(p, nullptr);
     REQUIRE(d);
@@ -82,23 +77,22 @@ TEST_CASE("WAV seek lands on the requested frame", "[decoder]") {
     CHECK(f[0] * 8388608.0 == double(s[4321 * 2]));
     CHECK(f[1] * 8388608.0 == double(s[4321 * 2 + 1]));
     d.reset();
-    DeleteFileW(p.c_str());
+    std::filesystem::remove(p);
 }
 
 TEST_CASE("unreadable file reports an error", "[decoder]") {
-    const auto p = temp_path(L"daphne_test_junk.wav");
-    HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
-    DWORD n;
-    WriteFile(h, "not audio at all", 16, &n, nullptr);
-    CloseHandle(h);
+    const auto p = temp_path("daphne_test_junk.wav");
+    FILE* h = daphne::platform::open_file(p, "wb");
+    std::fwrite("not audio at all", 1, 16, h);
+    std::fclose(h);
     std::string err;
     CHECK_FALSE(daphne::open_decoder(p, &err));
     CHECK_FALSE(err.empty());
-    DeleteFileW(p.c_str());
+    std::filesystem::remove(p);
 }
 
 TEST_CASE("WAV float64 decodes bit-exactly", "[decoder]") {
-    const auto p = temp_path(L"daphne_test_f64.wav");
+    const auto p = temp_path("daphne_test_f64.wav");
     drwav_data_format fmt{};
     fmt.container = drwav_container_riff;
     fmt.format = DR_WAVE_FORMAT_IEEE_FLOAT;
@@ -106,7 +100,7 @@ TEST_CASE("WAV float64 decodes bit-exactly", "[decoder]") {
     fmt.sampleRate = 96000;
     fmt.bitsPerSample = 64;
     drwav w;
-    REQUIRE(drwav_init_file_write_w(&w, p.c_str(), &fmt, nullptr));
+    REQUIRE(test::wav_write_open(&w, p, &fmt));
     std::vector<double> x(20000);
     for (size_t i = 0; i < x.size(); ++i) x[i] = 0.7 * std::sin(0.0123456789 * double(i)) + 1e-12 * double(i % 7);
     drwav_write_pcm_frames(&w, x.size() / 2, x.data());
@@ -120,5 +114,5 @@ TEST_CASE("WAV float64 decodes bit-exactly", "[decoder]") {
     REQUIRE(at == x.size());
     CHECK(got == x);
     d.reset();
-    DeleteFileW(p.c_str());
+    std::filesystem::remove(p);
 }

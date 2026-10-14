@@ -2,10 +2,14 @@
 // exact for every bit depth; 64-bit float is read raw (the f32 path would round it).
 
 #define DR_WAV_IMPLEMENTATION
+#ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4701)
+#endif
 #include <dr_libs/dr_wav.h>
+#ifdef _MSC_VER
 #pragma warning(pop)
+#endif
 
 #include <vector>
 
@@ -20,9 +24,14 @@ class WavDecoder final : public Decoder {
 public:
     ~WavDecoder() override { close(); }
 
-    bool open(const std::wstring& path, std::string* error) override {
+    bool open(const std::filesystem::path& path, std::string* error) override {
         close();
-        if (!drwav_init_file_w(&w_, path.c_str(), nullptr)) {
+        #ifdef _WIN32
+        const bool opened = drwav_init_file_w(&w_, path.c_str(), nullptr);
+#else
+        const bool opened = drwav_init_file(&w_, path.c_str(), nullptr);
+#endif
+        if (!opened) {
             if (error) *error = "dr_wav: cannot open WAV/AIFF file";
             return false;
         }

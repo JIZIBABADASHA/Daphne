@@ -1,4 +1,4 @@
-/* daphne_core C ABI: the player for host applications.
+/* daphne_core C ABI: the player for host applications (daphne_core.dll / libdaphne_core.so / .dylib).
  * Calls only go host -> library; the library never calls back into the host. Events and state are
  * polled as JSON (UTF-8). Errors are return codes plus an optional message buffer; no exception
  * crosses this boundary. Every function may be called from any thread. */
@@ -14,6 +14,8 @@
 #  else
 #    define DC_API __declspec(dllimport)
 #  endif
+#elif defined(__GNUC__) || defined(__clang__)
+#  define DC_API __attribute__((visibility("default")))
 #else
 #  define DC_API
 #endif
@@ -31,6 +33,7 @@ extern "C" {
 
 typedef struct dc_player dc_player;
 
+/* 1: the first version; 2: the UTF-8 path functions (*_utf8). */
 DC_API int dc_abi_version(void);
 DC_API const char* dc_version(void);
 
@@ -38,11 +41,15 @@ DC_API dc_player* dc_create(void);
 /* Stops playback and frees the player. */
 DC_API void dc_destroy(dc_player* p);
 
+/* Paths: the functions taking wchar_t paths are the original ones (UTF-16 on Windows; on other systems wchar_t
+ * is UTF-32); the *_utf8 variants take UTF-8 and are the portable choice for new hosts (N25). */
+
 /* Opens path (UTF-16) with the settings (settings JSON, see settings.h; output.api / output.device
  * choose the device) and starts at `seconds`, playing or paused. Blocks until playback has started or
  * failed (a long filter design is reported through dc_state "design" meanwhile). A playing track is
  * stopped first. */
 DC_API int dc_load(dc_player* p, const wchar_t* path, const char* settings_json, double seconds, int play, char* err, int err_len);
+DC_API int dc_load_utf8(dc_player* p, const char* path, const char* settings_json, double seconds, int play, char* err, int err_len);
 /* New settings for the playing track (in place, rebuild + crossfade, or device restart as needed). */
 DC_API int dc_apply(dc_player* p, const char* settings_json, char* err, int err_len);
 DC_API void dc_pause(dc_player* p, int paused);
@@ -50,9 +57,11 @@ DC_API void dc_seek(dc_player* p, double seconds);
 /* Gapless: the track to continue with when this one ends (same output format only; another sample rate
  * when it plays on the same output); NULL / "" clears. */
 DC_API void dc_set_next(dc_player* p, const wchar_t* path);
+DC_API void dc_set_next_utf8(dc_player* p, const char* path);
 /* dc_set_next with the next track's own headroom (dB, settings "headroom_db": ReplayGain per track), applied where
  * its first sample is decoded; NaN keeps the current one. */
 DC_API void dc_set_next_gain(dc_player* p, const wchar_t* path, double headroom_db);
+DC_API void dc_set_next_gain_utf8(dc_player* p, const char* path, double headroom_db);
 /* Stops playback (DSD: the DAC is returned to PCM first) and waits for it. */
 DC_API void dc_stop(dc_player* p);
 
@@ -81,6 +90,8 @@ DC_API void dc_meter(dc_player* p, double* l, double* r);
 /* The filter cache folder (UTF-16, NUL-terminated); returns its length, 0 when the cache is disabled
  * (DAPHNE_FILTER_CACHE=off), or DC_ERR_BUFFER. */
 DC_API int dc_filter_cache_dir(wchar_t* out, int len);
+/* The same in UTF-8 (NUL-terminated; the length in bytes). */
+DC_API int dc_filter_cache_dir_utf8(char* out, int len);
 /* Keeps the filter cache at most limit_mb (0: deletes everything it may), least recently used first,
  * never the filters `settings` (a settings document, UTF-8) use. Returns the bytes left in the cache,
  * or -1 when the settings do not parse. */

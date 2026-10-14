@@ -39,7 +39,7 @@ public:
     double latency_ms() const override { return latency_ms_; }
     int buffer_frames() const override { return buffer_frames_; }
     // The buffer asked for (WasapiOptions::buffer_ms) failed to initialize; the default is used.
-    bool buffer_fallback() const { return buffer_fallback_; }
+    bool buffer_fallback() const override { return buffer_fallback_; }
 
     // Start the render thread reading from ring. When eof is set and the ring runs dry,
     // drained() becomes true (the device keeps getting silence until stop()).

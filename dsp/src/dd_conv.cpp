@@ -9,6 +9,7 @@
 #include <intrin.h>
 #endif
 
+#include "daphne/platform/platform.h"
 #include "dd.h"
 #include "dd_ops.h"
 
@@ -29,8 +30,11 @@ bool detect_avx2_fma() {
     if ((_xgetbv(0) & 0x6) != 0x6) return false;   // the OS saves the YMM state
     __cpuidex(r, 7, 0);
     return (r[1] >> 5) & 1;   // AVX2
+#elif DAPHNE_DD_AVX2
+    __builtin_cpu_init();
+    return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
 #else
-    return false;
+    return false;   // not x86: the scalar path
 #endif
 }
 
@@ -61,11 +65,7 @@ void stage_scalar(Planes& x, const Planes& tw, int n, int half) {
 bool have_avx2_fma() {
     // DAPHNE_DD_SCALAR=1 forces the scalar path (benchmarks)
     static const bool ok = detect_avx2_fma() && [] {
-        char* v = nullptr;
-        size_t n = 0;
-        const bool set = _dupenv_s(&v, &n, "DAPHNE_DD_SCALAR") == 0 && v != nullptr;
-        free(v);
-        return !set;
+        return !platform::get_env("DAPHNE_DD_SCALAR").has_value();
     }();
     return ok && !g_force_scalar.load(std::memory_order_relaxed);
 }

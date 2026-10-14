@@ -1,0 +1,25 @@
+// macOS / Linux: no device output yet (Core Audio and ALSA are later steps, N25). The player, the
+// chain and the decoders build and run here; tests give the player a fake device (PlayerDeps).
+#include "daphne/engine/devices.h"
+#include "daphne/engine/player.h"
+
+namespace daphne {
+
+OutputOpener platform_output_opener() {
+    return [](const OutputRequest&, std::string* error) -> std::unique_ptr<AudioOutput> {
+        if (error) *error = "no audio output on this platform yet (the WASAPI and ASIO outputs are Windows only)";
+        return nullptr;
+    };
+}
+
+std::vector<WasapiDevice> list_wasapi_devices(bool, std::string* error) {
+    if (error) *error = "WASAPI is Windows only";
+    return {};
+}
+
+std::vector<AsioDriver> list_asio_drivers(std::string* error) {
+    if (error) *error = "ASIO is Windows only";
+    return {};
+}
+
+}  // namespace daphne
