@@ -3,6 +3,17 @@ add_library(daphne_engine STATIC
     src/text.cpp
     src/ring_feeder.cpp
     src/player.cpp
+    src/player/change_plan.cpp
+    src/player/changes.cpp
+    src/player/common.cpp
+    src/player/core.cpp
+    src/player/crossfader.cpp
+    src/player/dsd_stream.cpp
+    src/player/gapless.cpp
+    src/player/output_session.cpp
+    src/player/pcm_stream.cpp
+    src/player/report.cpp
+    src/player/track_queue.cpp
     src/chain.cpp
     src/decoder_factory.cpp
     src/decoder_flac.cpp
