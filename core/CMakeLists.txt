@@ -3,6 +3,8 @@ add_library(daphne_engine STATIC
     src/text.cpp
     src/ring_feeder.cpp
     src/player.cpp
+    src/player/common.cpp
+    src/player/report.cpp
     src/chain.cpp
     src/decoder_factory.cpp
     src/decoder_flac.cpp

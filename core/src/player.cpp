@@ -20,72 +20,13 @@
 #include "daphne/dsp/quantizer.h"
 #include "daphne/engine/ring_buffer.h"
 #include "daphne/platform/platform.h"
+#include "player/common.h"
+#include "player/report.h"
+#include "player/timeline.h"
 
 namespace daphne {
 
-namespace {
-
-constexpr int kChunk = 4096;
-constexpr double kFadeSeconds = 0.05;
-constexpr double kPi = 3.141592653589793;
-
-// What the output API offers, decided before a device is open: native DSD (ASIO), a mixer that is never
-// bit-perfect and cannot carry DSD (WASAPI shared), a buffer length the player sets (WASAPI).
-bool api_has_native_dsd(OutputApi a) { return a == OutputApi::Asio; }
-bool api_is_shared(OutputApi a) { return a == OutputApi::WasapiShared; }
-bool api_takes_buffer_ms(OutputApi a) { return a != OutputApi::Asio; }
-
-// The device rate asked for: pcm core, the output rate for the source; dsd core, the DoP rate
-// (DSD clock / 16).
-int requested_rate(const Settings& s, int fs_in) {
-    if (s.core == CoreMode::Dsd) return dop_rate(dsd_clock(s.modulator.osr));
-    return pcm_output_rate(fs_in, s.output.rate);
-}
-
-// Whether a chain for a source at `rate` plays on the output now running (chain output rate
-// chain_rate) without reopening the device: pcm, a device rate the settings give the new source
-// (stepped down by powers of two as open_and_start does); dsd, the same modulator input rate (the
-// DSD clock does not depend on the source).
-bool same_output(const Settings& cs, int rate, int chain_rate) {
-    if (cs.core == CoreMode::Dsd) return modulator_input_rate(rate) == chain_rate;
-    for (int r = pcm_output_rate(rate, cs.output.rate); r >= rate && r % rate == 0; r /= 2)
-        if (r == chain_rate) return true;
-    return false;
-}
-
-// Modulator settings that need a new modulator (a device restart).
-std::string modulator_key(const Settings& s) {
-    if (s.core != CoreMode::Dsd) return "";
-    return settings_to_json(s)["dsd_modulator"].dump() + std::to_string(static_cast<int>(s.output.dsd)) + "m" +
-           std::to_string(s.output.max_dsd);
-}
-
-// Settings as the chain sees them. osr > 0: the DSD multiple the device runs (the dsd core may have
-// stepped down; the chain's limiter follows the modulator's stable range).
-Settings chain_settings(const Settings& s, int osr = 0) {
-    Settings c = s;
-    if (osr > 0) c.modulator.osr = osr;
-    return c;
-}
-
-// Interleaved frame FIFO for the crossfade.
-struct Fifo {
-    std::vector<double> d;
-    size_t off = 0;   // values
-    int ch = 1;
-    int frames() const { return static_cast<int>((d.size() - off) / ch); }
-    void push(const double* x, int n) { d.insert(d.end(), x, x + static_cast<size_t>(n) * ch); }
-    void push_zeros(int n) { d.insert(d.end(), static_cast<size_t>(n) * ch, 0.0); }
-    const double* data() const { return d.data() + off; }
-    void pop(int n) {
-        off += static_cast<size_t>(n) * ch;
-        if (off >= d.size()) d.clear(), off = 0;
-        else if (off > (1u << 20)) d.erase(d.begin(), d.begin() + static_cast<std::ptrdiff_t>(off)), off = 0;
-    }
-    void clear() { d.clear(), off = 0; }
-};
-
-}  // namespace
+using namespace playback;
 
 struct Player::Impl {
     // setup
@@ -93,7 +34,10 @@ struct Player::Impl {
     std::filesystem::path path;
     Settings s;
     OutputChoice out;
-    PlayCallbacks cb;
+    Report report;
+    PlayReport& rep = report.rep;      // the report's parts, used throughout
+    PlayCallbacks& cb = report.cb;
+    Timeline tl;
 
     // threading
     std::thread th;
@@ -104,7 +48,6 @@ struct Player::Impl {
     std::optional<std::pair<Settings, OutputChoice>> pending;
     std::atomic<bool> cancel{false}, done{false};
     std::atomic<int64_t> pos{0};
-    PlayReport rep;
     bool ok = false;
     std::string err;
 
@@ -120,7 +63,6 @@ struct Player::Impl {
     std::vector<double> hist;
     int hist_cap = 1 << 17;
     int64_t in_total = 0;    // source frames read since the start of the track
-    int64_t abs_out = 0;     // device frames of the current chain's timeline
     int ratio = 1, ch = 0, dch = 0, block = 0, want = 0;
     // chain output rate / format (= the device's, except for the dsd core: the modulator's PCM)
     int crate = 0;
@@ -128,7 +70,7 @@ struct Player::Impl {
     std::unique_ptr<DsdEncoder> dsdenc;
     std::unique_ptr<DsdFile> dsdf;   // DSD file played directly (no chain)
     std::vector<uint8_t> dsd_in;
-    int dsd_pcm_rate = 0;
+    int dsd_pcm_rate = 0;            // DSD -> PCM fallback at this rate (0 = 176.4 / 192 kHz)
     double start_sec = 0.0;          // Player::start position
     // transport requests (under m) and state
     std::atomic<bool> want_pause{false}, ended_flag{false};
@@ -136,24 +78,6 @@ struct Player::Impl {
     std::filesystem::path next_path;   // gapless candidate (set_next)
     std::optional<double> next_headroom;   // its headroom_db (ReplayGain), applied at the decode boundary
     std::filesystem::path cur_path;    // the track being heard
-    struct Switch {
-        int64_t at_in = 0;           // stream input frame where the track starts
-        AudioInfo info;
-        std::filesystem::path path;
-        // gapless through a new chain (another sample rate on the same output, or the same rate with a format
-        // the old chain does not fit; cross_switch): the new chain's output starts at device
-        // frame at_out and its first sample is heard new_delay later. Until then the hearing side stays on the
-        // old segment, whose parameters are kept here; a seek or restart before it goes back to old_chain.
-        bool cross = false;
-        std::optional<double> old_headroom;   // the headroom before this track's own (set_next), restored on undo
-        int64_t at_out = 0;
-        int new_delay = 0;
-        int old_ratio = 1, old_delay = 0;
-        int64_t old_base = 0;
-        std::unique_ptr<DspChain> old_chain;
-    };
-    std::deque<Switch> switches;     // gapless tracks decoded but not yet heard
-    int64_t h_base = 0;              // device frame of the heard segment's input frame 0 (gapless across rates)
     // The next track (set_next) opened ahead on a background thread, and its chain built too when the current
     // one does not fit it (another sample rate on the same output, or the same rate with another format), so
     // the boundary does not wait for a slow disk or a filter design.
@@ -167,35 +91,27 @@ struct Player::Impl {
     };
     std::shared_ptr<Prep> prep;
     std::vector<std::pair<std::shared_ptr<Prep>, std::thread>> prep_threads;
-    int64_t track_origin_in = 0;     // stream input frame of the current track's frame 0
     int64_t hist_valid_from = 0;     // first input frame the crossfade history holds
     std::atomic<double> pos_sec{0.0};
     std::atomic<double> meter_l{0.0}, meter_r{0.0};
     bool end_queued = false;         // the stream end (DSD silence) is queued
     std::atomic<bool> device_fail{false};
     int run_osr = 0;                 // dsd core: the DSD multiple the device runs
-    // diagnostics, written by the DSP thread
-    mutable std::mutex diag_m;
-    std::string diag;
-    std::vector<int> asio_rates;
-    std::chrono::steady_clock::time_point diag_at{};
+    // diagnostics for the host's log (Report::diag_json)
     void update_diag() {
-        const auto now = std::chrono::steady_clock::now();
-        if (now - diag_at < std::chrono::milliseconds(500)) return;
-        diag_at = now;
+        if (!report.diag_due()) return;
         char b[512];
         const OutputStats* st = dev ? &dev->stats() : nullptr;
         std::snprintf(b, sizeof b,
                       "{\"ring\":%zu,\"ring_cap\":%zu,\"pend\":%zu,\"eof\":%d,\"fading\":%d,\"building\":%d,\"paused\":%d,"
-                      "\"dev_paused\":%d,\"callbacks\":%lld,\"underruns\":%lld,\"drained\":%d,\"failed\":%d,\"late\":%lld,\"abs_out\":%lld,\"in\":%lld}",
+                      "\"dev_paused\":%d,\"callbacks\":%lld,\"underruns\":%lld,\"drained\":%d,\"failed\":%d,\"late\":%lld,\"tl.abs_out\":%lld,\"in\":%lld}",
                       ring ? ring->readable() : 0, ring ? ring->capacity() : 0, pend - pend_off, eof.load() ? 1 : 0, fading ? 1 : 0,
                       building.valid() ? 1 : 0, want_pause.load() ? 1 : 0, dev && dev->paused() ? 1 : 0,
                       st ? static_cast<long long>(st->callbacks.load()) : -1LL, st ? static_cast<long long>(st->underruns.load()) : -1LL,
                       dev && dev->drained() ? 1 : 0, dev && dev->failed() ? 1 : 0,
-                      st ? static_cast<long long>(st->late_callbacks.load()) : -1LL, static_cast<long long>(abs_out), static_cast<long long>(in_total));
-        std::lock_guard<std::mutex> l(diag_m);
-        diag = b;
-    }            // DSD -> PCM fallback at this rate (0 = 176.4 / 192 kHz)
+                      st ? static_cast<long long>(st->late_callbacks.load()) : -1LL, static_cast<long long>(tl.abs_out), static_cast<long long>(in_total));
+        report.set_diag(b);
+    }
     std::vector<uint8_t> dsd_bytes;
     bool flushed = false;
     std::atomic<bool> eof{false};
@@ -237,58 +153,6 @@ struct Player::Impl {
     std::shared_ptr<std::atomic<bool>> build_cancel;
     bool build_designs = false;   // the background build designs a filter (not only loads it from the cache)
 
-    std::atomic<double> design_prog{0.0};
-    std::chrono::steady_clock::time_point design_report{};
-
-    void report_design(bool force = false) {
-        if (!cb.on_design) return;
-        const auto now = std::chrono::steady_clock::now();
-        if (!force && now - design_report < std::chrono::milliseconds(250)) return;
-        design_report = now;
-        cb.on_design(design_prog.load());
-    }
-
-    // What the resampler is set to, for messages.
-    std::string current_filter() const {
-        // DSD file converted to PCM: the conversion, then the upsampling filter only when it is used
-        std::string pre;
-        if (rep.source.dsd_pcm) {
-            const int dr = rep.source.dsd_rate;
-            pre = "DSD" + std::to_string(dr > 0 ? dr / (dr % 44100 == 0 ? 44100 : 48000) : 0) + " -> PCM " +
-                  std::to_string(rep.source.rate) + " Hz (low-pass " + std::to_string(s.output.dsd_pcm_lowpass) + " kHz" +
-                  (s.output.dsd_pcm_limiter ? ", limiter" : "") + ")";
-            if (s.core == CoreMode::Pcm && rep.device.rate == rep.source.rate && !s.filter.apodize) return pre;
-            pre += ", then ";
-        }
-        std::string d = describe_filter(s);
-        if (s.core == CoreMode::Pcm && rep.device.rate == rep.source.rate)
-            d += s.filter.apodize ? " (output rate = source rate: 1x, the apodizing filter still applies)"
-                                  : " (output rate = source rate: no resampling, the filter is not used)";
-        else if (s.core == CoreMode::Pcm)
-            d += ", " + std::to_string(rep.source.rate) + " -> " + std::to_string(rep.device.rate) + " Hz";
-        else if (dsdenc)
-            d += " | " + dsdenc->describe();
-        return pre + d;
-    }
-
-    static std::string describe_filter(const Settings& x) {
-        static const char* phases[] = {"linear", "intermediate", "minimum", "custom"};
-        char b[96];
-        std::snprintf(b, sizeof b, "%d taps, %s phase (alpha %.2f)", x.filter.taps, phases[static_cast<int>(x.filter.phase)],
-                      x.filter.phase_alpha());
-        std::string d = b;
-        if (x.filter.apodize) d += ", apodize";
-        if (x.filter.double_double) d += ", double-double convolution";
-        if (x.core == CoreMode::Dsd)
-            d = "DSD modulator order " + std::to_string(x.modulator.order) + ", DSD" + std::to_string(x.modulator.osr) + ", pre-filter " + d;
-        return d;
-    }
-
-    static std::string join(const std::vector<std::string>& v) {
-        std::string s;
-        for (const auto& x : v) s += (s.empty() ? "" : " -> ") + x;
-        return s.empty() ? "none" : s;
-    }
 
     std::unique_ptr<AudioOutput> open_output(const OutputRequest& req, std::string* error) { return deps.open_output(req, error); }
 
@@ -304,9 +168,7 @@ struct Player::Impl {
                   " ms buffer, playing with its default (" + std::to_string(std::lround(dev->latency_ms())) + " ms)");
     }
 
-    void event(const std::string& e) {
-        if (cb.on_event) cb.on_event(e);
-    }
+    void event(const std::string& e) const { report.event(e); }
 
     void hist_store(const double* x, int n) {
         for (int i = 0; i < n; ++i) {
@@ -389,10 +251,7 @@ struct Player::Impl {
             rep.device_name = dev->device_name();
             rep.latency_ms = dev->latency_ms();
             note_buffer_fallback();
-            if (auto rates_ok = dev->supported_rates(); !rates_ok.empty()) {
-                std::lock_guard<std::mutex> l(diag_m);
-                asio_rates = std::move(rates_ok);
-            }
+            if (auto rates_ok = dev->supported_rates(); !rates_ok.empty()) report.set_asio_rates(std::move(rates_ok));
             chain_fmt = rep.device;
             dsdenc.reset();
             run_osr = 0;
@@ -436,7 +295,7 @@ struct Player::Impl {
                 const DeviceFormat devf = chain_fmt;
                 std::string be;
                 auto job = std::async(std::launch::async, [&, c, cs, devf] {
-                    dsp::ProgressScope scope(&design_prog);
+                    dsp::ProgressScope scope(&report.design_prog);
                     dsp::CancelScope cancel_scope(&cancel);
                     try {
                         return c->build(cs, src, devf, kChunk, &be);
@@ -446,20 +305,20 @@ struct Player::Impl {
                     }
                 });
                 while (job.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready)
-                    if (designing) report_design();
+                    if (designing) report.design();
                 built = job.get();
                 if (!built) e = be;
-                report_design(true);
+                report.design(true);
             }
             if (!built) {   // never play at the wrong rate
                 if (fail_attempt()) return false;
                 continue;
             }
             ratio = std::max(1, crate / src.rate);
-            h_base = 0;
+            tl.h_base = 0;
             dch = rep.device.channels;
             block = rep.device.block_align();
-            abs_out = from * ratio;
+            tl.abs_out = from * ratio;
             fc.ch = fn.ch = carry.ch = dch;
             ring = std::make_unique<ByteRing>(ring_bytes());
             dsp.assign(static_cast<size_t>(cur->max_output_frames()) * dch, 0.0);
@@ -484,28 +343,13 @@ struct Player::Impl {
             break;
         }
         rep.chain = cur->stages();
-        rep.filter = current_filter();
-        report_bit_perfect();
+        rep.filter = report.filter(s, dsdenc.get());
+        report.bit_perfect(tl.heard_chain(cur.get()));
         if (cb.on_start) cb.on_start(rep);
         kick_cache_trim();
         return true;
     }
 
-    // bit_perfect and its reason for the heard track and the chain playing it (PCM path; a DSD file sent
-    // directly sets its own). Again whenever either changes: a gapless track, an in-place change, a new chain.
-    void report_bit_perfect() {
-        const DspChain* c = heard_chain();
-        if (!c) return;
-        const AudioInfo& src = rep.source;
-        rep.not_bit_perfect_reason.clear();
-        if (src.dsd_pcm) rep.not_bit_perfect_reason = "DSD converted to PCM";
-        else if (!src.lossless_int) rep.not_bit_perfect_reason = "source is not integer PCM";
-        else if (!c->transparent()) rep.not_bit_perfect_reason = "DSP active";
-        else if (effective_bits(rep.device) < src.bits)
-            rep.not_bit_perfect_reason =
-                "device resolution " + std::to_string(effective_bits(rep.device)) + "-bit < source " + std::to_string(src.bits) + "-bit";
-        rep.bit_perfect = rep.not_bit_perfect_reason.empty();
-    }
 
     // The crossfade and the fade-in / -out below change the level after the chains' final quantizer: on an
     // integer device the frame is quantized again, with TPDF dither at the device word length (N21), instead
@@ -544,7 +388,7 @@ struct Player::Impl {
 
     void finish_fade() {
         // the next chain becomes current; what it has produced beyond the mixed part plays next
-        abs_out += delay_shift;
+        tl.abs_out += delay_shift;
         rep.clipped += cur->take_clips();   // its last mixed block
         cur = std::move(next);
         carry.clear();
@@ -552,8 +396,8 @@ struct Player::Impl {
         fc.clear(), fn.clear();
         fading = false;
         rep.chain = cur->stages();
-        rep.filter = current_filter();
-        report_bit_perfect();
+        rep.filter = report.filter(s, dsdenc.get());
+        report.bit_perfect(tl.heard_chain(cur.get()));
         event("now playing with filter: " + rep.filter + " | dsp: " + join(rep.chain));
         if (cb.on_changed) cb.on_changed(rep);
     }
@@ -573,7 +417,7 @@ struct Player::Impl {
         hist_tmp.resize(static_cast<size_t>(kChunk) * ch);
         std::vector<double> o(static_cast<size_t>(nx->max_output_frames()) * dch);
         const int dc = cur->content_delay(), dn = nx->content_delay();
-        const int64_t target = abs_out - dc + dn;   // next-chain index of the content the current chain plays next
+        const int64_t target = tl.abs_out - dc + dn;   // next-chain index of the content the current chain plays next
         drop_next = target - start * ratio;
         if (drop_next < 0) {
             fn.push_zeros(static_cast<int>(-drop_next));
@@ -672,7 +516,7 @@ struct Player::Impl {
             pend = static_cast<size_t>(n) * block;
         }
         pend_off = 0;
-        abs_out += n;
+        tl.abs_out += n;
         rep.frames_played += n;
         return true;
     }
@@ -715,57 +559,33 @@ struct Player::Impl {
     int64_t heard_out() const {
         int64_t q = ring ? static_cast<int64_t>(ring->readable() / std::max(1, block)) + static_cast<int64_t>((pend - pend_off) / std::max(1, block)) : 0;
         if (rep.device.rate > 0 && crate != rep.device.frame_rate()) q = q * crate / rep.device.frame_rate();   // DoP frames -> chain frames
-        return abs_out - q;
+        return tl.abs_out - q;
     }
-    // Device frame of the newest segment's input frame 0 (the last pending cross switch, else the heard one).
-    int64_t latest_base() const {
-        for (auto it = switches.rbegin(); it != switches.rend(); ++it)
-            if (it->cross) return it->at_out;
-        return h_base;
-    }
-    // The chain the heard track plays through: before a pending cross switch, the old one it keeps.
-    const DspChain* heard_chain() const {
-        for (const auto& w : switches)
-            if (w.cross) return w.old_chain.get();
-        return cur.get();
-    }
-    bool cross_pending() const {
-        for (const auto& w : switches)
-            if (w.cross) return true;
-        return false;
-    }
-    // Stream input frame being heard (the stream starts at the first track's frame 0; after a gapless switch to
-    // another sample rate, at that track's frame 0).
-    int64_t heard_input() const {
-        const int64_t ho = heard_out();
-        for (const auto& w : switches)   // still before a cross switch: that segment's parameters
-            if (w.cross && ho < w.at_out + w.new_delay) return (ho - w.old_base - w.old_delay) / std::max(1, w.old_ratio);
-        const int64_t d = dsdf ? 0 : cur ? cur->content_delay() : 0;
-        return (ho - latest_base() - d) / std::max(1, ratio);
-    }
-    int64_t heard_position() const { return std::max<int64_t>(0, heard_input() - track_origin_in); }
+    // Stream input frame being heard (Timeline::heard_input).
+    int64_t heard_input() const { return tl.heard_input(heard_out(), dsdf ? 0 : cur ? cur->content_delay() : 0, ratio); }
+    int64_t heard_position() const { return std::max<int64_t>(0, heard_input() - tl.track_origin_in); }
 
     // gapless: report tracks that are now heard
     void check_switch() {
-        while (!switches.empty()) {
-            Switch& w = switches.front();
+        while (!tl.switches.empty()) {
+            Switch& w = tl.switches.front();
             if (w.cross) {
                 if (heard_out() < w.at_out + w.new_delay) break;
-                h_base = w.at_out;
-                track_origin_in = 0;
+                tl.h_base = w.at_out;
+                tl.track_origin_in = 0;
                 want = requested_rate(s, w.info.rate);
             } else {
                 if (heard_input() < w.at_in) break;
-                track_origin_in = w.at_in;
+                tl.track_origin_in = w.at_in;
             }
             const bool cross = w.cross;
             rep.source = w.info;
             cur_path = w.path;
-            switches.pop_front();
+            tl.switches.pop_front();
             if (!dsdf) {   // a DSD file sent directly has no chain and stays bit-perfect
-                if (cross) rep.filter = current_filter();
-                rep.chain = heard_chain()->stages();   // a cross switch's new chain; the track's own headroom
-                report_bit_perfect();                  // the track's own format
+                if (cross) rep.filter = report.filter(s, dsdenc.get());
+                rep.chain = tl.heard_chain(cur.get())->stages();   // a cross switch's new chain; the track's own headroom
+                report.bit_perfect(tl.heard_chain(cur.get()));     // the track's own format
             }
             event(cross ? "gapless: next track (through its own chain: another sample rate or format)" : "gapless: next track");
             if (cb.on_track_started) cb.on_track_started(rep);
@@ -773,7 +593,7 @@ struct Player::Impl {
     }
 
     // The source of the track being decoded (the last switched-to one, or the heard one).
-    const AudioInfo& decoding_info() const { return switches.empty() ? rep.source : switches.back().info; }
+    const AudioInfo& decoding_info() const { return tl.switches.empty() ? rep.source : tl.switches.back().info; }
 
     std::string chain_key(const Settings& cs, const DeviceFormat& cf) const {
         return settings_to_json(cs).dump() + "|" + describe(cf);
@@ -859,8 +679,8 @@ struct Player::Impl {
         const size_t nb = dsdenc ? dsdenc->max_bytes(static_cast<int>(need / dch)) : need / dch * block;
         if (bytes.size() < nb) bytes.resize(nb);
 
-        const int64_t start = abs_out + carry.frames();   // device frame where the joined part begins
-        const int64_t a_end = latest_base() + in_total * ratio + cur->content_delay();   // where A's frame K is heard
+        const int64_t start = tl.abs_out + carry.frames();   // device frame where the joined part begins
+        const int64_t a_end = tl.latest_base() + in_total * ratio + cur->content_delay();   // where A's frame K is heard
         std::vector<double> tail;
         auto put = [&](std::vector<double>& v, int n) { v.insert(v.end(), dsp.begin(), dsp.begin() + static_cast<std::ptrdiff_t>(n) * dch); };
         std::fill(pcm.begin(), pcm.end(), 0.0);
@@ -904,10 +724,10 @@ struct Player::Impl {
         w.new_delay = dn;
         w.old_ratio = ratio;
         w.old_delay = cur->content_delay();
-        w.old_base = latest_base();
+        w.old_base = tl.latest_base();
         rep.clipped += cur->take_clips();   // its tail, now in carry
         w.old_chain = std::move(cur);
-        switches.push_back(std::move(w));
+        tl.switches.push_back(std::move(w));
         cur = std::move(nc);
         dec = std::move(nd);
         ratio = std::max(1, crate / dec->info().rate);
@@ -916,8 +736,8 @@ struct Player::Impl {
     // The track just switched to (switches.back()) has its own headroom (ReplayGain per track): applied from its
     // first decoded sample on (the gain stage ramps over 20 ms); the old value is kept for an undo.
     void apply_headroom(std::optional<double> h) {
-        if (!h || switches.empty() || *h == s.headroom_db) return;
-        switches.back().old_headroom = s.headroom_db;
+        if (!h || tl.switches.empty() || *h == s.headroom_db) return;
+        tl.switches.back().old_headroom = s.headroom_db;
         Settings ns = s;
         ns.headroom_db = *h;
         if (cur->update(chain_settings(ns, run_osr))) {
@@ -931,7 +751,7 @@ struct Player::Impl {
 
     // A seek or restart before a pending switch is heard: the heard track's headroom back.
     void undo_headroom() {
-        for (const auto& w : switches)
+        for (const auto& w : tl.switches)
             if (w.old_headroom) {
                 Settings ns = s;
                 ns.headroom_db = *w.old_headroom;
@@ -942,7 +762,7 @@ struct Player::Impl {
 
     // A seek or restart before a pending cross switch is heard: back to the heard segment's chain.
     void undo_cross() {
-        for (auto& w : switches)
+        for (auto& w : tl.switches)
             if (w.cross) {
                 cur = std::move(w.old_chain);
                 ratio = w.old_ratio;
@@ -988,10 +808,10 @@ struct Player::Impl {
             ai.codec = f->info().codec;
             ai.dsd_rate = f->info().dsd_rate;
             Switch w;
-            w.at_in = abs_out;
+            w.at_in = tl.abs_out;
             w.info = ai;
             w.path = np;
-            switches.push_back(std::move(w));
+            tl.switches.push_back(std::move(w));
             dsdf = std::move(f);
         } else {
             std::unique_ptr<Decoder> nd = p ? std::move(p->dec) : nullptr;
@@ -1003,7 +823,7 @@ struct Player::Impl {
                 w.at_in = in_total;
                 w.info = nd->info();
                 w.path = np;
-                switches.push_back(std::move(w));
+                tl.switches.push_back(std::move(w));
                 dec = std::move(nd);
                 apply_headroom(nh);
             } else {
@@ -1050,15 +870,15 @@ struct Player::Impl {
         pend = pend_off = 0;
         std::string e;
         check_switch();   // a track heard just now is the one the seek is in
-        if (!switches.empty()) {
+        if (!tl.switches.empty()) {
             // the decoder already moved on to a gapless track that is not heard yet: back to this one
             {
                 std::lock_guard<std::mutex> l(m);
-                if (next_path.empty()) next_path = switches.front().path;
+                if (next_path.empty()) next_path = tl.switches.front().path;
             }
             undo_cross();
             undo_headroom();
-            switches.clear();
+            tl.switches.clear();
             if (dsdf) {
                 auto f = std::make_unique<DsdFile>();
                 if (f->open(cur_path, &e)) dsdf = std::move(f);
@@ -1070,7 +890,7 @@ struct Player::Impl {
         if (rep.source.frames > 0) from = std::min(from, rep.source.frames);
         if (dsdf) {
             dsdf->seek(from);
-            abs_out = from;
+            tl.abs_out = from;
         } else {
             dec->seek(from);
             in_total = from;
@@ -1081,14 +901,14 @@ struct Player::Impl {
                 cur = std::move(next);
                 fading = false;
                 rep.chain = cur->stages();
-                rep.filter = current_filter();
-                report_bit_perfect();
+                rep.filter = report.filter(s, dsdenc.get());
+                report.bit_perfect(tl.heard_chain(cur.get()));
             }
             cur->reset();
-            abs_out = from * ratio;
+            tl.abs_out = from * ratio;
         }
-        h_base = 0;
-        track_origin_in = 0;
+        tl.h_base = 0;
+        tl.track_origin_in = 0;
         eof = false;
         end_queued = false;
         dev->rearm();
@@ -1141,13 +961,13 @@ struct Player::Impl {
         build_target = std::make_pair(ns, no);
         const Settings cs = chain_settings(ns, run_osr);
         const AudioInfo src = rep.source;
-        design_prog = 0.0;
+        report.design_prog = 0.0;
         build_designs = (chain_fmt.rate != src.rate || cs.filter.apodize) && !filter_cached(cs.filter, src.rate, chain_fmt.rate);
         build_cancel = std::make_shared<std::atomic<bool>>(false);
         building = std::async(std::launch::async, [cs, src, devf = chain_fmt, this, flag = build_cancel]() -> std::unique_ptr<DspChain> {
             // playback is running: stay below it (the design workers take this priority)
             platform::set_thread_priority(platform::Priority::BelowNormal);
-            dsp::ProgressScope scope(&design_prog);
+            dsp::ProgressScope scope(&report.design_prog);
             dsp::CancelScope cancel_scope(flag.get());
             auto c = std::make_unique<DspChain>();
             std::string e;
@@ -1185,14 +1005,14 @@ struct Player::Impl {
     // drain = false: the device is reopened as it is (a driver reset): what is queued is dropped.
     bool restart(const Settings& ns, const OutputChoice& no, bool drain = true) {
         check_switch();
-        if (cross_pending()) drain = false;   // the queue holds the next track at another rate: not played out
+        if (tl.cross_pending()) drain = false;   // the queue holds the next track at another rate: not played out
         int64_t from = dsdf ? heard_position() : std::max<int64_t>(0, heard_input());   // PCM: stream timeline
         drop_if_paused();
         drop_prep();   // built for the old settings / device
         if (dev && !eof && !dev->failed() && drain) {
             // play what is queued, fade the next chunk out, let the device drain, resume there
             while (!push()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            from = std::max<int64_t>(0, (abs_out - (cur ? cur->content_delay() : 0)) / std::max(1, ratio));
+            from = std::max<int64_t>(0, (tl.abs_out - (cur ? cur->content_delay() : 0)) / std::max(1, ratio));
             fade_out_len = std::max<int64_t>(1, crate / 50);   // 20 ms
             fade_out_next = true;
             if (produce())
@@ -1210,23 +1030,23 @@ struct Player::Impl {
         // goes back to being the next track)
         bool reopen_dec = decoder_changes(ns);
         if (!dsdf) {
-            while (!switches.empty() && !switches.front().cross && from >= switches.front().at_in) {
-                track_origin_in = switches.front().at_in;
-                rep.source = switches.front().info;
-                cur_path = switches.front().path;
-                switches.pop_front();
+            while (!tl.switches.empty() && !tl.switches.front().cross && from >= tl.switches.front().at_in) {
+                tl.track_origin_in = tl.switches.front().at_in;
+                rep.source = tl.switches.front().info;
+                cur_path = tl.switches.front().path;
+                tl.switches.pop_front();
                 if (cb.on_track_started) cb.on_track_started(rep);
             }
-            if (!switches.empty()) {
+            if (!tl.switches.empty()) {
                 std::lock_guard<std::mutex> l(m);
-                if (next_path.empty()) next_path = switches.front().path;
+                if (next_path.empty()) next_path = tl.switches.front().path;
                 undo_cross();
                 undo_headroom();
-                switches.clear();
+                tl.switches.clear();
                 reopen_dec = true;
             }
-            from = std::max<int64_t>(0, from - track_origin_in);
-            track_origin_in = 0;
+            from = std::max<int64_t>(0, from - tl.track_origin_in);
+            tl.track_origin_in = 0;
         }
         if (dev) dev->stop();
         dev.reset();
@@ -1253,7 +1073,7 @@ struct Player::Impl {
     // Applies a pending settings change; false on a fatal error.
     bool handle(const Settings& ns, const OutputChoice& no) {
         drop_prep();   // a chain prepared for the next track was built for the old settings
-        if (fading || building.valid() || cross_pending()) {   // one change at a time (and not across a rate switch); the latest waits
+        if (fading || building.valid() || tl.cross_pending()) {   // one change at a time (and not across a rate switch); the latest waits
             queued = std::make_pair(ns, no);
             if (building.valid() && build_cancel) *build_cancel = true;   // superseded: stop designing it
             return true;
@@ -1267,7 +1087,7 @@ struct Player::Impl {
             const auto stages = cur->stages();
             const bool changed_stages = stages != rep.chain, was_bit_perfect = rep.bit_perfect;
             rep.chain = stages;
-            report_bit_perfect();
+            report.bit_perfect(tl.heard_chain(cur.get()));
             if (changed_stages || rep.bit_perfect != was_bit_perfect) {
                 if (cb.on_changed) cb.on_changed(rep);
             }
@@ -1280,10 +1100,10 @@ struct Player::Impl {
     bool poll_build() {
         if (!building.valid()) return true;
         if (building.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
-            if (build_designs) report_design();
+            if (build_designs) report.design();
             return true;
         }
-        report_design(true);
+        report.design(true);
         auto nx = building.get();
         auto target = *build_target;
         build_target.reset();
@@ -1342,7 +1162,7 @@ struct Player::Impl {
             dch = rep.device.channels;
             block = rep.device.block_align();
             dsdf->seek(from);
-            abs_out = from;
+            tl.abs_out = from;
             eof = false;
             pend = pend_off = 0;
             ring = std::make_unique<ByteRing>(ring_bytes());
@@ -1384,7 +1204,7 @@ struct Player::Impl {
         std::copy(dsd_bytes.begin(), dsd_bytes.end(), bytes.begin());
         pend = dsd_bytes.size();
         pend_off = 0;
-        abs_out += n;
+        tl.abs_out += n;
         rep.frames_played += n;
         return true;
     }
@@ -1551,7 +1371,7 @@ struct Player::Impl {
                 ok = false;
                 break;
             }
-            if (!fading && !building.valid() && !cross_pending() && queued) {
+            if (!fading && !building.valid() && !tl.cross_pending() && queued) {
                 auto q = *queued;
                 queued.reset();
                 if (!handle(q.first, q.second)) {
@@ -1751,13 +1571,11 @@ bool Player::ended() const { return impl_->ended_flag; }
 bool Player::last_failure_was_device() const { return impl_->device_fail; }
 
 std::vector<int> Player::asio_rates() const {
-    std::lock_guard<std::mutex> l(impl_->diag_m);
-    return impl_->asio_rates;
+    return impl_->report.asio_rates();
 }
 
 std::string Player::debug_json() const {
-    std::lock_guard<std::mutex> l(impl_->diag_m);
-    return impl_->diag.empty() ? "{}" : impl_->diag;
+    return impl_->report.diag_json();
 }
 
 void Player::meter(double& l, double& r) {
