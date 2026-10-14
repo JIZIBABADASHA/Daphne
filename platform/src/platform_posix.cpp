@@ -61,7 +61,7 @@ struct SavedSched {
 };
 thread_local SavedSched t_saved;
 
-// SCHED_FIFO in the lower half of its range (the device threads of a sound server sit higher);
+// SCHED_FIFO in the lower third of its range (the device threads of a sound server sit higher);
 // refused without CAP_SYS_NICE / an RLIMIT_RTPRIO, and then the thread stays as it was.
 bool make_realtime() {
     SavedSched s;
@@ -116,17 +116,20 @@ bool set_thread_priority(Priority p) {
     }
     ok = pthread_set_qos_class_self_np(q, 0) == 0;
 #else
-    // Linux: background is SCHED_IDLE; the others SCHED_OTHER with a nice value for this thread
+    // Linux: background is SCHED_IDLE; the others SCHED_OTHER with a nice value for this thread.
+    // Threads inherit the creator's policy (PTHREAD_INHERIT_SCHED): one started by the realtime
+    // processing thread (a filter design, parallel_for workers, the gapless preparation) is SCHED_FIFO
+    // until it leaves it here; nice alone would not apply to it.
     sched_param sp{};
     if (p == Priority::Background) {
         ok = pthread_setschedparam(pthread_self(), SCHED_IDLE, &sp) == 0;
     } else {
         int policy = SCHED_OTHER;
         sched_param cur{};
-        if (pthread_getschedparam(pthread_self(), &policy, &cur) == 0 && policy == SCHED_IDLE)
-            pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
+        if (pthread_getschedparam(pthread_self(), &policy, &cur) == 0 && policy != SCHED_OTHER)
+            ok = pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp) == 0;   // lowering is always allowed
         const int nice = p == Priority::BelowNormal ? 5 : p == Priority::AboveNormal ? -5 : 0;
-        ok = setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), nice) == 0;
+        ok = setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), nice) == 0 && ok;
     }
 #endif
     if (ok) t_priority = p;
