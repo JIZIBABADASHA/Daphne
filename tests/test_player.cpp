@@ -38,10 +38,11 @@ std::shared_ptr<Signal> int24_noise(int rate, int ch, int64_t frames, uint32_t s
     auto s = std::make_shared<Signal>();
     s->info.rate = rate, s->info.channels = ch, s->info.bits = 24, s->info.lossless_int = true;
     s->info.frames = frames, s->info.codec = "TEST";
+    // the generator's raw output, which the standard fixes; uniform_int_distribution is not (MSVC's STL, libc++
+    // and libstdc++ draw different numbers), so every platform plays the same source (DAPHNE_PLAYER_DUMP compares)
     std::mt19937 g(seed);
-    std::uniform_int_distribution<int32_t> d(-(1 << 23), (1 << 23) - 1);
     s->x.resize(static_cast<size_t>(frames) * ch);
-    for (auto& v : s->x) v = d(g) / 8388608.0;
+    for (auto& v : s->x) v = (static_cast<int32_t>(g() >> 8) - (1 << 23)) / 8388608.0;   // 24 bits, -2^23 .. 2^23 - 1
     return s;
 }
 
