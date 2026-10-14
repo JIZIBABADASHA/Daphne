@@ -81,6 +81,8 @@ bool seek_file(FILE* f, int64_t offset);
 uint64_t thread_tag();
 
 // ---- paths <-> UTF-8 (the C API and JSON use UTF-8; Windows paths are UTF-16)
+// Never throw: on Windows an invalid sequence either way becomes U+FFFD (a file name may hold an
+// unpaired surrogate); elsewhere the bytes pass through.
 
 std::filesystem::path path_from_utf8(std::string_view s);
 std::string path_to_utf8(const std::filesystem::path& p);
