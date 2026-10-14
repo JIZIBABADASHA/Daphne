@@ -1,0 +1,273 @@
+// Player::Impl, PCM (core.h): opening the device and the chain, producing chunks, the crossfade to a rebuilt chain.
+#include "core.h"
+
+namespace daphne {
+
+bool Player::Impl::open_and_start(int64_t from, std::string* error) {
+    const AudioInfo& src = rep.source;
+    // attempts: device rate, and for the dsd core the DSD multiple and transport
+    struct Attempt {
+        int rate, osr;
+        bool native;
+    };
+    std::vector<Attempt> rates;
+    if (s.core == CoreMode::Dsd) {
+        if (api_is_shared(out.api)) {
+            if (error) *error = "DSD output (dsd core) needs WASAPI exclusive or ASIO: shared mode mixes everything to PCM";
+            return false;
+        }
+        // ASIO: native DSD first (output.dsd auto), then DoP; a DSD rate the device refuses steps
+        // down to DSD64. output.max_dsd caps the start: a driver may accept a rate its DAC cannot play
+        int top = s.modulator.osr;
+        if (s.output.max_dsd > 0 && top > s.output.max_dsd) {
+            top = s.output.max_dsd;
+            event("DSD" + std::to_string(s.modulator.osr) + " is above output.max_dsd: modulating to DSD" + std::to_string(top));
+        }
+        for (int osr = top; osr >= 64; osr /= 2) {
+            if (api_has_native_dsd(out.api) && s.output.dsd != DsdMode::Dop) rates.push_back({dsd_clock(osr), osr, true});
+            if (s.output.dsd != DsdMode::Native) rates.push_back({dop_rate(dsd_clock(osr)), osr, false});
+        }
+        if (rates.empty()) {
+            if (error) *error = "output.dsd = native needs an ASIO driver with a DSD mode";
+            return false;
+        }
+    } else {
+        rates.push_back({requested_rate(s, src.rate), 0, false});
+        if (s.core == CoreMode::Pcm)
+            for (int r = rates[0].rate / 2; r >= src.rate && r % src.rate == 0; r /= 2) rates.push_back({r, 0, false});
+    }
+    want = requested_rate(s, src.rate);
+    for (size_t attempt = 0; attempt < rates.size(); ++attempt) {
+        const bool last = attempt + 1 == rates.size();
+        std::string e;
+        auto fail_attempt = [&]() {
+            io.dev.reset();
+            if (last && error) *error = e;
+            return last;
+        };
+        dec->seek(from);
+        in_total = from;
+        flushed = false;
+        io.eof = false;
+        io.pend = io.pend_off = 0;
+        xf.fading = false;
+        xf.next.reset();
+        xf.clear();
+        io.dev = open_output({out, s.output.buffer_ms, rates[attempt].rate, src.channels, rates[attempt].native}, &e);
+        if (!io.dev) {
+            if (fail_attempt()) return false;
+            continue;
+        }
+        if (io.dev->probe_before_design()) {
+            // some drivers accept a rate they cannot stream: try it before designing the filter
+            // (DoP: DoP silence, so the DAC does not see a stretch of PCM before the stream)
+            ByteRing probe(1 << 12);
+            std::atomic<bool> probe_eof{false};
+            io.dev->set_dop(s.core == CoreMode::Dsd && !rates[attempt].native);
+            if (!io.dev->start(&probe, &probe_eof, &e)) {
+                if (fail_attempt()) return false;
+                continue;
+            }
+            io.dev->stop();
+        }
+        rep.device = io.dev->format();
+        rep.device_name = io.dev->device_name();
+        rep.latency_ms = io.dev->latency_ms();
+        io.note_buffer_fallback(report, s.output.buffer_ms);
+        if (auto rates_ok = io.dev->supported_rates(); !rates_ok.empty()) report.set_asio_rates(std::move(rates_ok));
+        chain_fmt = rep.device;
+        dsdenc.reset();
+        run_osr = 0;
+        if (s.core == CoreMode::Dsd) {
+            const int osr = rates[attempt].osr;
+            run_osr = osr;
+            const bool native = rates[attempt].native;
+            if (rep.device.rate != (native ? dsd_clock(osr) : dop_rate(dsd_clock(osr)))) {
+                e = "the device locked " + std::to_string(rep.device.rate) + " Hz, not the DSD" + std::to_string(osr) + " rate";
+                if (fail_attempt()) return false;
+                continue;
+            }
+            chain_fmt.rate = modulator_input_rate(src.rate);
+            chain_fmt.type = SampleType::Float64;
+            chain_fmt.container_bits = chain_fmt.valid_bits = 64;
+            dsdenc = std::make_unique<DsdEncoder>();
+            if (!dsdenc->init(chain_fmt.rate, osr, s.modulator.order, rep.device, native ? DsdTransport::Native : DsdTransport::Dop, &e)) {
+                dsdenc.reset();
+                if (fail_attempt()) return false;
+                continue;
+            }
+        }
+        crate = chain_fmt.rate;
+        if (want_fade_in) ramp_in_left = ramp_in_len = std::max<int64_t>(1, crate / 50);   // 20 ms
+        // a filter to design before the first sound: the pcm core's resampler or the modulator's pre-filter
+        // (the chain's condition). Only a real design reports its progress: a cached filter can take a moment to
+        // load, and the host would show a design popup for it (with the text of the last design).
+        bool designing = false;
+        if (chain_fmt.rate != src.rate || s.filter.apodize) {
+            const int to = chain_fmt.rate;
+            designing = !filter_cached(s.filter, src.rate, to);
+            if (designing)
+                event("designing the filter for " + std::to_string(src.rate) + " -> " + std::to_string(to) +
+                      " Hz (long filters can take minutes; the result is cached)");
+        }
+        cur = std::make_unique<DspChain>();
+        bool built = false;
+        {
+            const Settings cs = chain_settings(s, run_osr);
+            DspChain* c = cur.get();
+            const DeviceFormat devf = chain_fmt;
+            std::string be;
+            auto job = std::async(std::launch::async, [&, c, cs, devf] {
+                dsp::ProgressScope scope(&report.design_prog);
+                dsp::CancelScope cancel_scope(&cancel);
+                try {
+                    return c->build(cs, src, devf, kChunk, &be);
+                } catch (const dsp::DesignCancelled&) {
+                    be = "cancelled";
+                    return false;
+                }
+            });
+            while (job.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready)
+                if (designing) report.design();
+            built = job.get();
+            if (!built) e = be;
+            report.design(true);
+        }
+        if (!built) {   // never play at the wrong rate
+            if (fail_attempt()) return false;
+            continue;
+        }
+        ratio = std::max(1, crate / src.rate);
+        tl.h_base = 0;
+        dch = rep.device.channels;
+        io.block = rep.device.block_align();
+        tl.abs_out = from * ratio;
+        xf.set_channels(dch);
+        io.ring = std::make_unique<ByteRing>(io.ring_bytes(rep.device.frame_rate()));
+        dsp.assign(static_cast<size_t>(cur->max_output_frames()) * dch, 0.0);
+        tmp_c = dsp;
+        tmp_n = dsp;
+        io.bytes.assign(dsdenc ? dsdenc->max_bytes(cur->max_output_frames()) : static_cast<size_t>(cur->max_output_frames()) * io.block, 0);
+        // DSD: silence first, so the DAC has switched to DSD and locked before the music (output.dsd_lead_in_ms)
+        if (dsdenc) push_dsd_idle(s.output.dsd_lead_in_ms);
+        while (!cancel && io.ring->writable() >= io.bytes.size()) {   // prefill
+            if (!produce()) {
+                io.eof = true;
+                break;
+            }
+            io.push();
+        }
+        io.dev->set_dop(dsdenc && dsdenc->dop());
+        io.dev->set_paused(want_pause.load());
+        if (!io.dev->start(io.ring.get(), &io.eof, &e)) {
+            if (fail_attempt()) return false;
+            continue;
+        }
+        break;
+    }
+    rep.chain = cur->stages();
+    rep.filter = report.filter(s, dsdenc.get());
+    report.bit_perfect(tl.heard_chain(cur.get()));
+    if (cb.on_start) cb.on_start(rep);
+    kick_cache_trim();
+    return true;
+}
+
+void Player::Impl::finish_fade() {
+    // the next chain becomes current; what it has produced beyond the mixed part plays next
+    tl.abs_out += xf.delay_shift;
+    rep.clipped += cur->take_clips();   // its last mixed block
+    cur = xf.finish();
+    rep.chain = cur->stages();
+    rep.filter = report.filter(s, dsdenc.get());
+    report.bit_perfect(tl.heard_chain(cur.get()));
+    event("now playing with filter: " + rep.filter + " | dsp: " + join(rep.chain));
+    if (cb.on_changed) cb.on_changed(rep);
+}
+
+void Player::Impl::begin_crossfade(std::unique_ptr<DspChain> nx) {
+    xf.begin(std::move(nx), hist, in_total, tl.abs_out, cur->content_delay(), ratio,
+             std::max<int64_t>(1, static_cast<int64_t>(crate * kFadeSeconds)));
+    tmp_n.assign(static_cast<size_t>(xf.next->max_output_frames()) * dch, 0.0);
+    tmp_c.assign(static_cast<size_t>(cur->max_output_frames()) * dch, 0.0);
+    const size_t need = std::max(tmp_n.size(), tmp_c.size());
+    if (dsp.size() < need) {
+        dsp.resize(need);
+        io.bytes.resize(dsdenc ? dsdenc->max_bytes(static_cast<int>(need / dch)) : need / dch * io.block);
+    }
+}
+
+bool Player::Impl::produce() {
+    if (io.pend_off < io.pend) return true;
+    int n = 0;
+    while (n == 0) {
+        if (!xf.fading && xf.carry.frames() > 0) {
+            n = std::min(xf.carry.frames(), static_cast<int>(dsp.size() / dch));
+            std::copy(xf.carry.data(), xf.carry.data() + static_cast<size_t>(n) * dch, dsp.begin());
+            xf.carry.pop(n);
+            break;
+        }
+        const int got = dec->read(pcm.data(), kChunk);
+        if (got > 0) {
+            hist.store(pcm.data(), got, in_total);
+            in_total += got;
+            if (!xf.fading) {
+                n = cur->process(pcm.data(), got, dsp.data());
+            } else {
+                const int a = cur->process(pcm.data(), got, tmp_c.data());
+                xf.fc.push(tmp_c.data(), a);
+                const int b = xf.next->process(pcm.data(), got, tmp_n.data());
+                xf.push_next(tmp_n.data(), b);
+                n = xf.mix(dsp.data(), static_cast<int>(dsp.size() / dch), fq, rep.device, dsdenc != nullptr);
+                if (xf.pos >= xf.len) finish_fade();
+            }
+        } else {
+            if (!flushed && try_gapless()) continue;   // the next track follows without a gap
+            if (xf.fading) finish_fade();
+            if (xf.carry.frames() > 0) continue;
+            if (flushed) return false;
+            flushed = true;
+            n = cur->flush(dsp.data());
+            if (n == 0) return false;
+        }
+    }
+    if (ramp_in_left > 0) {
+        for (int i = 0; i < n && ramp_in_left > 0; ++i, --ramp_in_left) {
+            const double g = static_cast<double>(ramp_in_len - ramp_in_left) / static_cast<double>(ramp_in_len);
+            for (int c = 0; c < dch; ++c) dsp[static_cast<size_t>(i) * dch + c] *= g;
+            if (g > 0.0) requantize(dsp.data() + static_cast<size_t>(i) * dch);
+        }
+    }
+    if (fade_out_next) {
+        fade_out_next = false;
+        for (int i = 0; i < n; ++i) {
+            const double g = i < fade_out_len ? 1.0 - static_cast<double>(i) / static_cast<double>(fade_out_len) : 0.0;
+            for (int c = 0; c < dch; ++c) dsp[static_cast<size_t>(i) * dch + c] *= g;
+            if (g > 0.0 && g < 1.0) requantize(dsp.data() + static_cast<size_t>(i) * dch);
+        }
+    }
+    if (dsdenc) {
+        dsd_bytes.clear();
+        dsdenc->encode(dsp.data(), n, dsd_bytes);
+        if (io.bytes.size() < dsd_bytes.size()) io.bytes.resize(dsd_bytes.size());
+        std::copy(dsd_bytes.begin(), dsd_bytes.end(), io.bytes.begin());
+        io.pend = dsd_bytes.size();
+    } else {
+        rep.clipped += convert_to_device(dsp.data(), static_cast<size_t>(n) * dch, rep.device, io.bytes.data());
+        rep.clipped += cur->take_clips() + (xf.next ? xf.next->take_clips() : 0);   // clamped by the final quantizer
+        io.pend = static_cast<size_t>(n) * io.block;
+    }
+    io.pend_off = 0;
+    tl.abs_out += n;
+    rep.frames_played += n;
+    return true;
+}
+
+std::unique_ptr<Decoder> Player::Impl::open_source(const std::filesystem::path& file, const Settings& st, std::string* e) {
+    if (!is_dsd_path(file)) return deps.open_decoder(file, e);
+    auto d = make_dsd_pcm_decoder(dsd_pcm_rate, st.output.dsd_pcm_lowpass);
+    if (!d->open(file, e)) d.reset();
+    return d;
+}
+
+}  // namespace daphne
