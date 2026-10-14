@@ -1,9 +1,13 @@
-// AVX2 + FMA3 kernels of the double-double convolution (compiled with /arch:AVX2; called only
-// when the CPU has both). Same operations, in the same order, as the scalar path: same bits.
+// AVX2 + FMA3 kernels of the double-double convolution (compiled with /arch:AVX2 / -mavx2 -mfma; called
+// only when the CPU has both). Same operations, in the same order, as the scalar path: same bits.
+// Empty for other CPUs (DAPHNE_DD_AVX2, dd_conv.h).
+
+#include "dd_conv.h"
+
+#if DAPHNE_DD_AVX2
 
 #include <immintrin.h>
 
-#include "dd_conv.h"
 #include "dd_ops.h"
 
 namespace daphne::dsp::ddc::detail {
@@ -119,3 +123,5 @@ void mac_avx2(Planes& acc, const Planes& x, size_t xoff, const Planes& h, size_t
 }
 
 }  // namespace daphne::dsp::ddc::detail
+
+#endif  // DAPHNE_DD_AVX2

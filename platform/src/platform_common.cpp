@@ -6,6 +6,11 @@
 #include <xmmintrin.h>
 #elif (defined(__aarch64__) || defined(__arm64__)) && (defined(__GNUC__) || defined(__clang__))
 #define DAPHNE_FP_ARM64 1
+#elif defined(_MSC_VER) && defined(_M_ARM64)
+#define DAPHNE_FP_ARM64_MSVC 1
+#include <intrin.h>
+// FPCR as ARM64_SYSREG(3, 3, 4, 4, 0): op0 bit 14, op1 << 11, CRn << 7, CRm << 3, op2
+constexpr int kFpcr = (1 << 14) | (3 << 11) | (4 << 7) | (4 << 3) | 0;
 #endif
 
 namespace daphne::platform {
@@ -17,6 +22,8 @@ uint64_t fp_control() {
     uint64_t v = 0;
     __asm__ __volatile__("mrs %0, fpcr" : "=r"(v));
     return v;
+#elif defined(DAPHNE_FP_ARM64_MSVC)
+    return static_cast<uint64_t>(_ReadStatusReg(kFpcr));
 #else
     return 0;
 #endif
@@ -27,6 +34,8 @@ void set_fp_control(uint64_t v) {
     _mm_setcsr(static_cast<unsigned int>(v));
 #elif defined(DAPHNE_FP_ARM64)
     __asm__ __volatile__("msr fpcr, %0" : : "r"(v));
+#elif defined(DAPHNE_FP_ARM64_MSVC)
+    _WriteStatusReg(kFpcr, static_cast<__int64>(v));
 #else
     (void)v;
 #endif
@@ -35,7 +44,7 @@ void set_fp_control(uint64_t v) {
 uint64_t with_flush_to_zero(uint64_t v) {
 #if defined(DAPHNE_FP_X86)
     return v | 0x8040;            // FTZ (bit 15) + DAZ (bit 6)
-#elif defined(DAPHNE_FP_ARM64)
+#elif defined(DAPHNE_FP_ARM64) || defined(DAPHNE_FP_ARM64_MSVC)
     return v | (uint64_t{1} << 24);   // FZ: denormal inputs and results are zero
 #else
     return v;

@@ -4,14 +4,14 @@
 #include <atomic>
 #include <cstdlib>
 
-#ifdef _MSC_VER
-#include <immintrin.h>
-#include <intrin.h>
-#endif
-
 #include "daphne/platform/platform.h"
 #include "dd.h"
 #include "dd_ops.h"
+
+#if DAPHNE_DD_AVX2 && defined(_MSC_VER)
+#include <immintrin.h>
+#include <intrin.h>
+#endif
 
 namespace daphne::dsp::ddc {
 
@@ -20,7 +20,7 @@ namespace {
 std::atomic<bool> g_force_scalar{false};
 
 bool detect_avx2_fma() {
-#ifdef _MSC_VER
+#if DAPHNE_DD_AVX2 && defined(_MSC_VER)   // cpuid exists on x86 only (not on MSVC ARM64)
     int r[4];
     __cpuid(r, 0);
     if (r[0] < 7) return false;
