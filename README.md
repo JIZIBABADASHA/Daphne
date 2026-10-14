@@ -43,7 +43,7 @@ whenever nothing in the chain needs to change a sample. It ships as a static lib
 
 ## Signal chain
 
-Every stage below is documented, with its measurements, in [`doc/`](doc) (N0–N24, in Chinese); the standards, papers and books each design rests on are listed in [`doc/參考文獻.md`](doc/參考文獻.md).
+Every stage below is documented, with its measurements, in [`doc/`](doc) (N0–N25, in Chinese); the standards, papers and books each design rests on are listed in [`doc/參考文獻.md`](doc/參考文獻.md).
 
 ```mermaid
 flowchart TD
@@ -94,6 +94,14 @@ scripts\build.cmd                            :: Release build + unit tests
 The output lands in `build\bin\Release\`: `daphne.exe`, `daphne_core.dll`, `daphne_tests.exe` and the
 FFmpeg DLLs. The code builds without warnings at `/W4`.
 
+The engine, the player and the tests also build on macOS and Linux (no device output there yet; the
+player is tested on a fake device, [N25](doc/N25_跨平台.md)):
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
 ## Usage
 
 **Command line**
@@ -132,6 +140,7 @@ dc_destroy(p);
 
 | Path | Contents |
 |---|---|
+| `platform/` | `daphne_platform`: the operating system services (threads, floating-point control, files) |
 | `dsp/` | `daphne_dsp`: processing blocks, filter design, double-double arithmetic |
 | `core/` | `daphne_engine`: decoders, the processing chain, device outputs, the player |
 | `capi/` | `daphne_core.dll`, the C API (`dc_*`) |
