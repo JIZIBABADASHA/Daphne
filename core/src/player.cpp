@@ -22,9 +22,11 @@
 #include "daphne/platform/platform.h"
 #include "player/change_plan.h"
 #include "player/common.h"
+#include "player/crossfader.h"
 #include "player/output_session.h"
 #include "player/report.h"
 #include "player/timeline.h"
+#include "player/track_queue.h"
 
 namespace daphne {
 
@@ -41,6 +43,7 @@ struct Player::Impl {
     PlayCallbacks& cb = report.cb;
     Timeline tl;
     OutputSession io;                  // the device, its ring and the chunk being pushed
+    TrackQueue queue;                  // the next track (set_next) and its preparation
 
     // threading
     std::thread th;
@@ -56,12 +59,10 @@ struct Player::Impl {
 
     // playback (DSP thread only)
     std::unique_ptr<Decoder> dec;
-    std::unique_ptr<DspChain> cur, next;
+    std::unique_ptr<DspChain> cur;
     std::future<std::unique_ptr<DspChain>> building;
     std::optional<std::pair<Settings, OutputChoice>> build_target, queued;
-    std::vector<double> pcm, dsp, tmp_c, tmp_n, hist_tmp;
-    std::vector<double> hist;
-    int hist_cap = 1 << 17;
+    std::vector<double> pcm, dsp, tmp_c, tmp_n;
     int64_t in_total = 0;    // source frames read since the start of the track
     int ratio = 1, ch = 0, dch = 0, want = 0;
     // chain output rate / format (= the device's, except for the dsd core: the modulator's PCM)
@@ -75,23 +76,7 @@ struct Player::Impl {
     // transport requests (under m) and state
     std::atomic<bool> want_pause{false}, ended_flag{false};
     std::optional<double> seek_req;
-    std::filesystem::path next_path;   // gapless candidate (set_next)
-    std::optional<double> next_headroom;   // its headroom_db (ReplayGain), applied at the decode boundary
     std::filesystem::path cur_path;    // the track being heard
-    // The next track (set_next) opened ahead on a background thread, and its chain built too when the current
-    // one does not fit it (another sample rate on the same output, or the same rate with another format), so
-    // the boundary does not wait for a slow disk or a filter design.
-    struct Prep {
-        std::filesystem::path path;
-        std::atomic<bool> opened{false}, done{false}, cancel{false};
-        std::unique_ptr<Decoder> dec;
-        std::unique_ptr<DsdFile> dsdf;
-        std::unique_ptr<DspChain> chain;
-        std::string key;             // what the chain was built for (chain_key)
-    };
-    std::shared_ptr<Prep> prep;
-    std::vector<std::pair<std::shared_ptr<Prep>, std::thread>> prep_threads;
-    int64_t hist_valid_from = 0;     // first input frame the crossfade history holds
     std::atomic<double> pos_sec{0.0};
     std::atomic<double> meter_l{0.0}, meter_r{0.0};
     bool end_queued = false;         // the stream end (DSD silence) is queued
@@ -105,7 +90,7 @@ struct Player::Impl {
         std::snprintf(b, sizeof b,
                       "{\"ring\":%zu,\"ring_cap\":%zu,\"pend\":%zu,\"eof\":%d,\"fading\":%d,\"building\":%d,\"paused\":%d,"
                       "\"dev_paused\":%d,\"callbacks\":%lld,\"underruns\":%lld,\"drained\":%d,\"failed\":%d,\"late\":%lld,\"tl.abs_out\":%lld,\"in\":%lld}",
-                      io.ring ? io.ring->readable() : 0, io.ring ? io.ring->capacity() : 0, io.pend - io.pend_off, io.eof.load() ? 1 : 0, fading ? 1 : 0,
+                      io.ring ? io.ring->readable() : 0, io.ring ? io.ring->capacity() : 0, io.pend - io.pend_off, io.eof.load() ? 1 : 0, xf.fading ? 1 : 0,
                       building.valid() ? 1 : 0, want_pause.load() ? 1 : 0, io.dev && io.dev->paused() ? 1 : 0,
                       st ? static_cast<long long>(st->callbacks.load()) : -1LL, st ? static_cast<long long>(st->underruns.load()) : -1LL,
                       io.dev && io.dev->drained() ? 1 : 0, io.dev && io.dev->failed() ? 1 : 0,
@@ -114,10 +99,9 @@ struct Player::Impl {
     }
     std::vector<uint8_t> dsd_bytes;
     bool flushed = false;
-    Fifo fc, fn, carry;
-    bool fading = false;
-    int64_t fade_pos = 0, fade_len = 0, drop_next = 0;
-    int delay_shift = 0;
+    Crossfader xf;                   // a rebuilt chain fading in; the chain output carried over
+    History hist;                    // recent input, for a rebuilt chain's warm-up
+    FadeQuantizer fq;                // fades on integer devices (N21)
     // device restart: fade the last chunk out, the first frames after the restart in
     bool want_fade_in = false, fade_out_next = false;
     int64_t ramp_in_left = 0, ramp_in_len = 1, fade_out_len = 1;
@@ -157,13 +141,6 @@ struct Player::Impl {
 
     void event(const std::string& e) const { report.event(e); }
 
-    void hist_store(const double* x, int n) {
-        for (int i = 0; i < n; ++i) {
-            const int64_t f = in_total + i;
-            std::copy(x + static_cast<size_t>(i) * ch, x + static_cast<size_t>(i + 1) * ch,
-                      hist.begin() + static_cast<std::ptrdiff_t>((f % hist_cap) * ch));
-        }
-    }
 
     // Opens the device for the current settings (pcm: stepping the rate down by powers of two
     // when the device cannot open or start it), builds the chain, prefills and starts.
@@ -214,9 +191,9 @@ struct Player::Impl {
             flushed = false;
             io.eof = false;
             io.pend = io.pend_off = 0;
-            fading = false;
-            next.reset();
-            fc.clear(), fn.clear(), carry.clear();
+            xf.fading = false;
+            xf.next.reset();
+            xf.clear();
             io.dev = open_output({out, s.output.buffer_ms, rates[attempt].rate, src.channels, rates[attempt].native}, &e);
             if (!io.dev) {
                 if (fail_attempt()) return false;
@@ -306,7 +283,7 @@ struct Player::Impl {
             dch = rep.device.channels;
             io.block = rep.device.block_align();
             tl.abs_out = from * ratio;
-            fc.ch = fn.ch = carry.ch = dch;
+            xf.set_channels(dch);
             io.ring = std::make_unique<ByteRing>(io.ring_bytes(rep.device.frame_rate()));
             dsp.assign(static_cast<size_t>(cur->max_output_frames()) * dch, 0.0);
             tmp_c = dsp;
@@ -338,50 +315,15 @@ struct Player::Impl {
     }
 
 
-    // The crossfade and the fade-in / -out below change the level after the chains' final quantizer: on an
-    // integer device the frame is quantized again, with TPDF dither at the device word length (N21), instead
-    // of being rounded plainly by the conversion. Frames at gain 0 or 1 are not touched.
-    std::unique_ptr<dsp::Quantizer> fade_q;
-    void requantize(double* frame) {
-        if (dsdenc || is_float(rep.device.type) || is_dsd(rep.device.type)) return;   // the modulator / the device take it
-        const int bits = effective_bits(rep.device);
-        if (!fade_q || fade_q->bits() != bits || fade_q->output_format().channels != dch) {
-            fade_q = std::make_unique<dsp::Quantizer>(bits);
-            fade_q->prepare({rep.device.rate, dch, 1});
-        }
-        fade_q->process(frame, 1, frame);
-    }
+    // a faded frame on an integer device: TPDF re-quantization (FadeQuantizer)
+    void requantize(double* frame) { fq.requantize(frame, rep.device, dch, dsdenc != nullptr); }
 
-    // Mix what both chains have produced during a crossfade into dsp; returns frames.
-    int mix() {
-        const int n = std::min({fc.frames(), fn.frames(), static_cast<int>(dsp.size() / dch)});
-        const double* a = fc.data();
-        const double* b = fn.data();
-        for (int i = 0; i < n; ++i) {
-            const double t = std::min(1.0, (static_cast<double>(fade_pos + i) + 0.5) / static_cast<double>(fade_len));
-            // raised cosine (gains sum to 1): the two chains carry the same, aligned content
-            const double gb = 0.5 - 0.5 * std::cos(t * kPi), ga = 1.0 - gb;
-            for (int c = 0; c < dch; ++c) {
-                const size_t k = static_cast<size_t>(i) * dch + c;
-                dsp[k] = a[k] * ga + b[k] * gb;
-            }
-            if (gb > 0.0 && gb < 1.0) requantize(dsp.data() + static_cast<size_t>(i) * dch);
-        }
-        fc.pop(n);
-        fn.pop(n);
-        fade_pos += n;
-        return n;
-    }
 
     void finish_fade() {
         // the next chain becomes current; what it has produced beyond the mixed part plays next
-        tl.abs_out += delay_shift;
+        tl.abs_out += xf.delay_shift;
         rep.clipped += cur->take_clips();   // its last mixed block
-        cur = std::move(next);
-        carry.clear();
-        if (fn.frames() > 0) carry.push(fn.data(), fn.frames());
-        fc.clear(), fn.clear();
-        fading = false;
+        cur = xf.finish();
         rep.chain = cur->stages();
         rep.filter = report.filter(s, dsdenc.get());
         report.bit_perfect(tl.heard_chain(cur.get()));
@@ -389,56 +331,19 @@ struct Player::Impl {
         if (cb.on_changed) cb.on_changed(rep);
     }
 
-    void push_next(const double* x, int n) {
-        const int drop = static_cast<int>(std::min<int64_t>(drop_next, n));
-        drop_next -= drop;
-        fn.push(x + static_cast<size_t>(drop) * dch, n - drop);
-    }
 
     // Starts the crossfade to nx: warm it up on the recent input and align it to the current
     // chain by content delay.
     void begin_crossfade(std::unique_ptr<DspChain> nx) {
-        const int64_t have = std::min<int64_t>(in_total - hist_valid_from, hist_cap);
-        const int64_t start = in_total - have;
-        fn.clear();
-        hist_tmp.resize(static_cast<size_t>(kChunk) * ch);
-        std::vector<double> o(static_cast<size_t>(nx->max_output_frames()) * dch);
-        const int dc = cur->content_delay(), dn = nx->content_delay();
-        const int64_t target = tl.abs_out - dc + dn;   // next-chain index of the content the current chain plays next
-        drop_next = target - start * ratio;
-        if (drop_next < 0) {
-            fn.push_zeros(static_cast<int>(-drop_next));
-            drop_next = 0;
-        }
-        for (int64_t f = start; f < in_total;) {
-            const int n = static_cast<int>(std::min<int64_t>(kChunk, in_total - f));
-            for (int i = 0; i < n; ++i) {
-                const int64_t k = (f + i) % hist_cap;
-                std::copy(hist.begin() + static_cast<std::ptrdiff_t>(k * ch), hist.begin() + static_cast<std::ptrdiff_t>((k + 1) * ch),
-                          hist_tmp.begin() + static_cast<std::ptrdiff_t>(i) * ch);
-            }
-            const int got = nx->process(hist_tmp.data(), n, o.data());
-            push_next(o.data(), got);
-            f += n;
-        }
-        // frames of the current chain still queued for output count as already played
-        fc.clear();
-        if (carry.frames() > 0) {
-            fc.push(carry.data(), carry.frames());
-            carry.clear();
-        }
-        delay_shift = dn - dc;
-        next = std::move(nx);
-        tmp_n.assign(static_cast<size_t>(next->max_output_frames()) * dch, 0.0);
+        xf.begin(std::move(nx), hist, in_total, tl.abs_out, cur->content_delay(), ratio,
+                 std::max<int64_t>(1, static_cast<int64_t>(crate * kFadeSeconds)));
+        tmp_n.assign(static_cast<size_t>(xf.next->max_output_frames()) * dch, 0.0);
         tmp_c.assign(static_cast<size_t>(cur->max_output_frames()) * dch, 0.0);
         const size_t need = std::max(tmp_n.size(), tmp_c.size());
         if (dsp.size() < need) {
             dsp.resize(need);
             io.bytes.resize(dsdenc ? dsdenc->max_bytes(static_cast<int>(need / dch)) : need / dch * io.block);
         }
-        fade_len = std::max<int64_t>(1, static_cast<int64_t>(crate * kFadeSeconds));
-        fade_pos = 0;
-        fading = true;
     }
 
     // One chunk into bytes; false at the end of the stream.
@@ -446,30 +351,30 @@ struct Player::Impl {
         if (io.pend_off < io.pend) return true;
         int n = 0;
         while (n == 0) {
-            if (!fading && carry.frames() > 0) {
-                n = std::min(carry.frames(), static_cast<int>(dsp.size() / dch));
-                std::copy(carry.data(), carry.data() + static_cast<size_t>(n) * dch, dsp.begin());
-                carry.pop(n);
+            if (!xf.fading && xf.carry.frames() > 0) {
+                n = std::min(xf.carry.frames(), static_cast<int>(dsp.size() / dch));
+                std::copy(xf.carry.data(), xf.carry.data() + static_cast<size_t>(n) * dch, dsp.begin());
+                xf.carry.pop(n);
                 break;
             }
             const int got = dec->read(pcm.data(), kChunk);
             if (got > 0) {
-                hist_store(pcm.data(), got);
+                hist.store(pcm.data(), got, in_total);
                 in_total += got;
-                if (!fading) {
+                if (!xf.fading) {
                     n = cur->process(pcm.data(), got, dsp.data());
                 } else {
                     const int a = cur->process(pcm.data(), got, tmp_c.data());
-                    fc.push(tmp_c.data(), a);
-                    const int b = next->process(pcm.data(), got, tmp_n.data());
-                    push_next(tmp_n.data(), b);
-                    n = mix();
-                    if (fade_pos >= fade_len) finish_fade();
+                    xf.fc.push(tmp_c.data(), a);
+                    const int b = xf.next->process(pcm.data(), got, tmp_n.data());
+                    xf.push_next(tmp_n.data(), b);
+                    n = xf.mix(dsp.data(), static_cast<int>(dsp.size() / dch), fq, rep.device, dsdenc != nullptr);
+                    if (xf.pos >= xf.len) finish_fade();
                 }
             } else {
                 if (!flushed && try_gapless()) continue;   // the next track follows without a gap
-                if (fading) finish_fade();
-                if (carry.frames() > 0) continue;
+                if (xf.fading) finish_fade();
+                if (xf.carry.frames() > 0) continue;
                 if (flushed) return false;
                 flushed = true;
                 n = cur->flush(dsp.data());
@@ -499,7 +404,7 @@ struct Player::Impl {
             io.pend = dsd_bytes.size();
         } else {
             rep.clipped += convert_to_device(dsp.data(), static_cast<size_t>(n) * dch, rep.device, io.bytes.data());
-            rep.clipped += cur->take_clips() + (next ? next->take_clips() : 0);   // clamped by the final quantizer
+            rep.clipped += cur->take_clips() + (xf.next ? xf.next->take_clips() : 0);   // clamped by the final quantizer
             io.pend = static_cast<size_t>(n) * io.block;
         }
         io.pend_off = 0;
@@ -574,75 +479,20 @@ struct Player::Impl {
     // The source of the track being decoded (the last switched-to one, or the heard one).
     const AudioInfo& decoding_info() const { return tl.switches.empty() ? rep.source : tl.switches.back().info; }
 
-    std::string chain_key(const Settings& cs, const DeviceFormat& cf) const {
-        return settings_to_json(cs).dump() + "|" + describe(cf);
-    }
-
-    // Opens the next track (set_next) on a background thread as soon as it is known; for a PCM track the current
-    // chain does not fit (another sample rate whose chain would play on the same output, or the same rate with
-    // another word length / DSD-to-PCM / layout: DspChain::fits), also builds its chain. The boundary uses what
-    // is ready (try_gapless) and otherwise behaves as without it.
+    // Prepares the next track (TrackQueue) for the current playback.
     void kick_prepare() {
-        for (auto it = prep_threads.begin(); it != prep_threads.end();) {   // reap the finished ones
-            if (it->first->done && it->first != prep) {
-                it->second.join();
-                it = prep_threads.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        std::filesystem::path np;
-        {
-            std::lock_guard<std::mutex> l(m);
-            np = next_path;
-        }
-        if (prep && prep->path == np) return;
-        drop_prep();
-        if (np.empty()) return;
-        auto p = std::make_shared<Prep>();
-        p->path = np;
-        const bool dsd = dsdf != nullptr;
-        const Settings cs = chain_settings(s, run_osr);
-        const DeviceFormat cf = chain_fmt;
-        const int cr = crate, cch = ch, cur_rate = decoding_info().rate;
-        const DspChain::Shape shape = cur ? cur->shape() : DspChain::Shape{};
-        p->key = chain_key(cs, cf);
-        std::thread worker([p, dsd, cs, cf, cr, cch, cur_rate, shape, opener = deps.open_decoder] {
-            std::string e;
-            if (dsd) {
-                auto f = std::make_unique<DsdFile>();
-                if (f->open(p->path, &e)) p->dsdf = std::move(f);
-                p->opened = true;
-                p->done = true;
-                return;
-            }
-            auto d = opener(p->path, &e);
-            const bool have = d != nullptr;
-            const AudioInfo src = have ? d->info() : AudioInfo{};
-            p->dec = std::move(d);   // try_gapless may take it as soon as opened is set
-            p->opened = true;
-            if (have && !p->cancel) {
-                const bool other_rate = src.rate != cur_rate && same_output(cs, src.rate, cr);
-                const bool other_format = src.rate == cur_rate && !DspChain::fits(shape, cs, src);
-                if (src.channels == cch && (other_rate || other_format)) {
-                    try {
-                        dsp::CancelScope cancel_scope(&p->cancel);
-                        auto c = std::make_unique<DspChain>();
-                        std::string be;
-                        if (c->build(cs, src, cf, kChunk, &be)) p->chain = std::move(c);
-                    } catch (...) {   // cancelled (or failed): no chain, the boundary is not gapless
-                    }
-                }
-            }
-            p->done = true;
+        queue.kick([this] {
+            TrackQueue::Context c;
+            c.dsd = dsdf != nullptr;
+            c.cs = chain_settings(s, run_osr);
+            c.cf = chain_fmt;
+            c.chain_rate = crate;
+            c.channels = ch;
+            c.cur_rate = decoding_info().rate;
+            c.shape = cur ? cur->shape() : DspChain::Shape{};
+            c.opener = deps.open_decoder;
+            return c;
         });
-        prep_threads.emplace_back(p, std::move(worker));
-        prep = p;
-    }
-
-    void drop_prep() {
-        if (prep) prep->cancel = true;
-        prep.reset();
     }
 
     // Gapless through a new chain (another sample rate on the same output, or the same rate with a format the old
@@ -658,7 +508,7 @@ struct Player::Impl {
         const size_t nb = dsdenc ? dsdenc->max_bytes(static_cast<int>(need / dch)) : need / dch * io.block;
         if (io.bytes.size() < nb) io.bytes.resize(nb);
 
-        const int64_t start = tl.abs_out + carry.frames();   // device frame where the joined part begins
+        const int64_t start = tl.abs_out + xf.carry.frames();   // device frame where the joined part begins
         const int64_t a_end = tl.latest_base() + in_total * ratio + cur->content_delay();   // where A's frame K is heard
         std::vector<double> tail;
         auto put = [&](std::vector<double>& v, int n) { v.insert(v.end(), dsp.begin(), dsp.begin() + static_cast<std::ptrdiff_t>(n) * dch); };
@@ -674,13 +524,13 @@ struct Player::Impl {
         // B through the new chain until its first sample (new-chain frame dn) is out
         const int dn = nc->content_delay();
         in_total = 0;
-        hist_valid_from = 0;
+        hist.valid_from = 0;
         std::vector<double> head;
         int64_t produced = 0;
         while (produced <= dn) {
             const int got = nd->read(pcm.data(), kChunk);
             if (got <= 0) break;
-            hist_store(pcm.data(), got);
+            hist.store(pcm.data(), got, in_total);
             in_total += got;
             const int o = nc->process(pcm.data(), got, dsp.data());
             put(head, o);
@@ -693,7 +543,7 @@ struct Player::Impl {
             if (t >= static_cast<int64_t>(tail.size()) / dch) tail.resize(static_cast<size_t>(t + 1) * dch, 0.0);
             for (int c = 0; c < dch; ++c) tail[static_cast<size_t>(t) * dch + c] += head[static_cast<size_t>(j) * dch + c];
         }
-        carry.push(tail.data(), static_cast<int>(tail.size() / dch));
+        xf.carry.push(tail.data(), static_cast<int>(tail.size() / dch));
 
         Switch w;
         w.info = nd->info();
@@ -752,23 +602,9 @@ struct Player::Impl {
     // gapless: continue with the next track when it has the same format (called at the end of
     // the decoder's data)
     bool try_gapless() {
-        std::filesystem::path np;
-        std::optional<double> nh;
-        {
-            std::lock_guard<std::mutex> l(m);
-            np = next_path;
-            nh = next_headroom;
-        }
+        const auto [np, nh] = queue.get();
         if (np.empty() || is_dsd_path(np) != (dsdf != nullptr)) return false;
-        // opened ahead (kick_prepare): wait for the open if it is still running
-        std::shared_ptr<Prep> p = prep && prep->path == np ? prep : nullptr;
-        if (p) {
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-            while (!p->opened && !cancel && std::chrono::steady_clock::now() < deadline)
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            if (!p->opened) p.reset();
-        }
-        drop_prep();   // consumed (or stale): a new next track starts a new one
+        const std::shared_ptr<Prep> p = queue.take(np, cancel);   // opened ahead (kick_prepare)
         std::string e;
         if (dsdf) {
             std::unique_ptr<DsdFile> f = p ? std::move(p->dsdf) : nullptr;
@@ -810,14 +646,13 @@ struct Player::Impl {
                 // track after a 16-bit one on a 16-bit device needs the quantizer): gapless only on the same
                 // output, joined through the new chain built ahead for the current settings; otherwise the track
                 // ends and the host loads the next one
-                if (!p || !p->done || !p->chain || fading || building.valid() || p->key != chain_key(chain_settings(s, run_osr), chain_fmt))
+                if (!p || !p->done || !p->chain || xf.fading || building.valid() || p->key != TrackQueue::chain_key(chain_settings(s, run_osr), chain_fmt))
                     return false;
                 cross_switch(std::move(nd), std::move(p->chain), np);
                 apply_headroom(nh);
             }
         }
-        std::lock_guard<std::mutex> l(m);
-        if (next_path == np) next_path.clear(), next_headroom.reset();
+        queue.consumed(np);
         return true;
     }
 
@@ -851,10 +686,7 @@ struct Player::Impl {
         check_switch();   // a track heard just now is the one the seek is in
         if (!tl.switches.empty()) {
             // the decoder already moved on to a gapless track that is not heard yet: back to this one
-            {
-                std::lock_guard<std::mutex> l(m);
-                if (next_path.empty()) next_path = tl.switches.front().path;
-            }
+            queue.restore(tl.switches.front().path);
             undo_cross();
             undo_headroom();
             tl.switches.clear();
@@ -873,12 +705,12 @@ struct Player::Impl {
         } else {
             dec->seek(from);
             in_total = from;
-            hist_valid_from = from;
+            hist.valid_from = from;
             flushed = false;
-            carry.clear(), fc.clear(), fn.clear();
-            if (fading) {   // a crossfade was running: the new chain takes over
-                cur = std::move(next);
-                fading = false;
+            xf.clear();
+            if (xf.fading) {   // a crossfade was running: the new chain takes over
+                cur = std::move(xf.next);
+                xf.fading = false;
                 rep.chain = cur->stages();
                 rep.filter = report.filter(s, dsdenc.get());
                 report.bit_perfect(tl.heard_chain(cur.get()));
@@ -968,7 +800,7 @@ struct Player::Impl {
         if (tl.cross_pending()) drain = false;   // the queue holds the next track at another rate: not played out
         int64_t from = dsdf ? heard_position() : std::max<int64_t>(0, heard_input());   // PCM: stream timeline
         io.drop_if_paused();
-        drop_prep();   // built for the old settings / device
+        queue.drop();   // built for the old settings / device
         if (io.dev && !io.eof && !io.dev->failed() && drain) {
             // play what is queued, fade the next chunk out, let the device drain, resume there
             while (!io.push()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -998,8 +830,7 @@ struct Player::Impl {
                 if (cb.on_track_started) cb.on_track_started(rep);
             }
             if (!tl.switches.empty()) {
-                std::lock_guard<std::mutex> l(m);
-                if (next_path.empty()) next_path = tl.switches.front().path;
+                queue.restore(tl.switches.front().path);
                 undo_cross();
                 undo_headroom();
                 tl.switches.clear();
@@ -1032,8 +863,8 @@ struct Player::Impl {
 
     // Applies a pending settings change; false on a fatal error.
     bool handle(const Settings& ns, const OutputChoice& no) {
-        drop_prep();   // a chain prepared for the next track was built for the old settings
-        if (fading || building.valid() || tl.cross_pending()) {   // one change at a time (and not across a rate switch); the latest waits
+        queue.drop();   // a chain prepared for the next track was built for the old settings
+        if (xf.fading || building.valid() || tl.cross_pending()) {   // one change at a time (and not across a rate switch); the latest waits
             queued = std::make_pair(ns, no);
             if (building.valid() && build_cancel) *build_cancel = true;   // superseded: stop designing it
             return true;
@@ -1299,7 +1130,7 @@ struct Player::Impl {
             rep.source = dec->info();
             ch = rep.source.channels;
             pcm.assign(static_cast<size_t>(kChunk) * ch, 0.0);
-            hist.assign(static_cast<size_t>(hist_cap) * ch, 0.0);
+            hist.reset(ch);
         }
         const bool started = dec && open_and_start(static_cast<int64_t>(start_sec * rep.source.rate), &e);
         if (dec && !started && !cancel) device_fail = true;   // the file decoded: the device / chain failed
@@ -1331,7 +1162,7 @@ struct Player::Impl {
                 ok = false;
                 break;
             }
-            if (!fading && !building.valid() && !tl.cross_pending() && queued) {
+            if (!xf.fading && !building.valid() && !tl.cross_pending() && queued) {
                 auto q = *queued;
                 queued.reset();
                 if (!handle(q.first, q.second)) {
@@ -1375,12 +1206,7 @@ struct Player::Impl {
     }
 
     void finish_playback() {
-        drop_prep();
-        for (auto& [pp, worker] : prep_threads) {
-            pp->cancel = true;
-            worker.join();
-        }
-        prep_threads.clear();
+        queue.join_all();
         if (io.dev && !io.dev->failed() && dsdenc && !ended_flag) {
             // stopped (or failed) before the end: stop quickly, but on silence. DoP: PCM silence (the DAC
             // leaves DSD mode). Native DSD: DSD silence (0x69, what the feeder writes once the ring is
@@ -1478,9 +1304,7 @@ void Player::seek(double seconds) {
 }
 
 void Player::set_next(const std::filesystem::path& path, std::optional<double> headroom_db) {
-    std::lock_guard<std::mutex> l(impl_->m);
-    impl_->next_path = path;
-    impl_->next_headroom = headroom_db;
+    impl_->queue.set(path, headroom_db);
 }
 
 bool Player::ended() const { return impl_->ended_flag; }

@@ -5,8 +5,10 @@ add_library(daphne_engine STATIC
     src/player.cpp
     src/player/change_plan.cpp
     src/player/common.cpp
+    src/player/crossfader.cpp
     src/player/output_session.cpp
     src/player/report.cpp
+    src/player/track_queue.cpp
     src/chain.cpp
     src/decoder_factory.cpp
     src/decoder_flac.cpp
