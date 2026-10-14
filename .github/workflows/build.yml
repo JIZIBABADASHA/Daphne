@@ -1,0 +1,26 @@
+# Release build + unit tests on Windows (MSVC), Linux (GCC) and macOS (Apple Silicon, Clang), N25.
+# No FFmpeg or ASIO SDK here: those parts build as on a machine without them. The player tests run on
+# a fake device (tests/fake_output.h); real WASAPI / ASIO output is checked with verify/live.py.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure

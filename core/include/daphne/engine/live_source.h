@@ -23,7 +23,8 @@
 
 namespace daphne {
 
-inline constexpr const wchar_t* kLivePath = L"live:";
+inline constexpr char kLivePath[] = "live:";
+inline bool is_live_path(const std::filesystem::path& p) { return p == std::filesystem::path(kLivePath); }
 
 // The host's shared ring (base = nullptr detaches it) and the producer's sample rate.
 void set_live_bus(void* base, int cap_frames, int rate);

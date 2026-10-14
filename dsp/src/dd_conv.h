@@ -59,11 +59,19 @@ void butterflies(Planes& x, const Planes& table, int64_t stride, bool conj, int 
 void butterflies2(Planes& x, const Planes& table, int64_t nb, bool conj, int h, int64_t u0, int64_t u1);
 
 namespace detail {
-// AVX2 + FMA3 kernels (dd_conv_avx2.cpp)
+#if DAPHNE_DD_AVX2
+// AVX2 + FMA3 kernels (dd_conv_avx2.cpp; x86 builds only, DAPHNE_DD_AVX2 from dsp/CMakeLists.txt)
 void stages_avx2(Planes& x, const Planes& tw, int n, int first_half);
 void mac_avx2(Planes& acc, const Planes& x, size_t xoff, const Planes& h, size_t hoff, int n);
 void butterflies_avx2(Planes& x, const Planes& table, int64_t stride, bool conj, int half, int64_t b0, int64_t b1);
 void butterflies2_avx2(Planes& x, const Planes& table, int64_t nb, bool conj, int h, int64_t u0, int64_t u1);
+#else
+// other CPUs (ARM64): have_avx2_fma() is false, these are never called
+inline void stages_avx2(Planes&, const Planes&, int, int) {}
+inline void mac_avx2(Planes&, const Planes&, size_t, const Planes&, size_t, int) {}
+inline void butterflies_avx2(Planes&, const Planes&, int64_t, bool, int, int64_t, int64_t) {}
+inline void butterflies2_avx2(Planes&, const Planes&, int64_t, bool, int, int64_t, int64_t) {}
+#endif
 }  // namespace detail
 
 }  // namespace daphne::dsp::ddc

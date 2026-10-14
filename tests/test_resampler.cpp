@@ -1,7 +1,5 @@
 #include <catch_amalgamated.hpp>
 
-#include <windows.h>
-
 #include <cmath>
 #include <filesystem>
 #include <vector>
@@ -10,6 +8,7 @@
 #include "daphne/dsp/progress.h"
 #include "daphne/dsp/resampler.h"
 #include "daphne/engine/filters.h"
+#include "test_util.h"
 #include "daphne/engine/settings.h"
 
 using daphne::dsp::Resampler;
@@ -186,12 +185,10 @@ TEST_CASE("Settings: output.buffer_ms is 0 (the device default) or up to 200 ms"
 }
 
 TEST_CASE("Filter cache: store, load, low parts, prune", "[cache]") {
-    wchar_t tmp[MAX_PATH];
-    GetTempPathW(MAX_PATH, tmp);
-    const auto dir = std::filesystem::path(tmp) / L"daphne_cache_test";
+    const auto dir = test::temp_path("daphne_cache_test");
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
-    SetEnvironmentVariableW(L"DAPHNE_FILTER_CACHE", dir.c_str());
+    test::set_env("DAPHNE_FILTER_CACHE", &dir);
 
     daphne::FilterSettings f;
     f.taps = 1024;
@@ -232,6 +229,6 @@ TEST_CASE("Filter cache: store, load, low parts, prune", "[cache]") {
     CHECK(r.files == 2);
     CHECK(daphne::load_cached_filter(key, c));
 
-    SetEnvironmentVariableW(L"DAPHNE_FILTER_CACHE", nullptr);
+    test::set_env("DAPHNE_FILTER_CACHE", nullptr);
     std::filesystem::remove_all(dir, ec);
 }

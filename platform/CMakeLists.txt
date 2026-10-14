@@ -1,0 +1,12 @@
+# daphne_platform: the operating system services (threads, floating-point control, environment,
+# files); everything above it is portable C++20 (N25)
+add_library(daphne_platform STATIC src/platform_common.cpp)
+target_include_directories(daphne_platform PUBLIC include)
+if(WIN32)
+    target_sources(daphne_platform PRIVATE src/platform_win.cpp)
+    target_link_libraries(daphne_platform PUBLIC avrt winmm)
+else()
+    target_sources(daphne_platform PRIVATE src/platform_posix.cpp)
+    find_package(Threads REQUIRED)
+    target_link_libraries(daphne_platform PUBLIC Threads::Threads)
+endif()

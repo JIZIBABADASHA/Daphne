@@ -1,5 +1,7 @@
 #pragma once
+#ifdef _MSC_VER
 #pragma warning(disable : 4324)  // alignas padding is intended
+#endif
 // Single-producer / single-consumer lock-free byte ring between the player and the device callback.
 // The audio thread only reads; it never blocks, skips or rewinds.
 //

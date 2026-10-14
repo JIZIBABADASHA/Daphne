@@ -1,7 +1,5 @@
 #include <catch_amalgamated.hpp>
 
-#include <windows.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -10,6 +8,7 @@
 #include <vector>
 
 #include "daphne/engine/dsd_file.h"
+#include "test_util.h"
 
 namespace {
 
@@ -31,19 +30,16 @@ void put_be(std::vector<uint8_t>& v, uint64_t x, int n) {
 }
 void put_id(std::vector<uint8_t>& v, const char* id) { v.insert(v.end(), id, id + 4); }
 
-std::wstring save(const std::wstring& name, const std::vector<uint8_t>& bytes) {
-    wchar_t tmp[MAX_PATH];
-    GetTempPathW(MAX_PATH, tmp);
-    const std::wstring path = std::wstring(tmp) + name;
-    FILE* fp = nullptr;
-    _wfopen_s(&fp, path.c_str(), L"wb");
+std::filesystem::path save(const std::string& name, const std::vector<uint8_t>& bytes) {
+    const auto path = test::temp_path(name);
+    FILE* fp = daphne::platform::open_file(path, "wb");
     fwrite(bytes.data(), 1, bytes.size(), fp);
     fclose(fp);
     return path;
 }
 
 // DSF with `frames` bytes per channel, blocks of 4096 (the last one zero-padded), then an ID3 chunk.
-std::wstring write_dsf(const std::wstring& name, int ch, int64_t frames, int bps, const Fill& fill = pattern) {
+std::filesystem::path write_dsf(const std::string& name, int ch, int64_t frames, int bps, const Fill& fill = pattern) {
     const int block = 4096;
     const int64_t blocks = (frames + block - 1) / block;
     std::vector<uint8_t> data;
@@ -79,7 +75,7 @@ std::wstring write_dsf(const std::wstring& name, int ch, int64_t frames, int bps
     return save(name, f);
 }
 
-std::wstring write_dff(const std::wstring& name, const std::vector<const char*>& ids, int64_t frames, const Fill& fill = pattern) {
+std::filesystem::path write_dff(const std::string& name, const std::vector<const char*>& ids, int64_t frames, const Fill& fill = pattern) {
     const int ch = static_cast<int>(ids.size());
     std::vector<uint8_t> prop, body, f;
     put_id(prop, "SND ");
@@ -141,7 +137,7 @@ TEST_CASE("DSF reading: 1 and 8 bits per sample, sample count bounds playback", 
     for (int bps : {1, 8}) {
         daphne::DsdFile d;
         std::string err;
-        REQUIRE(d.open(write_dsf(L"daphne_t.dsf", 2, frames, bps), &err));
+        REQUIRE(d.open(write_dsf("daphne_t.dsf", 2, frames, bps), &err));
         CHECK(d.info().codec == "DSF");
         CHECK(d.info().dsd_rate == 2822400);
         CHECK(d.info().channel_mask == 0x3);
@@ -151,7 +147,7 @@ TEST_CASE("DSF reading: 1 and 8 bits per sample, sample count bounds playback", 
         CHECK(read_matches(d, 5000, 2, 4096));
     }
     daphne::DsdFile m;
-    REQUIRE(m.open(write_dsf(L"daphne_m.dsf", 1, 9000, 1), nullptr));
+    REQUIRE(m.open(write_dsf("daphne_m.dsf", 1, 9000, 1), nullptr));
     CHECK(read_matches(m, 0, 1, 1000));
 }
 
@@ -159,7 +155,7 @@ TEST_CASE("DFF reading and channel layout", "[dsd]") {
     const int64_t frames = 10000;
     daphne::DsdFile f;
     std::string err;
-    REQUIRE(f.open(write_dff(L"daphne_t.dff", kStereo, frames), &err));
+    REQUIRE(f.open(write_dff("daphne_t.dff", kStereo, frames), &err));
     CHECK(f.info().codec == "DFF");
     CHECK(f.info().channels == 2);
     CHECK(f.info().channel_mask == 0x3);
@@ -169,17 +165,17 @@ TEST_CASE("DFF reading and channel layout", "[dsd]") {
     CHECK(read_matches(f, 1234, 2, 4096));
 
     daphne::DsdFile s;
-    REQUIRE(s.open(write_dff(L"daphne_51.dff", {"SLFT", "SRGT", "C   ", "LFE ", "LS  ", "RS  "}, 1000), nullptr));
+    REQUIRE(s.open(write_dff("daphne_51.dff", {"SLFT", "SRGT", "C   ", "LFE ", "LS  ", "RS  "}, 1000), nullptr));
     CHECK(s.info().channel_mask == 0x3F);
     daphne::DsdFile o;   // not in speaker-mask order: no mask (default order)
-    REQUIRE(o.open(write_dff(L"daphne_odd.dff", {"SLFT", "SRGT", "LS  ", "RS  ", "C   "}, 1000), nullptr));
+    REQUIRE(o.open(write_dff("daphne_odd.dff", {"SLFT", "SRGT", "LS  ", "RS  ", "C   "}, 1000), nullptr));
     CHECK(o.info().channel_mask == 0);
 }
 
 TEST_CASE("DSD to PCM: rate, length, silence and the reference level", "[dsd]") {
     {
         auto d = daphne::make_dsd_pcm_decoder();
-        REQUIRE(d->open(write_dff(L"daphne_sil.dff", kStereo, 40000, silence), nullptr));
+        REQUIRE(d->open(write_dff("daphne_sil.dff", kStereo, 40000, silence), nullptr));
         CHECK(d->info().rate == 176400);
         CHECK(d->info().frames == 20000);
         CHECK(d->info().dsd_pcm);
@@ -191,7 +187,7 @@ TEST_CASE("DSD to PCM: rate, length, silence and the reference level", "[dsd]") 
     }
     for (int lp : {24, 30, 50}) {
         auto d = daphne::make_dsd_pcm_decoder(0, lp);
-        REQUIRE(d->open(write_dsf(L"daphne_ref.dsf", 2, 40000, 1, reference), nullptr));
+        REQUIRE(d->open(write_dsf("daphne_ref.dsf", 2, 40000, 1, reference), nullptr));
         std::vector<double> pcm(20000 * 2);
         REQUIRE(d->read(pcm.data(), 20000) == 20000);
         double worst = 0;
@@ -202,7 +198,7 @@ TEST_CASE("DSD to PCM: rate, length, silence and the reference level", "[dsd]") 
 }
 
 TEST_CASE("DSD to PCM: seek gives the same samples as reading through", "[dsd]") {
-    const auto path = write_dsf(L"daphne_seek.dsf", 2, 60000, 1, noise);
+    const auto path = write_dsf("daphne_seek.dsf", 2, 60000, 1, noise);
     auto a = daphne::make_dsd_pcm_decoder();
     REQUIRE(a->open(path, nullptr));
     std::vector<double> all(30000 * 2);

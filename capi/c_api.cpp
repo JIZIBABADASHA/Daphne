@@ -16,6 +16,8 @@
 #include "daphne/engine/player.h"
 #include "daphne/engine/sample_format.h"
 #include "daphne/engine/settings.h"
+#include "daphne/engine/text.h"
+#include "daphne/platform/platform.h"
 
 using nlohmann::json;
 
@@ -79,11 +81,34 @@ void stop_player(dc_player* p) {
     p->player.reset();
 }
 
+// A wchar_t path of the C API: UTF-16 on Windows (the OS's own), UTF-32 elsewhere.
+std::filesystem::path path_from_wide(const wchar_t* w) {
+    if (!w) return {};
+#ifdef _WIN32
+    return std::filesystem::path(std::wstring(w));
+#else
+    return daphne::platform::path_from_utf8(daphne::to_utf8(std::wstring(w)));
+#endif
+}
+
+std::filesystem::path path_from_utf8(const char* s) { return s ? daphne::platform::path_from_utf8(s) : std::filesystem::path(); }
+
+int load(dc_player* p, const std::filesystem::path& path, const char* settings_json, double seconds, int play, char* err, int err_len);
+
+void set_next(dc_player* p, const std::filesystem::path& path, std::optional<double> headroom_db) {
+    if (!p) return;
+    std::lock_guard<std::mutex> l(p->op);
+    if (p->player) p->player->set_next(path, headroom_db);
+}
+
+std::optional<double> headroom(double db) { return std::isnan(db) ? std::nullopt : std::optional<double>(db); }
+
 }  // namespace
 
 extern "C" {
 
-DC_API int dc_abi_version(void) { return 1; }
+// 2: the UTF-8 path functions (dc_load_utf8, dc_set_next_utf8, dc_set_next_gain_utf8, dc_filter_cache_dir_utf8)
+DC_API int dc_abi_version(void) { return 2; }
 DC_API const char* dc_version(void) { return "daphne 0.1.0"; }
 
 DC_API dc_player* dc_create(void) {
@@ -106,6 +131,19 @@ DC_API void dc_destroy(dc_player* p) {
 
 DC_API int dc_load(dc_player* p, const wchar_t* path, const char* settings_json, double seconds, int play, char* err, int err_len) {
     if (!p || !path) return DC_ERR_ARG;
+    return load(p, path_from_wide(path), settings_json, seconds, play, err, err_len);
+}
+
+DC_API int dc_load_utf8(dc_player* p, const char* path, const char* settings_json, double seconds, int play, char* err, int err_len) {
+    if (!p || !path) return DC_ERR_ARG;
+    return load(p, path_from_utf8(path), settings_json, seconds, play, err, err_len);
+}
+
+}  // extern "C"
+
+namespace {
+
+int load(dc_player* p, const std::filesystem::path& path, const char* settings_json, double seconds, int play, char* err, int err_len) {
     try {
         std::lock_guard<std::mutex> l(p->op);
         daphne::Settings s;
@@ -178,6 +216,10 @@ DC_API int dc_load(dc_player* p, const wchar_t* path, const char* settings_json,
     }
 }
 
+}  // namespace
+
+extern "C" {
+
 DC_API int dc_apply(dc_player* p, const char* settings_json, char* err, int err_len) {
     if (!p) return DC_ERR_ARG;
     try {
@@ -212,17 +254,14 @@ DC_API void dc_seek(dc_player* p, double seconds) {
     if (p->player) p->player->seek(seconds);
 }
 
-DC_API void dc_set_next(dc_player* p, const wchar_t* path) {
-    if (!p) return;
-    std::lock_guard<std::mutex> l(p->op);
-    if (p->player) p->player->set_next(path ? path : L"");
-}
+DC_API void dc_set_next(dc_player* p, const wchar_t* path) { set_next(p, path_from_wide(path), std::nullopt); }
+DC_API void dc_set_next_utf8(dc_player* p, const char* path) { set_next(p, path_from_utf8(path), std::nullopt); }
 
 DC_API void dc_set_next_gain(dc_player* p, const wchar_t* path, double headroom_db) {
-    if (!p) return;
-    std::lock_guard<std::mutex> l(p->op);
-    if (p->player)
-        p->player->set_next(path ? path : L"", std::isnan(headroom_db) ? std::nullopt : std::optional<double>(headroom_db));
+    set_next(p, path_from_wide(path), headroom(headroom_db));
+}
+DC_API void dc_set_next_gain_utf8(dc_player* p, const char* path, double headroom_db) {
+    set_next(p, path_from_utf8(path), headroom(headroom_db));
 }
 
 DC_API void dc_stop(dc_player* p) {
@@ -293,9 +332,24 @@ DC_API void dc_meter(dc_player* p, double* l, double* r) {
 
 DC_API int dc_filter_cache_dir(wchar_t* out, int len) {
     try {
-        const std::wstring d = daphne::filter_cache_dir();
+#ifdef _WIN32
+        const std::wstring d = daphne::filter_cache_dir().wstring();
+#else
+        const std::wstring d = daphne::to_wide(daphne::platform::path_to_utf8(daphne::filter_cache_dir()));
+#endif
         if (!out || len <= static_cast<int>(d.size())) return d.empty() ? 0 : DC_ERR_BUFFER;
         std::wmemcpy(out, d.c_str(), d.size() + 1);
+        return static_cast<int>(d.size());
+    } catch (...) {
+        return 0;
+    }
+}
+
+DC_API int dc_filter_cache_dir_utf8(char* out, int len) {
+    try {
+        const std::string d = daphne::platform::path_to_utf8(daphne::filter_cache_dir());
+        if (!out || len <= static_cast<int>(d.size())) return d.empty() ? 0 : DC_ERR_BUFFER;
+        std::memcpy(out, d.c_str(), d.size() + 1);
         return static_cast<int>(d.size());
     } catch (...) {
         return 0;

@@ -42,11 +42,7 @@ namespace {
 thread_local int t_depth = 0;
 thread_local std::chrono::steady_clock::time_point t_start[32];
 bool trace_enabled() {
-    char* v = nullptr;
-    size_t n = 0;
-    const bool on = _dupenv_s(&v, &n, "DAPHNE_PROGRESS_TRACE") == 0 && v != nullptr;
-    free(v);
-    return on;
+    return platform::get_env("DAPHNE_PROGRESS_TRACE").has_value();
 }
 const bool t_trace = trace_enabled();
 }  // namespace

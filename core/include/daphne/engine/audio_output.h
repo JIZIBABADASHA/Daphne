@@ -1,6 +1,7 @@
 #pragma once
-// Common interface of the device outputs (WASAPI, ASIO): the player writes device-format
-// bytes into a lock-free ring, the output's render thread / driver callback reads them.
+// Common interface of the device outputs (WASAPI, ASIO; a fake one in the tests): the player writes
+// device-format bytes into a lock-free ring, the output's render thread / driver callback reads them.
+// The player only sees this interface (N24, N25).
 
 #include <atomic>
 #include <cstdint>
@@ -51,6 +52,14 @@ public:
     // The driver asked to be opened again (ASIO reset request / buffer size change): the player
     // reopens the device and resumes where it was.
     virtual bool reset_requested() const { return false; }
+
+    // Some drivers accept a rate they cannot stream (ASIO): the player starts the device once on
+    // silence before designing the filter for that rate.
+    virtual bool probe_before_design() const { return false; }
+    // PCM rates the open driver accepts, for the host's settings (ASIO; empty when unknown).
+    virtual std::vector<int> supported_rates() const { return {}; }
+    // output.buffer_ms was not taken: the device runs with its default buffer (WASAPI exclusive).
+    virtual bool buffer_fallback() const { return false; }
 
     // Pause without stopping the device (ring_feeder.h): PCM fades out / in, DSD gets silence.
     void set_paused(bool p) { feeder_.set_paused(p); }

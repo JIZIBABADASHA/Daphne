@@ -1,7 +1,11 @@
-// daphne: command-line player and test tool.
+// daphne: command-line player and test tool. Arguments are UTF-8 (converted from UTF-16 on Windows);
+// paths become std::filesystem::path through P() where they reach the engine or a file.
 
+#ifdef _WIN32
 #include <windows.h>
-#include <bcrypt.h>
+#else
+#include <csignal>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -15,6 +19,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <dr_libs/dr_flac.h>
@@ -32,18 +37,35 @@
 #include "daphne/engine/filters.h"
 #include "daphne/engine/settings.h"
 #include "daphne/engine/text.h"
+#include "daphne/platform/platform.h"
 
 namespace {
 
 constexpr const char* kVersion = "0.1.0";
 std::atomic<bool> g_cancel{false};
 
+#ifdef _WIN32
 BOOL WINAPI on_ctrl(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) {
         g_cancel = true;
         return TRUE;
     }
     return FALSE;
+}
+#else
+void on_signal(int) { g_cancel = true; }
+#endif
+
+// A command-line path (UTF-8).
+std::filesystem::path P(const std::string& s) { return daphne::platform::path_from_utf8(s); }
+
+// dr_wav / dr_flac with a path in the OS's own encoding
+bool wav_write_open(drwav* w, const std::filesystem::path& p, const drwav_data_format* fmt) {
+#ifdef _WIN32
+    return drwav_init_file_write_w(w, p.c_str(), fmt, nullptr);
+#else
+    return drwav_init_file_write(w, p.c_str(), fmt, nullptr);
+#endif
 }
 
 void usage() {
@@ -64,39 +86,83 @@ void usage() {
               << "  daphne settings check <file>            validate a settings file\n";
 }
 
-// ---------------------------------------------------------------- MD5 (BCrypt)
+// ---------------------------------------------------------------- MD5 (RFC 1321)
 
 class Md5 {
 public:
-    Md5() {
-        BCryptOpenAlgorithmProvider(&alg_, BCRYPT_MD5_ALGORITHM, nullptr, 0);
-        BCryptCreateHash(alg_, &h_, nullptr, 0, nullptr, 0, 0);
+    void update(const void* p, size_t n) {
+        const auto* b = static_cast<const unsigned char*>(p);
+        len_ += n;
+        while (n > 0) {
+            const size_t take = std::min(n, size_t{64} - fill_);
+            std::memcpy(buf_ + fill_, b, take);
+            fill_ += take, b += take, n -= take;
+            if (fill_ == 64) block(buf_), fill_ = 0;
+        }
     }
-    ~Md5() {
-        if (h_) BCryptDestroyHash(h_);
-        if (alg_) BCryptCloseAlgorithmProvider(alg_, 0);
-    }
-    void update(const void* p, size_t n) { BCryptHashData(h_, (PUCHAR)p, static_cast<ULONG>(n), 0); }
     std::string hex() {
-        unsigned char d[16];
-        BCryptFinishHash(h_, d, 16, 0);
+        const uint64_t bits = len_ * 8;
+        const unsigned char one = 0x80, zero = 0;
+        update(&one, 1);
+        while (fill_ != 56) update(&zero, 1);
+        unsigned char l[8];
+        for (int i = 0; i < 8; ++i) l[i] = static_cast<unsigned char>(bits >> (8 * i));
+        update(l, 8);
         char s[33];
-        for (int i = 0; i < 16; ++i) snprintf(s + i * 2, 3, "%02x", d[i]);
+        for (int i = 0; i < 16; ++i) snprintf(s + i * 2, 3, "%02x", static_cast<unsigned>((h_[i / 4] >> (8 * (i % 4))) & 0xFF));
         return s;
     }
 
 private:
-    BCRYPT_ALG_HANDLE alg_ = nullptr;
-    BCRYPT_HASH_HANDLE h_ = nullptr;
+    static uint32_t rotl(uint32_t x, int c) { return (x << c) | (x >> (32 - c)); }
+    void block(const unsigned char* p) {
+        static const uint32_t K[64] = {
+            0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501, 0x698098d8, 0x8b44f7af,
+            0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa,
+            0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8,
+            0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+            0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244, 0x432aff97,
+            0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1, 0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
+            0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391};
+        static const int R[64] = {7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9,  14, 20, 5, 9,
+                                  14, 20, 5, 9,  14, 20, 5, 9,  14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+                                  4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21};
+        uint32_t m[16];
+        for (int i = 0; i < 16; ++i)
+            m[i] = static_cast<uint32_t>(p[4 * i]) | static_cast<uint32_t>(p[4 * i + 1]) << 8 | static_cast<uint32_t>(p[4 * i + 2]) << 16 |
+                   static_cast<uint32_t>(p[4 * i + 3]) << 24;
+        uint32_t a = h_[0], b = h_[1], c = h_[2], d = h_[3];
+        for (int i = 0; i < 64; ++i) {
+            uint32_t f;
+            int g;
+            if (i < 16) f = (b & c) | (~b & d), g = i;
+            else if (i < 32) f = (d & b) | (~d & c), g = (5 * i + 1) % 16;
+            else if (i < 48) f = b ^ c ^ d, g = (3 * i + 5) % 16;
+            else f = c ^ (b | ~d), g = (7 * i) % 16;
+            const uint32_t t = d;
+            d = c, c = b;
+            b = b + rotl(a + f + K[i] + m[g], R[i]);
+            a = t;
+        }
+        h_[0] += a, h_[1] += b, h_[2] += c, h_[3] += d;
+    }
+    uint32_t h_[4] = {0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476};
+    unsigned char buf_[64] = {};
+    size_t fill_ = 0;
+    uint64_t len_ = 0;
 };
 
 void on_flac_meta(void* user, drflac_metadata* m) {
     if (m->type == DRFLAC_METADATA_BLOCK_TYPE_STREAMINFO) std::memcpy(user, m->data.streaminfo.md5, 16);
 }
 
-std::string flac_streaminfo_md5(const std::wstring& path) {
+std::string flac_streaminfo_md5(const std::filesystem::path& path) {
     unsigned char md5[16] = {};
+#ifdef _WIN32
     drflac* f = drflac_open_file_with_metadata_w(path.c_str(), on_flac_meta, md5, nullptr);
+#else
+    drflac* f = drflac_open_file_with_metadata(path.c_str(), on_flac_meta, md5, nullptr);
+#endif
     if (!f) return {};
     drflac_close(f);
     char s[33];
@@ -104,27 +170,22 @@ std::string flac_streaminfo_md5(const std::wstring& path) {
     return s;
 }
 
-std::wstring suffix_lower(const std::wstring& p) {
-    auto d = p.find_last_of(L'.');
-    std::wstring s = d == std::wstring::npos ? L"" : p.substr(d + 1);
-    for (auto& c : s) c = static_cast<wchar_t>(towlower(c));
-    return s;
-}
+std::string suffix_lower(const std::string& p) { return daphne::file_extension(P(p)); }
 
 // ---------------------------------------------------------------- commands
 
-int cmd_decode_test(const std::vector<std::wstring>& args) {
+int cmd_decode_test(const std::vector<std::string>& args) {
     bool md5 = false;
-    std::vector<std::wstring> files;
+    std::vector<std::string> files;
     for (const auto& a : args) {
-        if (a == L"--md5") md5 = true;
+        if (a == "--md5") md5 = true;
         else files.push_back(a);
     }
     int bad = 0;
     for (const auto& f : files) {
         std::string err;
-        auto d = daphne::open_decoder(f, &err);
-        std::cout << daphne::to_utf8(f) << "\n";
+        auto d = daphne::open_decoder(P(f), &err);
+        std::cout << f << "\n";
         if (!d) {
             std::cout << "  error: " << err << "\n";
             ++bad;
@@ -133,7 +194,7 @@ int cmd_decode_test(const std::vector<std::wstring>& args) {
         const auto& in = d->info();
         std::cout << "  " << in.codec << " " << in.rate << " Hz, " << in.channels << " ch"
                   << (in.bits ? ", " + std::to_string(in.bits) + "-bit" : "") << ", frames " << in.frames << "\n";
-        const bool is_flac = suffix_lower(f) == L"flac" || suffix_lower(f) == L"fla";
+        const bool is_flac = suffix_lower(f) == "flac" || suffix_lower(f) == "fla";
         Md5 flac_md5, s32_md5;
         const int ch = in.channels, bps = in.bits;
         std::vector<double> buf(4096 * static_cast<size_t>(ch));
@@ -173,7 +234,7 @@ int cmd_decode_test(const std::vector<std::wstring>& args) {
                   << (in.rate && secs > 0 ? total / double(in.rate) / secs : 0) << "x realtime\n";
         if (in.frames >= 0 && total != in.frames) std::cout << "  WARNING: frame count " << total << " != header " << in.frames << "\n";
         if (is_flac && bps > 0) {
-            const std::string want = flac_streaminfo_md5(f), got = flac_md5.hex();
+            const std::string want = flac_streaminfo_md5(P(f)), got = flac_md5.hex();
             const bool unset = want == std::string(32, '0');
             std::cout << "  FLAC MD5 " << got << (unset ? " (STREAMINFO MD5 not set)" : got == want ? " OK" : " MISMATCH (want " + want + ")")
                       << "\n";
@@ -184,14 +245,14 @@ int cmd_decode_test(const std::vector<std::wstring>& args) {
     return bad ? 2 : 0;
 }
 
-int cmd_render(const std::wstring& in_path, const std::wstring& out_path, int64_t start, int dsd_lowpass) {
+int cmd_render(const std::string& in_path, const std::string& out_path, int64_t start, int dsd_lowpass) {
     std::string err;
     std::unique_ptr<daphne::Decoder> d;
-    if (dsd_lowpass > 0 && daphne::is_dsd_path(in_path)) {
+    if (dsd_lowpass > 0 && daphne::is_dsd_path(P(in_path))) {
         d = daphne::make_dsd_pcm_decoder(0, dsd_lowpass);
-        if (!d->open(in_path, &err)) d.reset();
+        if (!d->open(P(in_path), &err)) d.reset();
     } else {
-        d = daphne::open_decoder(in_path, &err);
+        d = daphne::open_decoder(P(in_path), &err);
     }
     if (!d) {
         std::cerr << "error: " << err << "\n";
@@ -211,8 +272,8 @@ int cmd_render(const std::wstring& in_path, const std::wstring& out_path, int64_
     fmt.sampleRate = static_cast<drwav_uint32>(in.rate);
     fmt.bitsPerSample = static_cast<drwav_uint32>(bits);
     drwav w;
-    if (!drwav_init_file_write_w(&w, out_path.c_str(), &fmt, nullptr)) {
-        std::cerr << "error: cannot write " << daphne::to_utf8(out_path) << "\n";
+    if (!wav_write_open(&w, P(out_path), &fmt)) {
+        std::cerr << "error: cannot write " << out_path << "\n";
         return 1;
     }
     const int ch = in.channels;
@@ -244,16 +305,16 @@ int cmd_render(const std::wstring& in_path, const std::wstring& out_path, int64_
 
 // Hidden test hook: daphne filter-dump <fs_in> <fs_out> <out.f64> [<lo.f64>] [--taps N] [--phase P] [--apodize]
 // Writes the resampling filter as raw float64 (and the double-double low parts with lo.f64).
-int cmd_filter_dump(std::vector<std::wstring> args) {
+int cmd_filter_dump(std::vector<std::string> args) {
     int taps = 4096;
     double phase = 0.0;
     bool apodize = false;
     for (size_t i = 0; i < args.size();) {
-        if (args[i] == L"--apodize") {
+        if (args[i] == "--apodize") {
             apodize = true;
             args.erase(args.begin() + static_cast<std::ptrdiff_t>(i));
-        } else if ((args[i] == L"--taps" || args[i] == L"--phase") && i + 1 < args.size()) {
-            if (args[i] == L"--taps") taps = std::stoi(args[i + 1]);
+        } else if ((args[i] == "--taps" || args[i] == "--phase") && i + 1 < args.size()) {
+            if (args[i] == "--taps") taps = std::stoi(args[i + 1]);
             else phase = std::stod(args[i + 1]);
             args.erase(args.begin() + static_cast<std::ptrdiff_t>(i), args.begin() + static_cast<std::ptrdiff_t>(i) + 2);
         } else {
@@ -271,10 +332,10 @@ int cmd_filter_dump(std::vector<std::wstring> args) {
     const auto t0 = std::chrono::steady_clock::now();
     const auto h = daphne::dsp::design_lowpass(taps, ratio, fs_in, fs_out, phase, apodize, want_lo ? &lo : nullptr);
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::ofstream o(args[2], std::ios::binary);
+    std::ofstream o(P(args[2]), std::ios::binary);
     o.write(reinterpret_cast<const char*>(h.data()), static_cast<std::streamsize>(h.size() * sizeof(double)));
     if (want_lo) {
-        std::ofstream ol(args[3], std::ios::binary);
+        std::ofstream ol(P(args[3]), std::ios::binary);
         ol.write(reinterpret_cast<const char*>(lo.data()), static_cast<std::streamsize>(lo.size() * sizeof(double)));
     }
     std::cout << "taps " << h.size() << ", designed in " << secs << " s\n";
@@ -284,13 +345,13 @@ int cmd_filter_dump(std::vector<std::wstring> args) {
 // Hidden test hook: daphne modulator-test <fs> <osr> <order> <channels> <in.f64> <out.bin> [chunk] [--single]
 // Runs the DSD modulator over raw interleaved float64 and writes the DSD bytes; prints the time and
 // the protection counters. --single: both channels on the calling thread.
-int cmd_modulator_test(std::vector<std::wstring> a) {
+int cmd_modulator_test(std::vector<std::string> a) {
     bool single = false;
-    a.erase(std::remove_if(a.begin(), a.end(), [&](const std::wstring& x) { return x == L"--single" ? (single = true) : false; }), a.end());
+    a.erase(std::remove_if(a.begin(), a.end(), [&](const std::string& x) { return x == "--single" ? (single = true) : false; }), a.end());
     if (a.size() < 6) return 1;
     const int fs = std::stoi(a[0]), osr = std::stoi(a[1]), order = std::stoi(a[2]), ch = std::stoi(a[3]);
     const int chunk = a.size() > 6 ? std::stoi(a[6]) : 1 << 30;
-    std::ifstream in(a[4], std::ios::binary);
+    std::ifstream in(P(a[4]), std::ios::binary);
     std::vector<char> raw((std::istreambuf_iterator<char>(in)), {});
     std::vector<double> x(raw.size() / 8);
     std::memcpy(x.data(), raw.data(), x.size() * 8);
@@ -305,7 +366,7 @@ int cmd_modulator_test(std::vector<std::wstring> a) {
         m.process(x.data() + static_cast<size_t>(i) * ch, n, ch, out);
     }
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::ofstream o(a[5], std::ios::binary);
+    std::ofstream o(P(a[5]), std::ios::binary);
     o.write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(out.size()));
     std::cout << "order " << m.order() << " dsd " << m.dsd_rate() << " bytes " << out.size() << " seconds " << sec << " ("
               << (frames / double(fs)) / sec << "x realtime) clamped " << m.clamped_bits() << " resets " << m.loop_resets()
@@ -314,13 +375,13 @@ int cmd_modulator_test(std::vector<std::wstring> a) {
 }
 
 // --settings <file>: loads the settings, prints the diagnostics; removes the option from args.
-bool load_settings_arg(std::vector<std::wstring>& args, daphne::Settings& s) {
-    std::vector<std::wstring> rest;
+bool load_settings_arg(std::vector<std::string>& args, daphne::Settings& s) {
+    std::vector<std::string> rest;
     for (size_t i = 0; i < args.size(); ++i) {
-        if (args[i] == L"--settings" && i + 1 < args.size()) {
-            std::ifstream f(args[++i], std::ios::binary);
+        if (args[i] == "--settings" && i + 1 < args.size()) {
+            std::ifstream f(P(args[++i]), std::ios::binary);
             if (!f) {
-                std::cerr << "cannot read " << daphne::to_utf8(args[i]) << "\n";
+                std::cerr << "cannot read " << args[i] << "\n";
                 return false;
             }
             std::stringstream ss;
@@ -339,19 +400,19 @@ bool load_settings_arg(std::vector<std::wstring>& args, daphne::Settings& s) {
     return true;
 }
 
-int cmd_settings(const std::vector<std::wstring>& a) {
-    if (!a.empty() && a[0] == L"default") {
+int cmd_settings(const std::vector<std::string>& a) {
+    if (!a.empty() && a[0] == "default") {
         const auto text = daphne::settings_to_json(daphne::Settings{}).dump(2) + "\n";
         if (a.size() >= 2) {
-            std::ofstream o(a[1], std::ios::binary);
+            std::ofstream o(P(a[1]), std::ios::binary);
             o << text;
         } else {
             std::cout << text;
         }
         return 0;
     }
-    if (a.size() >= 2 && a[0] == L"check") {
-        std::vector<std::wstring> args = {L"--settings", a[1]};
+    if (a.size() >= 2 && a[0] == "check") {
+        std::vector<std::string> args = {"--settings", a[1]};
         daphne::Settings s;
         if (!load_settings_arg(args, s)) return 1;
         std::cout << "ok\n";
@@ -364,11 +425,11 @@ int cmd_settings(const std::vector<std::wstring>& a) {
 // Hidden test hook: daphne resampler-run <fs_in> <fs_out> <in.f64> <out.f64> [--settings file]
 // Runs the resampler the player would build from the settings' filter (no other stage) over raw
 // interleaved stereo float64, and prints the time it took.
-int cmd_resampler_run(std::vector<std::wstring> args) {
+int cmd_resampler_run(std::vector<std::string> args) {
     daphne::Settings s;
     if (!load_settings_arg(args, s) || args.size() < 4) return 1;
     const int fs_in = std::stoi(args[0]), fs_out = std::stoi(args[1]);
-    std::ifstream fi(args[2], std::ios::binary | std::ios::ate);
+    std::ifstream fi(P(args[2]), std::ios::binary | std::ios::ate);
     const auto bytes = static_cast<size_t>(fi.tellg());
     std::vector<double> x(bytes / sizeof(double), 0.0);
     fi.seekg(0);
@@ -386,7 +447,7 @@ int cmd_resampler_run(std::vector<std::wstring> args) {
     }
     done += r->flush(y.data() + static_cast<size_t>(done) * 2);
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::ofstream o(args[3], std::ios::binary);
+    std::ofstream o(P(args[3]), std::ios::binary);
     o.write(reinterpret_cast<const char*>(y.data()), static_cast<std::streamsize>(static_cast<size_t>(done) * 2 * sizeof(double)));
     std::cout << "frames " << done << " double_double " << r->double_double() << " seconds " << sec << "\n";
     return 0;
@@ -432,43 +493,43 @@ int cmd_devices(bool probe) {
 struct PlayConfig {
     daphne::Settings settings;
     daphne::OutputChoice out;
-    std::vector<std::wstring> files;
-    std::wstring settings_path;
+    std::vector<std::string> files;
+    std::string settings_path;
     bool watch = false;
     double start = 0.0, length = 0.0;   // --start / --length seconds
-    std::wstring next;                  // --next: gapless next track
+    std::string next;                  // --next: gapless next track
     std::string script;                 // --script "2:pause,3:resume,5:seek=30" (seconds since start)
 };
 
 // Settings file + device options; called again when --watch sees the file change.
-bool play_config(std::vector<std::wstring> args, PlayConfig& c) {
+bool play_config(std::vector<std::string> args, PlayConfig& c) {
     for (size_t i = 0; i + 1 < args.size(); ++i)
-        if (args[i] == L"--settings") c.settings_path = args[i + 1];
+        if (args[i] == "--settings") c.settings_path = args[i + 1];
     c.settings = {};
     if (!load_settings_arg(args, c.settings)) return false;
     c.out.api = c.settings.output.api;
     c.out.device = c.settings.output.device;
     c.files.clear();
     for (size_t i = 0; i < args.size(); ++i) {
-        if (args[i] == L"--device" && i + 1 < args.size()) c.out.device = daphne::to_utf8(args[++i]);
-        else if (args[i] == L"--shared") c.out.api = daphne::OutputApi::WasapiShared;
-        else if (args[i] == L"--exclusive") c.out.api = daphne::OutputApi::WasapiExclusive;
-        else if (args[i] == L"--watch") c.watch = true;
-        else if (args[i] == L"--start" && i + 1 < args.size()) c.start = std::stod(args[++i]);
-        else if (args[i] == L"--length" && i + 1 < args.size()) c.length = std::stod(args[++i]);
-        else if (args[i] == L"--next" && i + 1 < args.size()) c.next = args[++i];
-        else if (args[i] == L"--script" && i + 1 < args.size()) c.script = daphne::to_utf8(args[++i]);
-        else if (args[i] == L"--asio") {
+        if (args[i] == "--device" && i + 1 < args.size()) c.out.device = args[++i];
+        else if (args[i] == "--shared") c.out.api = daphne::OutputApi::WasapiShared;
+        else if (args[i] == "--exclusive") c.out.api = daphne::OutputApi::WasapiExclusive;
+        else if (args[i] == "--watch") c.watch = true;
+        else if (args[i] == "--start" && i + 1 < args.size()) c.start = std::stod(args[++i]);
+        else if (args[i] == "--length" && i + 1 < args.size()) c.length = std::stod(args[++i]);
+        else if (args[i] == "--next" && i + 1 < args.size()) c.next = args[++i];
+        else if (args[i] == "--script" && i + 1 < args.size()) c.script = args[++i];
+        else if (args[i] == "--asio") {
             c.out.api = daphne::OutputApi::Asio;
             // optional driver name / index right after --asio
-            if (i + 1 < args.size() && args[i + 1].rfind(L"--", 0) != 0 && !std::filesystem::exists(args[i + 1]))
-                c.out.device = daphne::to_utf8(args[++i]);
+            if (i + 1 < args.size() && args[i + 1].rfind("--", 0) != 0 && !std::filesystem::exists(P(args[i + 1])))
+                c.out.device = args[++i];
         } else c.files.push_back(args[i]);
     }
     return true;
 }
 
-int cmd_play(std::vector<std::wstring> args) {
+int cmd_play(std::vector<std::string> args) {
     PlayConfig cfg;
     if (!play_config(args, cfg)) return 1;
     if (cfg.files.empty()) {
@@ -481,13 +542,13 @@ int cmd_play(std::vector<std::wstring> args) {
     }
     auto mtime = [&]() {
         std::error_code ec;
-        const auto t = std::filesystem::last_write_time(cfg.settings_path, ec);
+        const auto t = std::filesystem::last_write_time(P(cfg.settings_path), ec);
         return ec ? std::filesystem::file_time_type{} : t;
     };
     int failures = 0;
     for (const auto& f : cfg.files) {
         if (g_cancel) break;
-        std::cout << "\n" << daphne::to_utf8(f) << "\n";
+        std::cout << "\n" << f << "\n";
         daphne::PlayCallbacks cb;
         daphne::OutputApi api = cfg.out.api;
         cb.on_start = [&](const daphne::PlayReport& r) {
@@ -530,13 +591,13 @@ int cmd_play(std::vector<std::wstring> args) {
         daphne::Player player;
         std::string err;
         const auto t0 = std::chrono::steady_clock::now();
-        if (!player.start(f, cfg.settings, cfg.out, cb, &err, cfg.start)) {
+        if (!player.start(P(f), cfg.settings, cfg.out, cb, &err, cfg.start)) {
             std::cout << "  error: " << err << "\n";
             ++failures;
             continue;
         }
         auto seen = mtime();
-        if (!cfg.next.empty()) player.set_next(cfg.next);
+        if (!cfg.next.empty()) player.set_next(P(cfg.next));
         // --script: "t:pause", "t:resume", "t:seek=S" at t seconds after the start
         struct Step {
             double t;
@@ -566,10 +627,10 @@ int cmd_play(std::vector<std::wstring> args) {
             }
             if (g_cancel) player.stop();
             if (cfg.length > 0 && el > cfg.length) player.stop();
-            Sleep(200);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
             if (cfg.watch && mtime() != seen) {
                 seen = mtime();
-                Sleep(100);   // let the editor finish writing
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));   // let the editor finish writing
                 PlayConfig nc;
                 if (play_config(args, nc)) {
                     api = nc.out.api;
@@ -601,16 +662,16 @@ int cmd_play(std::vector<std::wstring> args) {
 // Runs the whole chain offline: a virtual device at the rate the core asks for, N channels (default:
 // the source's), --bits integer PCM (default 24) or float32. dsd core: the DoP stream (32-bit WAV at the
 // DSD clock / 16) as the player sends it.
-int cmd_render_dsp(std::vector<std::wstring> args) {
+int cmd_render_dsp(std::vector<std::string> args) {
     daphne::Settings s;
     if (!load_settings_arg(args, s)) return 1;
     int channels = 0, bits = 24;
     bool as_float = false;
-    std::vector<std::wstring> files;
+    std::vector<std::string> files;
     for (size_t i = 0; i < args.size(); ++i) {
-        if (args[i] == L"--channels" && i + 1 < args.size()) channels = std::stoi(args[++i]);
-        else if (args[i] == L"--bits" && i + 1 < args.size()) bits = std::stoi(args[++i]);
-        else if (args[i] == L"--float") as_float = true;
+        if (args[i] == "--channels" && i + 1 < args.size()) channels = std::stoi(args[++i]);
+        else if (args[i] == "--bits" && i + 1 < args.size()) bits = std::stoi(args[++i]);
+        else if (args[i] == "--float") as_float = true;
         else files.push_back(args[i]);
     }
     if (files.size() != 2 || (bits != 16 && bits != 24 && bits != 32)) {
@@ -618,7 +679,7 @@ int cmd_render_dsp(std::vector<std::wstring> args) {
         return 1;
     }
     std::string err;
-    auto d = daphne::open_decoder(files[0], &err);
+    auto d = daphne::open_decoder(P(files[0]), &err);
     if (!d) {
         std::cerr << "error: " << err << "\n";
         return 1;
@@ -664,8 +725,8 @@ int cmd_render_dsp(std::vector<std::wstring> args) {
     fmt.sampleRate = static_cast<drwav_uint32>(dev.rate);
     fmt.bitsPerSample = static_cast<drwav_uint32>(dev.container_bits);
     drwav w;
-    if (!drwav_init_file_write_w(&w, files[1].c_str(), &fmt, nullptr)) {
-        std::cerr << "error: cannot write " << daphne::to_utf8(files[1]) << "\n";
+    if (!wav_write_open(&w, P(files[1]), &fmt)) {
+        std::cerr << "error: cannot write " << files[1] << "\n";
         return 1;
     }
     std::vector<double> buf(static_cast<size_t>(kChunk) * in.channels);
@@ -699,34 +760,33 @@ int cmd_render_dsp(std::vector<std::wstring> args) {
 
 }  // namespace
 
-int wmain(int argc, wchar_t** argv) {
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCtrlHandler(on_ctrl, TRUE);
-    std::vector<std::wstring> a(argv + 1, argv + argc);
-    if (a.empty() || a[0] == L"help" || a[0] == L"--help" || a[0] == L"-h") {
+namespace {
+
+int run(const std::vector<std::string>& a) {
+    if (a.empty() || a[0] == "help" || a[0] == "--help" || a[0] == "-h") {
         usage();
         return a.empty() ? 1 : 0;
     }
-    const std::vector<std::wstring> rest(a.begin() + 1, a.end());
-    if (a[0] == L"version") {
+    const std::vector<std::string> rest(a.begin() + 1, a.end());
+    if (a[0] == "version") {
         std::cout << "daphne " << kVersion << "\n";
         return 0;
     }
-    if (a[0] == L"decode-test") return cmd_decode_test(rest);
-    if (a[0] == L"devices") return cmd_devices(!rest.empty() && rest[0] == L"--probe");
-    if (a[0] == L"play") return cmd_play(rest);
-    if (a[0] == L"render-dsp") return cmd_render_dsp(rest);
-    if (a[0] == L"filter-dump") return cmd_filter_dump(rest);
-    if (a[0] == L"resampler-run") return cmd_resampler_run(rest);
-    if (a[0] == L"modulator-test") return cmd_modulator_test(rest);
-    if (a[0] == L"settings") return cmd_settings(rest);
-    if (a[0] == L"render") {
-        std::vector<std::wstring> r = rest;
+    if (a[0] == "decode-test") return cmd_decode_test(rest);
+    if (a[0] == "devices") return cmd_devices(!rest.empty() && rest[0] == "--probe");
+    if (a[0] == "play") return cmd_play(rest);
+    if (a[0] == "render-dsp") return cmd_render_dsp(rest);
+    if (a[0] == "filter-dump") return cmd_filter_dump(rest);
+    if (a[0] == "resampler-run") return cmd_resampler_run(rest);
+    if (a[0] == "modulator-test") return cmd_modulator_test(rest);
+    if (a[0] == "settings") return cmd_settings(rest);
+    if (a[0] == "render") {
+        std::vector<std::string> r = rest;
         int64_t start = 0;
         int dsd_lowpass = 0;
         for (size_t i = 0; i + 1 < r.size();)
-            if (r[i] == L"--start" || r[i] == L"--dsd-lowpass") {
-                if (r[i] == L"--start") start = std::stoll(r[i + 1]);
+            if (r[i] == "--start" || r[i] == "--dsd-lowpass") {
+                if (r[i] == "--start") start = std::stoll(r[i + 1]);
                 else dsd_lowpass = std::stoi(r[i + 1]);
                 r.erase(r.begin() + static_cast<std::ptrdiff_t>(i), r.begin() + static_cast<std::ptrdiff_t>(i) + 2);
             } else {
@@ -741,3 +801,21 @@ int wmain(int argc, wchar_t** argv) {
     usage();
     return 1;
 }
+
+}  // namespace
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t** argv) {
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCtrlHandler(on_ctrl, TRUE);
+    std::vector<std::string> a;
+    for (int i = 1; i < argc; ++i) a.push_back(daphne::to_utf8(argv[i]));
+    return run(a);
+}
+#else
+int main(int argc, char** argv) {
+    std::signal(SIGINT, on_signal);
+    std::signal(SIGTERM, on_signal);
+    return run(std::vector<std::string>(argv + 1, argv + argc));
+}
+#endif

@@ -1,5 +1,5 @@
 add_executable(daphne main.cpp)
-target_link_libraries(daphne PRIVATE daphne_engine bcrypt)
+target_link_libraries(daphne PRIVATE daphne_engine)
 if(MSVC)
     target_link_options(daphne PRIVATE /ENTRY:wmainCRTStartup)
 endif()

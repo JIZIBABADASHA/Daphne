@@ -12,6 +12,10 @@
 - `take_notes()`：驅動訊息、取樣率變更、遲到的回呼，交給主程式的記錄。
 - `reset_requested()`：驅動要求重新開啟（播放器會重開並在原位置繼續）。
 - 暫停 / DoP / 電平委派給 N23 的送料。
+- `probe_before_design()`：有些驅動接受了串流不了的取樣率，播放器先以靜音短暫啟動一次再設計濾波器（ASIO 為 true）。
+- `supported_rates()`：開啟中的驅動接受的 PCM 取樣率，給主程式的設定畫面（ASIO）。
+- `buffer_fallback()`：裝置不接受 `output.buffer_ms`，以預設緩衝執行（WASAPI 獨占）。
+- 播放器只透過這個介面使用裝置：裝置由 `PlayerDeps::open_output` 建立，Windows 預設為 `platform_output_opener()`（`core/src/output_win.cpp`：WASAPI / ASIO）；macOS / Linux 目前沒有裝置輸出（N25）。
 
 統計（`OutputStats`，原子變數）：回呼數、underrun、WASAPI 事件逾時（兩個緩衝長度、至少 50 ms 沒有裝置事件）、最長回呼間隔、ASIO 遲到回呼（相鄰回呼間隔 > 1.5 個緩衝區週期）。
 

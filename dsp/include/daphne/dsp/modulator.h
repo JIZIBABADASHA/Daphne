@@ -94,7 +94,7 @@ private:
     bool job_ = false, done_ = false, quit_ = false;
     const double* job_in_ = nullptr;
     int job_frames_ = 0, job_channels_ = 0;
-    unsigned job_csr_ = 0;
+    uint64_t job_fp_ = 0;   // the caller's floating-point control (platform::fp_control)
 };
 #ifdef _MSC_VER
 #pragma warning(pop)

@@ -35,7 +35,7 @@ class LiveDecoder final : public Decoder {
 public:
     ~LiveDecoder() override { close(); }
 
-    bool open(const std::wstring&, std::string* error) override {
+    bool open(const std::filesystem::path&, std::string* error) override {
         if (!g_base.load() || g_cap.load() <= 0) {
             if (error) *error = "live input: the host has not shared its ring";
             return false;

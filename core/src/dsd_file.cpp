@@ -4,7 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
-#include <cwctype>
+#include "daphne/platform/platform.h"
 
 namespace daphne {
 
@@ -27,7 +27,7 @@ uint32_t be32(const uint8_t* p) { return static_cast<uint32_t>(p[0]) << 24 | p[1
 uint64_t be64(const uint8_t* p) { return static_cast<uint64_t>(be32(p)) << 32 | be32(p + 4); }
 uint16_t be16(const uint8_t* p) { return static_cast<uint16_t>(p[0] << 8 | p[1]); }
 
-bool seek64(FILE* f, int64_t off) { return _fseeki64(f, off, SEEK_SET) == 0; }
+bool seek64(FILE* f, int64_t off) { return platform::seek_file(f, off); }
 
 // speaker mask bits (WAVEFORMATEXTENSIBLE)
 constexpr uint32_t kFL = 0x1, kFR = 0x2, kFC = 0x4, kLFE = 0x8, kBL = 0x10, kBR = 0x20;
@@ -61,13 +61,9 @@ uint32_t dff_speaker(const uint8_t* id) {
 
 }  // namespace
 
-bool is_dsd_path(const std::wstring& path) {
-    const auto slash = path.find_last_of(L"\\/");
-    const auto dot = path.find_last_of(L'.');
-    if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash)) return false;
-    std::wstring e = path.substr(dot + 1);
-    for (auto& c : e) c = static_cast<wchar_t>(std::towlower(c));
-    return e == L"dsf" || e == L"dff";
+bool is_dsd_path(const std::filesystem::path& path) {
+    const std::string e = file_extension(path);
+    return e == "dsf" || e == "dff";
 }
 
 DsdFile::DsdFile() = default;
@@ -75,11 +71,12 @@ DsdFile::~DsdFile() {
     if (f_) fclose(f_);
 }
 
-bool DsdFile::open(const std::wstring& path, std::string* error) {
+bool DsdFile::open(const std::filesystem::path& path, std::string* error) {
     if (f_) fclose(f_);
     f_ = nullptr;
     info_ = DsdInfo{};
-    if (_wfopen_s(&f_, path.c_str(), L"rb") != 0 || !f_) {
+    f_ = platform::open_file(path, "rb");
+    if (!f_) {
         if (error) *error = "cannot open the file";
         return false;
     }
@@ -251,7 +248,7 @@ class DsdPcmDecoder final : public Decoder {
 public:
     DsdPcmDecoder(int out_rate, int lowpass_khz) : want_rate_(out_rate), lowpass_khz_(lowpass_khz) {}
 
-    bool open(const std::wstring& path, std::string* error) override {
+    bool open(const std::filesystem::path& path, std::string* error) override {
         if (!file_.open(path, error)) return false;
         const DsdInfo& d = file_.info();
         const int base = d.dsd_rate % 44100 == 0 ? 44100 : 48000;
