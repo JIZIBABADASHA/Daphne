@@ -21,6 +21,7 @@ extern "C" {
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -32,9 +33,17 @@ namespace {
 // iTunSMPB: " 00000000 <delay> <padding> <length> ...", hex; the length counts frames after the delay.
 int64_t itunsmpb_length(const AVDictionary* m) {
     const AVDictionaryEntry* e = av_dict_get(m, "iTunSMPB", nullptr, 0);
-    unsigned zero = 0, delay = 0, pad = 0;
-    unsigned long long len = 0;
-    if (!e || sscanf_s(e->value, " %x %x %x %llx", &zero, &delay, &pad, &len) != 4) return -1;
+    if (!e) return -1;
+    // the first four hex fields, by strtoull (sscanf_s is MSVC's only; MSVC deprecates plain sscanf)
+    unsigned long long f[4] = {};
+    const char* p = e->value;
+    for (auto& v : f) {
+        char* end = nullptr;
+        v = std::strtoull(p, &end, 16);
+        if (end == p) return -1;
+        p = end;
+    }
+    const unsigned long long len = f[3];
     return len > 0 ? static_cast<int64_t>(len) : -1;
 }
 
