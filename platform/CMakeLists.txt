@@ -7,6 +7,8 @@ if(WIN32)
     target_link_libraries(daphne_platform PUBLIC avrt winmm)
 else()
     target_sources(daphne_platform PRIVATE src/platform_posix.cpp)
+    # 64-bit off_t for fseeko on 32-bit Linux (DSD files pass 2 GB); already so on 64-bit systems and macOS
+    target_compile_definitions(daphne_platform PRIVATE _FILE_OFFSET_BITS=64)
     find_package(Threads REQUIRED)
     target_link_libraries(daphne_platform PUBLIC Threads::Threads)
 endif()

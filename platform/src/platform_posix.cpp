@@ -156,6 +156,7 @@ std::filesystem::path user_cache_dir() {
 
 FILE* open_file(const std::filesystem::path& p, const char* mode) { return std::fopen(p.c_str(), mode); }
 
+static_assert(sizeof(off_t) >= 8, "seek_file needs a 64-bit off_t (_FILE_OFFSET_BITS=64, platform/CMakeLists.txt)");
 bool seek_file(FILE* f, int64_t offset) { return fseeko(f, static_cast<off_t>(offset), SEEK_SET) == 0; }
 
 uint64_t thread_tag() { return std::hash<std::thread::id>{}(std::this_thread::get_id()); }
