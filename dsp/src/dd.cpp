@@ -14,8 +14,8 @@ inline DD div_d(const DD& t, double d) {
 // k = round(a / 2pi) from the product hi + (unnormalized) lo, rounded half away from zero
 inline double periods(const DD& a) {
     const double p = a.hi * kInvTwoPi.hi;
-    double e = std::fma(kInvTwoPi.lo, a.hi, a.lo * kInvTwoPi.hi);
-    e = (e + std::fma(kInvTwoPi.hi, a.hi, -p)) + a.lo * kInvTwoPi.lo;
+    double e = fma_exact(kInvTwoPi.lo, a.hi, a.lo * kInvTwoPi.hi);
+    e = (e + fma_exact(kInvTwoPi.hi, a.hi, -p)) + a.lo * kInvTwoPi.lo;
     return std::round(e + p);
 }
 

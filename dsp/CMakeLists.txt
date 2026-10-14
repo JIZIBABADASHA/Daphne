@@ -2,6 +2,7 @@
 add_library(daphne_dsp STATIC
     src/dd.cpp
     src/dd_conv.cpp
+    src/fma.cpp
     src/crossfeed.cpp
     src/downmix.cpp
     src/eq.cpp

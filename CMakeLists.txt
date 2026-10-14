@@ -9,6 +9,12 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # shared library exports: only the dc_* functions (DC_API)
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+# no contraction of a * b + c into an FMA by the compiler (Clang does it by default, on ARM64 for every
+# such expression): the double-double arithmetic and the FMA emulation (dsp fma.h) need each operation
+# rounded as written; MSVC's default /fp:precise does not contract
+if(NOT MSVC)
+    add_compile_options(-ffp-contract=off)
+endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
