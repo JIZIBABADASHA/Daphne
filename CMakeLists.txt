@@ -50,6 +50,7 @@ add_subdirectory(dsp)
 add_subdirectory(core)
 add_subdirectory(cli)
 add_subdirectory(capi)
+add_subdirectory(helper)
 
 if(DAPHNE_BUILD_TESTS)
     enable_testing()
