@@ -144,19 +144,23 @@ private:
             return 0;
         }
         int avail = static_cast<int>(w - read_);
-        // the start and a seek (a resume) leave the target plus what the player's refill takes at once
-        // behind the writer: more (a burst from the producer, or what it wrote while the player was paused)
-        // is skipped instead of played late and worked off by the rate trim over minutes
-        const int keep = static_cast<int>((target_ + g_reserve.load()) * rate);
+        // Priming (the start, after a starve) leaves the target behind the writer, and a seek (a resume) the
+        // target plus what the player's refill takes at once: more (a burst from the producer, or what it
+        // wrote while the player was paused) is skipped instead of played late and worked off by the rate trim
+        // over minutes. Unprimed, the decoder returned silence at once, so the player's ring is full when it
+        // primes and only a seek finds it empty (the reserve on top would stay in the decoder).
+        const int keep = static_cast<int>(target_ * rate);
+        int behind = 0;   // how far behind the writer to go now (0: stay)
         if (!primed_) {
             if (avail < keep) return 0;
             primed_ = true;
-            jump_ = true;
-        }
-        if (jump_) {
+            jump_ = false;   // a seek while unprimed: the player's ring has been refilled with silence
+            behind = keep;
+        } else if (jump_) {
             jump_ = false;
-            if (avail > keep) read_ = w - static_cast<uint32_t>(keep), frac_ = 0, adj_ = 0, avail = keep;
+            behind = static_cast<int>((target_ + g_reserve.load()) * rate);
         }
+        if (behind > 0 && avail > behind) read_ = w - static_cast<uint32_t>(behind), frac_ = 0, adj_ = 0, avail = behind;
         const double fill = static_cast<double>(avail) / rate;
         g_fill = fill;
         if (fill > kOverflow) {

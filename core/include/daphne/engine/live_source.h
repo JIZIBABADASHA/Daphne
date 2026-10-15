@@ -29,9 +29,10 @@ inline bool is_live_path(const std::filesystem::path& p) { return p == std::file
 // The host's shared ring (base = nullptr detaches it) and the producer's sample rate.
 void set_live_bus(void* base, int cap_frames, int rate);
 void set_live_rate(int rate);
-// What the player takes from the live decoder at once when it (re)fills its ring, in seconds: the decoder
-// starts, and goes back to the writer after a seek, that much more than its target behind it, so it holds
-// the target once the player's ring is full (the player sets it for each live source it opens).
+// What the player takes from the live decoder at once when it refills its ring after a seek, in seconds: a
+// seek goes back to that much more than the target behind the writer, so the decoder holds the target once
+// the player's ring is full again (the player sets it for each live source it opens). Priming (the start,
+// after a starve) leaves only the target: the player's ring is already full of the silence returned meanwhile.
 void set_live_reserve(double seconds);
 
 struct LiveStats {
