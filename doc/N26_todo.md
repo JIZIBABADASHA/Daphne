@@ -21,11 +21,11 @@
 
 順序：0 → 5 → 7，以 Windows 與 macOS 為主；6（Linux）暫緩。每一步一個分支、一個 PR，合進 `cross-platform-plan`。完成的項目打勾，實作時的發現記在最後的「實作筆記」。
 
-### 0. 輸出能力（分支 `output-caps`）
+### 0. 輸出能力（分支 `output-caps`，PR #18）✅
 
-- [ ] `player` 依輸出 API 判斷的三件事（有沒有原生 DSD、是不是共享混音、緩衝長度由誰設定）改成由各平台的輸出後端提供（`OutputCaps`），開裝置前就查得到；刪掉 `common.h` 的 `api_has_native_dsd` / `api_is_shared` / `api_takes_buffer_ms`，播放器不再認得 API 名稱。
-- [ ] Windows 的 `WorkerPool` worker：替處理執行緒工作時用 `RealtimeHelperScope`（MMCSS "Audio"），不再只是 `THREAD_PRIORITY_ABOVE_NORMAL`。
-- [ ] 驗證：Windows 全部測試、`live.py`（行為不變）；三平台 CI。
+- [x] `player` 依輸出 API 判斷的三件事（有沒有原生 DSD、是不是共享混音、緩衝長度由誰設定）改成由各平台的輸出後端提供（`OutputCaps`），開裝置前就查得到；刪掉 `common.h` 的 `api_has_native_dsd` / `api_is_shared` / `api_takes_buffer_ms`，播放器不再認得 API 名稱。
+- [x] Windows 的 `WorkerPool` worker：替處理執行緒工作時用 `RealtimeHelperScope`（MMCSS "Audio"），不再只是 `THREAD_PRIORITY_ABOVE_NORMAL`。
+- [x] 驗證：Windows 全部測試、`live.py`（行為不變）；三平台 CI。（PR #18：Windows 93 個測試、`live.py` 全過、CI 四個 job 通過）
 
 ### 5. 即時輸入的 `LiveBus`（分支另開）
 
