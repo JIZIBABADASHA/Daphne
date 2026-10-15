@@ -494,7 +494,7 @@ TEST_CASE("Player: live input plays the producer's stream", "[player][live]") {
             const size_t half = static_cast<size_t>(dr / 2), ms = static_cast<size_t>(dr / 1000);
             REQUIRE(music + half < frames);   // at least half a second of it
             CHECK(frequency(y, 2, music + 20 * ms, music + half - 20 * ms, dr) == Catch::Approx(1000.0).margin(3.0));
-            CHECK(longest_quiet(y, 2, music + 20 * ms, music + half - 20 * ms) < static_cast<int>(dr / 4800));
+            CHECK(longest_quiet(y, 2, music + 20 * ms, music + half - 20 * ms) < static_cast<size_t>(dr / 4800));
             INFO("held by the player: " << held << " s");
             CHECK(held < 0.12);   // a short ring for a live source (N4), not the 0.5 s of a file
         }
