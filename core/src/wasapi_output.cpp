@@ -126,8 +126,14 @@ WasapiOutput::~WasapiOutput() {
 
 bool WasapiOutput::open(const WasapiOptions& opt, int rate, int channels, std::string* error) {
     close();
+    // the interfaces held here are released before close() leaves COM: Release after CoUninitialize
+    // crashes on a thread where this was the only initialization
+    ComPtr<IMMDeviceEnumerator> en;
+    ComPtr<IPropertyStore> props;
     auto fail = [&](const std::string& msg) {
         if (error) *error = msg;
+        props.Reset();
+        en.Reset();
         close();
         return false;
     };
@@ -135,7 +141,6 @@ bool WasapiOutput::open(const WasapiOptions& opt, int rate, int channels, std::s
     impl_->com = SUCCEEDED(ci);
     exclusive_ = opt.exclusive;
 
-    ComPtr<IMMDeviceEnumerator> en;
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&en));
     if (FAILED(hr)) return fail(hr_text("MMDeviceEnumerator", hr));
 
@@ -151,7 +156,6 @@ bool WasapiOutput::open(const WasapiOptions& opt, int rate, int channels, std::s
     }
     if (FAILED(hr) || !impl_->device) return fail("wasapi: device not found: " + opt.device);
 
-    ComPtr<IPropertyStore> props;
     if (SUCCEEDED(impl_->device->OpenPropertyStore(STGM_READ, &props))) {
         PROPVARIANT v;
         PropVariantInit(&v);
