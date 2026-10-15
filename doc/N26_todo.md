@@ -27,13 +27,13 @@
 - [x] Windows 的 `WorkerPool` worker：替處理執行緒工作時用 `RealtimeHelperScope`（MMCSS "Audio"），不再只是 `THREAD_PRIORITY_ABOVE_NORMAL`。
 - [x] 驗證：Windows 全部測試、`live.py`（行為不變）；三平台 CI。（PR #18：Windows 93 個測試、`live.py` 全過、CI 四個 job 通過）
 
-### 5. 即時輸入的安全卸離（分支 `live-bus`）
+### 5. 即時輸入的安全卸離（分支 `live-bus`，PR #19）✅
 
 範圍在 2026-10-16 縮小：MIKU 1.4.5（`a15a6f6`）起，Mac 上的 YouTube Music 一律由網頁經系統輸出播放，播放核心只需要讓出裝置（見步驟 7）；把網頁的聲音擷取下來、經 `live-relay.js` 交給核心的路線預設關閉（設定檔要寫 `"ytThroughCore": true`，原因是在真實網頁上啟動不穩定）。所以先做 A（網頁自己播），B（經過 Daphne）只保留接口。
 
-- [ ] 安全卸離：解碼器只在 `produce()` 裡碰共用的環，期間持有租約（`g_readers`）；`set_live_bus` 先清掉指標、等租約歸零，再換上新的環。返回之後 host 就能釋放記憶體，播放中也可以（Windows MIKU 的共用記憶體也受益）。
-- [ ] 測試：一條執行緒不停讀取，另一條反覆卸離 / 直接替換環，並在返回後立刻把舊的環填成 NaN 再釋放；輸出不得出現 NaN 或其他值。
-- [ ] B 的接口（未實作）：`live_connect` / `live_disconnect`（`live_source.h`）與 C API 的 `dc_live_socket`，目前一律回傳失敗；`dc_live_bus` 先結束 socket 來源再換環。
+- [x] 安全卸離：解碼器只在 `produce()` 裡碰共用的環，期間持有租約（`g_readers`）；`set_live_bus` 先清掉指標、等租約歸零，再換上新的環。返回之後 host 就能釋放記憶體，播放中也可以（Windows MIKU 的共用記憶體也受益）。
+- [x] 測試：一條執行緒不停讀取，另一條反覆卸離 / 直接替換環，並在返回後立刻把舊的環填成 NaN 再釋放；輸出不得出現 NaN 或其他值。
+- [x] B 的接口（未實作）：`live_connect` / `live_disconnect`（`live_source.h`）與 C API 的 `dc_live_socket`，目前一律回傳失敗；`dc_live_bus` 先結束 socket 來源再換環。
 
 **B 之後要補做時（Unix socket 來源）**：路徑在 MIKU 給模組的 `host.liveSocket`；資料是交錯的 float32 立體聲、沒有標頭、可能在任何位元組切開（一個 frame 會跨兩次 `recv`）；`live-relay.js` 會重啟（MIKU 0.5 s 後再開），要自動重連；讀得慢的連線會被丟區塊（積壓超過 1 MB）；取樣率由 MIKU 呼叫 engine 的 `setLiveRate(rate)` 告知（網頁要求 48 kHz，`tap` 訊息回報實際值）；Mac 外殼要回報 `supportsLive = true`，MIKU 才會走這條路。
 
