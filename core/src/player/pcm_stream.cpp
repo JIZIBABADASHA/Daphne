@@ -158,8 +158,9 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
         const bool live = is_live_path(cur_path);
         read_frames = live ? std::clamp(src.rate / 100, 64, kChunk) : kChunk;
         io.limit = live ? io.live_limit(rep.device.frame_rate()) : 0;
-        // what the prefill (and a refill after a resume) takes from the live decoder at once: the ring up to
-        // its limit plus a read, so the decoder holds its target once the ring is full
+        // what the refill after a seek (a resume) takes from the live decoder at once: the ring up to its
+        // limit plus a read, so the decoder holds its target once the ring is full (the prefill reads the
+        // silence the decoder returns until it primes)
         if (live && rep.device.frame_rate() > 0 && io.block > 0)
             set_live_reserve(static_cast<double>(io.limit) / (static_cast<double>(io.block) * rep.device.frame_rate()) +
                              static_cast<double>(read_frames) / src.rate);

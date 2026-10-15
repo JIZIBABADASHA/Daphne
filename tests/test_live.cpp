@@ -141,6 +141,36 @@ TEST_CASE("Live decoder: a seek (the player resuming) skips the backlog beyond t
     CHECK(live_stats().fill <= before);
 }
 
+TEST_CASE("Live decoder: the start and a starve prime at the target; only a seek leaves the reserve too", "[live]") {
+    // Unprimed, the decoder returns silence at once, so the player's ring is already full when it primes: it
+    // takes a read at a time from then on, and the reserve would stay in the decoder on top of the target.
+    // After a seek the player's ring is empty and its refill takes the reserve at once.
+    Bus bus(96000);
+    set_live_reserve(0.1);
+    std::string e;
+    auto d = open_decoder(kLivePath, &e);
+    REQUIRE(d);
+    std::vector<double> out(4096 * 2);
+    d->read(out.data(), 256);   // syncs to the writer (silence)
+    bus.write(24000);           // a burst at the start: 0.5 s
+    REQUIRE(d->read(out.data(), 256) > 0);
+    CHECK(live_stats().fill == Catch::Approx(0.15).margin(0.001));   // the target, not the target plus the reserve
+    // a seek (the player resuming, its ring cleared): the target plus what the refill takes at once
+    bus.write(24000);
+    REQUIRE(d->seek(0));
+    REQUIRE(d->read(out.data(), 256) > 0);
+    CHECK(live_stats().fill == Catch::Approx(0.25).margin(0.001));
+    // a starve: silence (the player's ring stays full of it) until the new target is there, then from that far behind
+    int guard = 0;
+    while (live_stats().starves == 0 && ++guard < 400) d->read(out.data(), 4096);
+    REQUIRE(live_stats().starves == 1);
+    REQUIRE(live_stats().target == Catch::Approx(0.20));
+    bus.write(24000);
+    REQUIRE(d->read(out.data(), 256) > 0);
+    CHECK(live_stats().fill == Catch::Approx(0.20).margin(0.001));
+    set_live_reserve(0);
+}
+
 TEST_CASE("Live decoder: the target grows by a step per stall and comes back down after quiet minutes", "[live]") {
     Bus bus(96000);
     std::string e;

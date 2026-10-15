@@ -4,7 +4,7 @@
 
 ## 跨平台收尾（N25）
 
-- **`cross-platform-plan` 合併回 `main`**：等下面「已知問題」的處理速度偵測、即時輸入延遲、預熱移出處理執行緒，以及拆分步驟 5–7 都完成後一次合併；之後讓 MIKU 的 `Extensions/Daphne` 指向新的版本（MIKU 端另發 PR）。
+- **`cross-platform-plan` 合併回 `main`**：等下面的拆分步驟 5–7 都完成後一次合併（處理速度偵測、即時輸入延遲、預熱移出處理執行緒已完成，見 N4 / N2）；之後讓 MIKU 的 `Extensions/Daphne` 指向新的版本（MIKU 端另發 PR）。
 
 ## 尚未驗證
 
