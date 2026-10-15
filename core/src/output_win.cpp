@@ -8,6 +8,10 @@ namespace daphne {
 
 OutputOpener platform_output_opener() {
     return [](const OutputRequest& r, std::string* error) -> std::unique_ptr<AudioOutput> {
+        if (r.out.api == OutputApi::CoreAudioExclusive || r.out.api == OutputApi::CoreAudioShared) {
+            if (error) *error = "Core Audio is macOS only: use output.api wasapi_exclusive, wasapi_shared or asio";
+            return nullptr;
+        }
         if (r.out.api == OutputApi::Asio) {
             auto a = std::make_unique<AsioOutput>();
             if (!a->open({r.out.device, r.dsd}, r.rate, r.channels, error)) return nullptr;

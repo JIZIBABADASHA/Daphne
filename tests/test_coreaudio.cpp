@@ -165,3 +165,30 @@ TEST_CASE("Core Audio: the player plays a track to the end, exclusive", "[.corea
     CHECK(find(before.uid).hog_pid == -1);
     CHECK(find(before.uid).rate == before.rate);
 }
+
+TEST_CASE("Core Audio: reopened at another rate right after closing (a player restart)", "[.coreaudio]") {
+    const auto before = find("");
+    REQUIRE_FALSE(before.uid.empty());
+    const int want = other_rate(before);
+    if (!want) SKIP("the system output offers one rate only");
+    std::string e;
+    {
+        CoreAudioOutput a;
+        REQUIRE(a.open({before.uid, true, 0}, before.rate, 2, &e));
+        ByteRing ring(static_cast<size_t>(before.rate) * 8);
+        std::atomic<bool> eof{false};
+        REQUIRE(a.start(&ring, &eof, &e));
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        a.stop();
+    }   // closed here, as Player::Impl::restart does before opening the new output
+    CoreAudioOutput b;
+    const bool ok = b.open({before.uid, true, 0}, want, 2, &e);
+    INFO("error: " << e);
+    for (const auto& n : b.take_notes()) UNSCOPED_INFO(n);
+    REQUIRE(ok);
+    CHECK(b.format().rate == want);
+    CHECK(find(before.uid).hog_pid == getpid());
+    b.close();
+    CHECK(find(before.uid).rate == before.rate);
+    CHECK(find(before.uid).hog_pid == -1);
+}
