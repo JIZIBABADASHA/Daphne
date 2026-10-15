@@ -131,3 +131,31 @@ TEST_CASE("WAV float64 decodes bit-exactly", "[decoder]") {
     d.reset();
     std::filesystem::remove(p);
 }
+
+TEST_CASE("FFmpeg decodes what dr_wav decodes, sample for sample", "[decoder][ffmpeg]") {
+    const auto p = temp_path("daphne_test_ffmpeg.wav");
+    const auto want = write_int_wav(p, 16, 30000);
+    auto f = daphne::make_ffmpeg_decoder();
+    std::string err;
+    if (!f->open(p, &err)) {
+        std::filesystem::remove(p);
+        SKIP("built without FFmpeg: " << err);
+    }
+    CHECK(f->info().rate == 44100);
+    CHECK(f->info().channels == 2);
+    std::vector<double> got(want.size() + 2000);
+    size_t at = 0;
+    for (int n; at < want.size() + 1000 && (n = f->read(got.data() + at, 1000)) > 0;) at += size_t(n) * 2;
+    REQUIRE(at == want.size());
+    size_t bad = 0;
+    for (size_t i = 0; i < want.size(); ++i)
+        if (got[i] * 32768.0 != double(want[i])) ++bad;
+    CHECK(bad == 0);
+    // seek: the first sample read is the requested frame's
+    REQUIRE(f->seek(12345));
+    double fr[2];
+    REQUIRE(f->read(fr, 1) == 1);
+    CHECK(fr[0] * 32768.0 == double(want[12345 * 2]));
+    f.reset();
+    std::filesystem::remove(p);
+}
