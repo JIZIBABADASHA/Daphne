@@ -60,15 +60,16 @@
 
 - [x] 重新檢查 macOS 的 `RealtimeScope`：目前是 time-constraint policy（每 10 ms 最多 5 ms），但處理執行緒是一次補滿約 0.5 s 環的吞吐型工作，超過宣告的計算時間可能被系統降級。候選：處理執行緒改用 QoS user-interactive，真正的即時工作只留在 IOProc（環 → 裝置，已是 HAL 的即時執行緒）；`WorkerPool` 的 worker（步驟 0 起跟著拿 time-constraint）一起決定。在 Mac 上加 CPU 負載量 underrun 決定。→ 結論：維持 time-constraint（滿載下比 QoS user-interactive 多拿到約 35% 的處理速度，兩者都沒有 underrun）。
 
-**7c. helper 程序（分支 `mac-helper`）**
+**7c. helper 程序（分支 `mac-helper`，PR #21）✅**
 
 - [x] 一個執行檔，stdin / stdout 每行一個 JSON（與 MIKU 的 `miku-audio` 相同的模式），由 JS 外殼啟動（`helper/main.cpp`，`daphne-helper`，協定見 N4）。掛掉時重啟並接回原本的位置是 JS 外殼的事（7d）。
 - [x] 讓出與取回裝置（A 方案必需）：Mac MIKU 播 YouTube Music、或 MIKU 不在前景且沒有播放時，會檢查 engine 的 `holdsDevice`，呼叫 `stop({ release: true })` 或 `releaseDevice()`；Daphne 要完全放開裝置（還原取樣率與格式、放掉 hog，7a 的 `close()` 已經做到），下一首曲庫的歌再取回。對照 MIKU 的 `native-audio.js`。→ helper 的 `stop` 就是讓出（`verify/helper.py` 在 Mac 上確認 stop 之後沒有裝置被 hog、取樣率還原），下一次 `load` 取回；`holdsDevice` 由 JS 外殼依載入 / 暫停狀態回答（7d）。
 
-**7d. MIKU 的 Mac 外殼（分支另開）**
+**7d. MIKU 的 Mac 外殼（分支 `mac-shell`）**
 
-- [ ] `miku/extension.js`（MIKU 從 `Extensions/<名稱>/miku/` 載入，提供 `core.createEngine`），外殼回報 `supportsLive = false`。不需要改 MIKU。
-- [ ] 驗證：Intel Mac（macOS 11）上用模擬 MIKU 的腳本測 helper、讓出 / 取回裝置。MIKU 的 Mac 版用 Electron 44，需要 macOS 12 以上，介面內的整合測試要等有新的 Mac（或試舊版 Electron 的開發模式）。
+- [x] `miku/extension.js`（MIKU 從 `Extensions/<名稱>/miku/` 載入，提供 `core.createEngine`），外殼回報 `supportsLive = false`。不需要改 MIKU。移植自 Windows 擴充（`DaphneExtension.cs`、`DaphneEngine.cs`、`DaphneOptions.cs`、`DaphnePath.cs`），底下是 helper；頁面檔案共用（`miku/web` symlink）。helper 掛掉時重新啟動並從原位置繼續（一分鐘最多 3 次）。
+- [x] 驗證：Intel Mac（macOS 11）上用模擬 MIKU 的腳本測 helper、讓出 / 取回裝置。（`verify/miku_shell.js`，獨佔與共享都全部通過）
+- [ ] MIKU 介面內的整合測試：MIKU 的 Mac 版用 Electron 44，需要 macOS 12 以上，介面內的整合測試要等有新的 Mac（或試舊版 Electron 的開發模式）。
 
 ### 6. Linux ALSA 輸出（暫緩）
 
@@ -123,4 +124,15 @@
 - helper 底下直接用 C API（與 Windows 擴充相同），沒有另寫一套播放邏輯；JSON 用 nlohmann（已在 `third_party`）。
 - `quit` 一開始在工作執行緒裡 `fclose(stdin)` 想打斷讀取執行緒的 `getline`，Windows 上打斷不了阻塞中的 pipe 讀取（`verify/helper.py` 的 quit 項目逾時）；改成由讀取執行緒自己處理 `quit`。
 - 主程式結束時 stdin 讀到結尾，走與 `quit` 相同的清理：MIKU 當掉也不會把 DAC 留在 hog mode。
+
+**步驟 7d（`mac-shell`）**
+
+- 外殼介面以 MIKU 的 `AudioEngine`（`mac/app/main/audio.js`）為準：它把模組的 engine 當成 backend，用到 `load` / `pause` / `resume` / `seek` / `stop` / `release`、`holdsDevice`、`isPlaying` / `isLoaded` / `position` / `track` / `signal` / `st`、`applyVolume` / `applyDsp` / `applyReplayGain` / `applyOutput`、`listDevices` / `probeDevice`、事件 `changed` / `loading` / `failed` / `trackStarted` / `ended`。Mac 設定頁看核心的 `info` 旗標：`autoSampleRate: false`、`dsdModes`、`maxDsd`、`dsdPcmRate: false`；套用 Bit-perfect 時呼叫 `ext.daphne.bitPerfect`（關掉 Daphne 的升頻、apodize、double-double）。
+- Mac 與 Windows 設定的差異：輸出模式是 `coreaudio` / `coreaudio-exclusive`；沒有 DAC 硬體音量（`hardware` 當成數位音量，與 MIKU 自己的核心相同）；DSD 只有 DoP（獨佔）或 PCM；EQ 多了 `LPQ` / `HPQ` 兩個類型名稱。
+- `verify/miku_shell.js` 第一次跑有 5 項失敗，前 4 項是測試本身：替身的 `peekNext` 一直回傳 B（B 播完又排 B，無限接續），1 秒的檔案在設定變更前就播完了。改成 B 之後沒有下一首、後半段用 8 秒的檔案。
+- 第 5 項是真的問題（2x 升頻打開後裝置留在 44.1 kHz，約 5 次 2 次）：播放器重啟裝置時先關舊的、再開新的；舊的放掉 hog 之後 macOS 還沒把系統輸出移回來，新的找不到「系統輸出」（「no system output device」），播放器的 88.2 kHz 嘗試失敗，退回清單裡的 44.1 kHz，而且失敗的嘗試訊息被丟掉。修正見 N24「系統輸出」（記住剛放掉的那一台 3 秒、最多等 1 秒）。播放器把非最後一次的嘗試失敗也記錄下來會比較好查，列為之後的改進。
+- 同一個空窗期也讓 `probeDevice` 在 stop 之後一瞬間找不到系統輸出：改成退回剛才播放的那一台，再退回清單第一台。
+- stop 之後 0.5 秒查詢時偶爾看到 88.2 kHz（最後的 `bitPerfect` 重啟與 stop 幾乎同時）；2 秒後三次都回到 44.1 kHz，裝置最後都還原。
+- 頁面檔案：MIKU 的載入器只讀模組資料夾下的 `web/`，而且只允許那個資料夾裡的檔案；`miku/web` 是 git 的 symlink（mode 120000），macOS / Linux checkout 時是真的 symlink，Windows（`core.symlinks=false`）是一個內容為路徑的文字檔，Windows 擴充不用它。MIKU 的 Mac 安裝包要把它展開成實際的檔案（之後打包時處理）。
+- Mac 上用免安裝的 Node 20（`~/daphne-test/tools`）跑測試；MIKU 本身（Electron 44）需要 macOS 12，介面內的整合測試仍待新的 Mac。
 

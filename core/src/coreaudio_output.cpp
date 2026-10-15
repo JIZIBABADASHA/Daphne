@@ -26,26 +26,56 @@ std::string khz(double r) {
 
 bool all_digits(const std::string& s) { return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; }); }
 
-AudioDeviceID resolve(const std::string& want, std::string* error) {
-    const auto devs = ca::output_devices();
+// The system output this process last took in exclusive mode, and when it let go of it (resolve).
+std::mutex g_took_m;
+std::string g_took_uid;
+Clock::time_point g_took_at{};
+constexpr auto kTookFor = std::chrono::seconds(3);
+
+void note_released_default(const std::string& uid) {
+    std::lock_guard<std::mutex> l(g_took_m);
+    g_took_uid = uid;
+    g_took_at = Clock::now();
+}
+
+// *taken_default: the device was resolved as "the system output".
+AudioDeviceID resolve(const std::string& want, std::string* error, bool* taken_default) {
+    *taken_default = false;
     if (want.empty() || want == "default") {
-        // While a device is held in hog mode macOS moves the system output elsewhere (or to none): a device this
-        // process holds is still "the system output" it took; one another process holds is why there is none.
+        *taken_default = true;
+        // While a device is held in hog mode macOS moves the system output elsewhere (or to none), and moves it back a
+        // moment after hog mode is released. So "the system output" is: a device this process holds; the one it took
+        // as the system output and released less than kTookFor ago (a player restart closes the output and opens it
+        // again at once: meanwhile the system output is missing, or another device); else the system output, waited
+        // for up to 1 s when there is none. A device another process holds is why there is none.
         const pid_t me = getpid();
+        auto devs = ca::output_devices();
         for (AudioDeviceID d : devs)
             if (ca::hog_owner(d) == me) return d;
-        const AudioDeviceID d = ca::default_output();
-        if (d != kAudioObjectUnknown) return d;
-        for (AudioDeviceID h : devs)
-            if (const pid_t p = ca::hog_owner(h); p != -1) {
-                if (error)
-                    *error = ca::string_prop(h, kAudioObjectPropertyName) + " is in exclusive use by another application (pid " + std::to_string(p) +
-                             ")";
-                return kAudioObjectUnknown;
-            }
+        {
+            std::lock_guard<std::mutex> l(g_took_m);
+            if (!g_took_uid.empty() && Clock::now() - g_took_at < kTookFor)
+                for (AudioDeviceID d : devs)
+                    if (ca::string_prop(d, kAudioDevicePropertyDeviceUID) == g_took_uid) return d;
+        }
+        for (int i = 0;; ++i) {
+            const AudioDeviceID d = ca::default_output();
+            if (d != kAudioObjectUnknown) return d;
+            for (AudioDeviceID h : devs)
+                if (const pid_t p = ca::hog_owner(h); p != -1) {
+                    if (error)
+                        *error = ca::string_prop(h, kAudioObjectPropertyName) + " is in exclusive use by another application (pid " +
+                                 std::to_string(p) + ")";
+                    return kAudioObjectUnknown;
+                }
+            if (i >= 50) break;
+            sleep_ms(20);
+            devs = ca::output_devices();
+        }
         if (error) *error = "no system output device";
         return kAudioObjectUnknown;
     }
+    const auto devs = ca::output_devices();
     if (all_digits(want)) {
         const size_t i = static_cast<size_t>(std::stoul(want));
         if (i < devs.size()) return devs[i];
@@ -77,6 +107,7 @@ struct CoreAudioOutput::Impl {
     AudioDeviceID dev = kAudioObjectUnknown;
     AudioDeviceIOProcID proc = nullptr;
     bool exclusive = false, own_hog = false, io_running = false;
+    bool taken_default = false;   // resolved as "the system output" (resolve)
     double original_rate = 0, rate = 0;
     bool rate_touched = false;
     std::vector<std::pair<AudioStreamID, AudioStreamBasicDescription>> physical_restore;   // formats open() changed
@@ -285,7 +316,7 @@ bool CoreAudioOutput::open(const CoreAudioOptions& opt, int rate, int channels, 
     };
     if (channels <= 0 || rate <= 0) return fail("Core Audio: invalid request");
     std::string e;
-    m.dev = resolve(opt.device, &e);
+    m.dev = resolve(opt.device, &e, &m.taken_default);
     if (m.dev == kAudioObjectUnknown) return fail(e);
     name_ = ca::string_prop(m.dev, kAudioObjectPropertyName);
     if (ca::output_streams(m.dev).empty()) return fail(name_ + " has no output streams");
@@ -454,6 +485,7 @@ void CoreAudioOutput::close() {
     if (m.own_hog && ca::hog_owner(m.dev) == getpid()) {
         const pid_t none = -1;
         ca::set(m.dev, kAudioDevicePropertyHogMode, none);
+        if (m.taken_default) note_released_default(ca::string_prop(m.dev, kAudioDevicePropertyDeviceUID));
     }
     impl_.reset();
 }
