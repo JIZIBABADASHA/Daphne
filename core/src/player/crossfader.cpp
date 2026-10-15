@@ -5,32 +5,73 @@
 
 namespace daphne::playback {
 
-void Crossfader::begin(std::unique_ptr<DspChain> nx, const History& h, int64_t in_total, int64_t abs_out, int cur_delay, int ratio,
-                       int64_t fade) {
-    const int ch = h.ch, dch = fn.ch;
+bool copy_history(const History& h, int64_t from, int64_t to, std::vector<double>* in) {
+    if (from < h.valid_from || to - from > h.cap || from > to) return false;
+    in->resize(static_cast<size_t>(to - from) * h.ch);
+    for (int64_t f = from; f < to; ++f) {
+        const int64_t k = f % h.cap;
+        std::copy(h.buf.begin() + static_cast<std::ptrdiff_t>(k * h.ch), h.buf.begin() + static_cast<std::ptrdiff_t>((k + 1) * h.ch),
+                  in->begin() + static_cast<std::ptrdiff_t>((f - from) * h.ch));
+    }
+    return true;
+}
+
+void Warm::feed(const double* x, int64_t n, int ch) {
+    std::vector<double> o(static_cast<size_t>(chain->max_output_frames()) * out.ch);
+    for (int64_t f = 0; f < n;) {
+        if (cancel && cancel->load(std::memory_order_relaxed)) return;   // dropped: its state does not matter
+        const int k = static_cast<int>(std::min<int64_t>(kChunk, n - f));
+        const int got = chain->process(x + static_cast<size_t>(f) * ch, k, o.data());
+        const int d = static_cast<int>(std::min<int64_t>(drop, got));
+        drop -= d;
+        out.push(o.data() + static_cast<size_t>(d) * out.ch, got - d);
+        f += k;
+    }
+    in_done += n;
+}
+
+Warm Crossfader::prepare(std::unique_ptr<DspChain> nx, const History& h, int64_t in_total, int64_t abs_out, int cur_delay, int ratio,
+                         int dch, std::vector<double>* in) {
     const int64_t have = std::min<int64_t>(in_total - h.valid_from, h.cap);
     const int64_t start = in_total - have;
-    fn.clear();
-    std::vector<double> in(static_cast<size_t>(kChunk) * ch);
-    std::vector<double> o(static_cast<size_t>(nx->max_output_frames()) * dch);
-    const int dc = cur_delay, dn = nx->content_delay();
-    const int64_t target = abs_out - dc + dn;   // next-chain index of the content the current chain plays next
-    drop_next = target - start * ratio;
-    if (drop_next < 0) {
-        fn.push_zeros(static_cast<int>(-drop_next));
-        drop_next = 0;
+    copy_history(h, start, in_total, in);
+    Warm w;
+    w.out.ch = dch;
+    w.target = abs_out - cur_delay + nx->content_delay();   // next-chain index of the content the current chain plays next
+    w.drop = w.target - start * ratio;
+    if (w.drop < 0) {
+        w.out.push_zeros(static_cast<int>(-w.drop));
+        w.drop = 0;
     }
-    for (int64_t f = start; f < in_total;) {
-        const int n = static_cast<int>(std::min<int64_t>(kChunk, in_total - f));
-        for (int i = 0; i < n; ++i) {
-            const int64_t k = (f + i) % h.cap;
-            std::copy(h.buf.begin() + static_cast<std::ptrdiff_t>(k * ch), h.buf.begin() + static_cast<std::ptrdiff_t>((k + 1) * ch),
-                      in.begin() + static_cast<std::ptrdiff_t>(i) * ch);
-        }
-        const int got = nx->process(in.data(), n, o.data());
-        push_next(o.data(), got);
-        f += n;
+    w.in_done = start;
+    w.chain = std::move(nx);
+    return w;
+}
+
+void Crossfader::begin(std::unique_ptr<DspChain> nx, const History& h, int64_t in_total, int64_t abs_out, int cur_delay, int ratio,
+                       int64_t fade) {
+    std::vector<double> in;
+    Warm w = prepare(std::move(nx), h, in_total, abs_out, cur_delay, ratio, fn.ch, &in);
+    w.feed(in.data(), in_total - w.in_done, h.ch);
+    begin(std::move(w), abs_out, cur_delay, fade);
+}
+
+void Crossfader::begin(Warm w, int64_t abs_out, int cur_delay, int64_t fade) {
+    const int dc = cur_delay, dn = w.chain->content_delay();
+    // the current chain has played on since the warm-up started: its output up to there is not needed
+    int64_t late = abs_out - dc + dn - w.target;
+    if (late < 0) {   // (not after a seek, which ends the warm-up) earlier content: zeros as with a short history
+        Fifo z;
+        z.ch = w.out.ch;
+        z.push_zeros(static_cast<int>(-late));
+        z.push(w.out.data(), w.out.frames());
+        w.out = std::move(z);
+        late = 0;
     }
+    const int pop = static_cast<int>(std::min<int64_t>(late, w.out.frames()));
+    w.out.pop(pop);
+    fn = std::move(w.out);
+    drop_next = w.drop + (late - pop);
     // frames of the current chain still queued for output count as already played
     fc.clear();
     if (carry.frames() > 0) {
@@ -38,7 +79,7 @@ void Crossfader::begin(std::unique_ptr<DspChain> nx, const History& h, int64_t i
         carry.clear();
     }
     delay_shift = dn - dc;
-    next = std::move(nx);
+    next = std::move(w.chain);
     len = fade;
     pos = 0;
     fading = true;

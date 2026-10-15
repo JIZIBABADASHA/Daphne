@@ -3,6 +3,7 @@
 // the playing one by content delay and crossfaded in (raised cosine, 50 ms). Also the input history the
 // warm-up needs, and the re-quantization of faded frames on integer devices (N21).
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -55,6 +56,24 @@ private:
     std::unique_ptr<dsp::Quantizer> q_;
 };
 
+// A rebuilt chain being warmed up on the recent input (N4). Fed in rounds: the first round on a background
+// thread with what History holds, the next ones with what was decoded meanwhile, the last few frames by
+// the processing thread; Crossfader::begin then aligns it to the playing chain.
+struct Warm {
+    std::unique_ptr<DspChain> chain;
+    Fifo out;                // the chain's output from next-chain index `target` on
+    int64_t target = 0;      // the content the playing chain played next when the warm-up started
+    int64_t in_done = 0;     // input frame it is fed up to (stream timeline)
+    int64_t drop = 0;        // chain output frames before `target`, still to drop
+    const std::atomic<bool>* cancel = nullptr;   // set: feed stops at the next chunk (the warm-up is dropped)
+
+    // n input frames (interleaved, ch channels), the ones at in_done ..
+    void feed(const double* x, int64_t n, int ch);
+};
+
+// Input frames from .. to - 1 of the history into in; false when it no longer holds them all.
+bool copy_history(const History& h, int64_t from, int64_t to, std::vector<double>* in);
+
 class Crossfader {
 public:
     Fifo fc, fn;                     // what the current / next chain produced, not mixed yet
@@ -80,6 +99,13 @@ public:
     // output frames per input frame; fade: the crossfade's length in output frames.
     void begin(std::unique_ptr<DspChain> nx, const History& h, int64_t in_total, int64_t abs_out, int cur_delay, int ratio,
                int64_t fade);
+
+    // The warm-up in rounds: prepare() takes nx and the history it is to be fed first (into `in`, up to
+    // in_total); begin() starts the crossfade once it has been fed up to the input decoded now, aligned
+    // to what the current chain plays next (abs_out). One prepare + feed + begin is the begin above.
+    static Warm prepare(std::unique_ptr<DspChain> nx, const History& h, int64_t in_total, int64_t abs_out, int cur_delay, int ratio,
+                        int dch, std::vector<double>* in);
+    void begin(Warm w, int64_t abs_out, int cur_delay, int64_t fade);
 
     // Mixes what both chains have produced into out (room frames at most); returns frames.
     int mix(double* out, int room, FadeQuantizer& fq, const DeviceFormat& dev, bool modulated);

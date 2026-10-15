@@ -3,13 +3,32 @@
 // the settings, and the interleaved frame FIFO of the crossfade and the gapless join.
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
 #include "daphne/engine/player.h"
 #include "daphne/engine/settings.h"
+#include "daphne/platform/platform.h"
 
 namespace daphne::playback {
+
+// For a task started with std::async: MSVC runs those on a thread pool and reuses its threads, so the
+// priority and the floating-point control a task sets would stay with the thread for the next task (a
+// filter design, say). Restores both when the task ends (the pool's threads run at normal priority).
+class PoolThreadScope {
+public:
+    PoolThreadScope() : fp_(platform::fp_control()) {}
+    ~PoolThreadScope() {
+        platform::set_fp_control(fp_);
+        platform::set_thread_priority(platform::Priority::Normal);
+    }
+    PoolThreadScope(const PoolThreadScope&) = delete;
+    PoolThreadScope& operator=(const PoolThreadScope&) = delete;
+
+private:
+    uint64_t fp_;
+};
 
 constexpr int kChunk = 4096;           // source frames the processing thread decodes at a time
 constexpr double kFadeSeconds = 0.05;  // crossfade to a rebuilt chain
