@@ -44,12 +44,14 @@ void Player::Impl::update_diag() {
     const OutputStats* st = io.dev ? &io.dev->stats() : nullptr;
     std::snprintf(b, sizeof b,
                   "{\"ring\":%zu,\"ring_cap\":%zu,\"pend\":%zu,\"eof\":%d,\"fading\":%d,\"building\":%d,\"paused\":%d,"
-                  "\"dev_paused\":%d,\"callbacks\":%lld,\"underruns\":%lld,\"drained\":%d,\"failed\":%d,\"late\":%lld,\"tl.abs_out\":%lld,\"in\":%lld}",
+                  "\"dev_paused\":%d,\"callbacks\":%lld,\"underruns\":%lld,\"drained\":%d,\"failed\":%d,\"late\":%lld,\"abs_out\":%lld,\"in\":%lld,"
+                  "\"rt\":%.2f}",
                   io.ring ? io.ring->readable() : 0, io.ring ? io.ring->capacity() : 0, io.pend - io.pend_off, io.eof.load() ? 1 : 0, xf.fading ? 1 : 0,
                   building.valid() || warming.valid() ? 1 : 0, want_pause.load() ? 1 : 0, io.dev && io.dev->paused() ? 1 : 0,
                   st ? static_cast<long long>(st->callbacks.load()) : -1LL, st ? static_cast<long long>(st->underruns.load()) : -1LL,
                   io.dev && io.dev->drained() ? 1 : 0, io.dev && io.dev->failed() ? 1 : 0,
-                  st ? static_cast<long long>(st->late_callbacks.load()) : -1LL, static_cast<long long>(tl.abs_out), static_cast<long long>(in_total));
+                  st ? static_cast<long long>(st->late_callbacks.load()) : -1LL, static_cast<long long>(tl.abs_out), static_cast<long long>(in_total),
+                  throughput.factor());
     report.set_diag(b);
 }
 
@@ -92,6 +94,7 @@ void Player::Impl::check_switch() {
             tl.track_origin_in = w.at_in;
         }
         const bool cross = w.cross;
+        if (cross && cross_join.active() && cross_join.old == w.old_chain.get()) cross_join.owned = std::move(w.old_chain);   // its tail is still being made
         rep.source = w.info;
         cur_path = w.path;
         tl.switches.pop_front();
@@ -115,6 +118,7 @@ void Player::Impl::do_seek(double sec) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     io.ring->clear();
     io.pend = io.pend_off = 0;
+    cross_join.clear();   // the old chain's tail is not played after a seek
     std::string e;
     check_switch();   // a track heard just now is the one the seek is in
     if (!tl.switches.empty()) {
@@ -188,6 +192,14 @@ void Player::Impl::service_transport() {
         if (r > meter_r.load()) meter_r = r;
     }
     check_switch();
+    if (throughput.warn()) {
+        char b[256];
+        std::snprintf(b, sizeof b,
+                      "processing runs at %.2fx real time (it needs %.1fx): the device will play gaps; a shorter filter, "
+                      "no double-double convolution or a lower output rate helps",
+                      throughput.factor(), Throughput::kWarn);
+        event(b);
+    }
     update_diag();
 }
 
