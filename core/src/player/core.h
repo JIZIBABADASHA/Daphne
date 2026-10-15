@@ -32,6 +32,7 @@
 #include "change_plan.h"
 #include "common.h"
 #include "crossfader.h"
+#include "join.h"
 #include "output_session.h"
 #include "report.h"
 #include "timeline.h"
@@ -111,6 +112,7 @@ struct Player::Impl {
     std::vector<uint8_t> dsd_bytes;
     bool flushed = false;
     Crossfader xf;                     // a rebuilt chain fading in; the chain output carried over
+    Join cross_join;                   // a gapless join through a new chain being made (cross_switch)
     History hist;                      // recent input, for a rebuilt chain's warm-up
     FadeQuantizer fq;                  // fades on integer devices (N21)
     // device restart: fade the last chunk out, the first frames after the restart in
@@ -211,6 +213,8 @@ struct Player::Impl {
     // ahead) is overlap-added so that B's first sample comes exactly one source period after A's last, its
     // pre-ringing over A's end. The hearing side follows when B is heard (check_switch).
     void cross_switch(std::unique_ptr<Decoder> nd, std::unique_ptr<DspChain> nc, const std::filesystem::path& np);
+    // The next chunk of the join into dsp (frames); 0 when it is over (the rest is in the carry).
+    int join_produce();
     // The track just switched to (switches.back()) has its own headroom (ReplayGain per track): applied from its
     // first decoded sample on (the gain stage ramps over 20 ms); the old value is kept for an undo.
     void apply_headroom(std::optional<double> h);

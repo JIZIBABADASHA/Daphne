@@ -53,6 +53,7 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
         xf.fading = false;
         xf.next.reset();
         xf.clear();
+        cross_join.clear();
         io.dev = open_output({out, s.output.buffer_ms, rates[attempt].rate, src.channels, rates[attempt].native}, &e);
         if (!io.dev) {
             if (fail_attempt()) return false;
@@ -206,6 +207,10 @@ bool Player::Impl::produce() {
             std::copy(xf.carry.data(), xf.carry.data() + static_cast<size_t>(n) * dch, dsp.begin());
             xf.carry.pop(n);
             break;
+        }
+        if (cross_join.active()) {
+            n = join_produce();
+            continue;   // (0: the join is over, its last frames are in the carry)
         }
         const int got = dec->read(pcm.data(), kChunk);
         if (got > 0) {
