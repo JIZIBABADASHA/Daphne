@@ -13,9 +13,12 @@
 #include <random>
 #include <thread>
 
+#include <nlohmann/json.hpp>
+
 #include "daphne/engine/live_source.h"
 #include "daphne/engine/player.h"
 #include "daphne/engine/settings.h"
+#include "../core/src/player/throughput.h"
 #include "fake_output.h"
 #include "test_util.h"
 
@@ -193,6 +196,22 @@ TEST_CASE("Player: a 24-bit source at its own rate is sent bit-perfectly", "[pla
     for (size_t i = a->x.size(); i < y.size(); ++i) diff += y[i] != 0;
     CHECK(diff == 0);
     r.dump("bitperfect");
+}
+
+TEST_CASE("Player: the debug JSON for the host's log keeps its keys", "[player]") {
+    Rig r;
+    r.dev->speed = 4.0;
+    r.sources["a"] = int24_noise(44100, 2, 4 * 44100, 7);
+    REQUIRE(r.start("a", Settings{}));
+    sleep_s(0.7);   // updated every 500 ms
+    const auto j = nlohmann::json::parse(r.player->debug_json(), nullptr, false);
+    r.player->stop();
+    r.finish();
+    REQUIRE(j.is_object());
+    for (const char* k : {"ring", "ring_cap", "pend", "eof", "fading", "building", "paused", "dev_paused", "callbacks", "underruns",
+                          "drained", "failed", "late", "abs_out", "in"})
+        CHECK(j.contains(k));
+    CHECK(j["abs_out"].get<int64_t>() > 0);
 }
 
 TEST_CASE("Player: upsampling keeps the speed and the pitch", "[player]") {
@@ -547,4 +566,44 @@ TEST_CASE("Player: the dsd core sends PCM as DoP", "[player][dsd]") {
     CHECK(bad == 0);
     CHECK(n >= 176400 / 2);
     r.dump("dsd_core");
+}
+
+TEST_CASE("Throughput: the factor per 2 s window, one warning per slow stretch", "[player][throughput]") {
+    using playback::Throughput;
+    using namespace std::chrono_literals;
+    Throughput t;
+    CHECK(t.factor() == 0.0);
+    t.add(100ms, 1.0);
+    CHECK(t.factor() == 0.0);   // the window is not full yet
+    t.add(100ms, 1.0);
+    CHECK(t.factor() == Catch::Approx(10.0));
+    CHECK_FALSE(t.warn());
+    // slow: one window below 1.2x is not enough, two are
+    t.add(2000ms, 2.0);
+    CHECK(t.factor() == Catch::Approx(1.0));
+    CHECK_FALSE(t.warn());
+    t.add(2500ms, 2.0);
+    CHECK(t.warn());
+    CHECK_FALSE(t.warn());   // once
+    t.add(2500ms, 2.0);
+    t.add(2500ms, 2.0);
+    CHECK_FALSE(t.warn());   // still the same stretch
+    // recovered above 1.5x, then slow again: warned again
+    t.add(1000ms, 2.0);
+    t.add(2500ms, 2.0);
+    t.add(2500ms, 2.0);
+    CHECK(t.warn());
+}
+
+TEST_CASE("Player: the report says how fast the chain runs", "[player][throughput]") {
+    Rig r;
+    use_float_device(*r.dev);
+    r.sources["sine"] = sine(44100, 1000.0, 3.0);
+    Settings s;
+    s.output.rate = "2x";
+    s.filter.taps = 256;
+    REQUIRE(r.start("sine", s));
+    const auto rep = r.finish();
+    CHECK(rep.realtime_factor > 1.5);   // a short filter: far faster than real time on any machine
+    CHECK_FALSE(r.saw("real time (it needs"));
 }
