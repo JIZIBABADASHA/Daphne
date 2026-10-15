@@ -296,6 +296,8 @@ DC_API int dc_state(dc_player* p, char* out, int len) {
         if (const auto ls = daphne::live_stats(); ls.active && p->player)
             j["live"] = {{"fill", ls.fill}, {"read", ls.read}, {"resyncs", ls.resyncs}, {"starves", ls.starves}, {"adjust", ls.adjust}};
         if (p->player) {
+            // the report is the one of the last start / change; the speed is measured on as it plays
+            j["report"]["realtime"] = p->player->realtime_factor();
             j["asio_rates"] = p->player->asio_rates();
             j["debug"] = json::parse(p->player->debug_json(), nullptr, false);
         }

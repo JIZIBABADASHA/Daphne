@@ -104,6 +104,9 @@ public:
     // Source frame being heard (approximately), in the current track.
     int64_t position() const;
     double position_seconds() const;
+    // The processing speed against real time while playing (PlayReport::realtime_factor, updated every 2 s of
+    // audio; 0 before the first measurement and for DSD files sent directly).
+    double realtime_factor() const;
 
     // Transport (handled by the DSP thread at chunk boundaries; the device stays open).
     // Pause: the device keeps running, PCM fades out (20 ms), DSD gets DSD / DoP silence.

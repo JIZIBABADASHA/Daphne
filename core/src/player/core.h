@@ -129,6 +129,7 @@ struct Player::Impl {
     std::shared_ptr<std::atomic<bool>> build_cancel;
     bool build_designs = false;        // the background build designs a filter (not only loads it from the cache)
     Throughput throughput;             // the chain's speed against real time (PCM)
+    std::atomic<double> rt_factor{0};  // its last factor, for other threads (Player::realtime_factor)
 
     // ------------------------------------------------------------------ small helpers
 

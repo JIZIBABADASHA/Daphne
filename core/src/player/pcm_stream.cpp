@@ -271,6 +271,7 @@ bool Player::Impl::produce() {
     work += Throughput::Clock::now() - t2;
     throughput.add(work, carried || crate <= 0 ? 0.0 : static_cast<double>(n) / crate);
     rep.realtime_factor = throughput.factor();
+    rt_factor.store(rep.realtime_factor, std::memory_order_relaxed);
     io.pend_off = 0;
     tl.abs_out += n;
     rep.frames_played += n;

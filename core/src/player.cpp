@@ -52,6 +52,7 @@ bool Player::finished() const { return impl_->done; }
 
 int64_t Player::position() const { return impl_->pos; }
 double Player::position_seconds() const { return impl_->pos_sec; }
+double Player::realtime_factor() const { return impl_->rt_factor.load(std::memory_order_relaxed); }
 
 void Player::pause(bool paused) { impl_->want_pause = paused; }
 bool Player::paused() const { return impl_->want_pause; }
