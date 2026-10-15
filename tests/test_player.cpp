@@ -450,6 +450,7 @@ TEST_CASE("Player: live input plays the producer's stream", "[player][live]") {
             const int cap = 96000;
             std::vector<uint8_t> mem(16 + static_cast<size_t>(cap) * 8, 0);
             set_live_bus(mem.data(), cap, 48000);
+            live_forget();
             std::atomic<bool> stop{false};
             std::thread producer([&] {
                 auto* index = reinterpret_cast<uint32_t*>(mem.data());
@@ -508,6 +509,7 @@ TEST_CASE("Player: a live source resumed after a pause goes back to the writer",
     const int cap = 96000;
     std::vector<uint8_t> mem(16 + static_cast<size_t>(cap) * 8, 0);
     set_live_bus(mem.data(), cap, 48000);
+    live_forget();
     std::atomic<bool> stop{false};
     std::thread producer([&] {   // writes on through the pause, as the page does
         auto* index = reinterpret_cast<uint32_t*>(mem.data());

@@ -20,6 +20,7 @@ struct Bus {
     explicit Bus(int cap) : cap(cap), mem(16 + static_cast<size_t>(cap) * 8, 0) {
         set_live_bus(mem.data(), cap, 48000);
         set_live_reserve(0);   // no player here (a player test may have set it)
+        live_forget();         // the target learned by an earlier test
     }
     ~Bus() { set_live_bus(nullptr, 0, 0); }
     uint32_t& index() { return *reinterpret_cast<uint32_t*>(mem.data()); }
@@ -98,13 +99,17 @@ TEST_CASE("Live decoder: lapped by the writer it restarts close to it; a starve 
     d->read(out.data(), 1024);
     CHECK(live_stats().resyncs == 1);
 
-    // drain what is there, then nothing more is written: after a short wait, 5 ms (240 frames) of silence
+    // drain what is there, then nothing more is written: the read that runs dry returns, after a short wait,
+    // 5 ms (240 frames) of silence
     bus.write(20000);
-    int guard = 0;
-    while (d->read(out.data(), 4096) > 240 && ++guard < 100) {}
-    const auto t0 = std::chrono::steady_clock::now();
-    const int n = d->read(out.data(), 4096);
-    const auto waited = std::chrono::steady_clock::now() - t0;
+    int guard = 0, n = 0;
+    std::chrono::steady_clock::duration waited{};
+    for (;;) {
+        const auto t0 = std::chrono::steady_clock::now();
+        n = d->read(out.data(), 4096);
+        waited = std::chrono::steady_clock::now() - t0;
+        if (n <= 240 || ++guard >= 100) break;
+    }
     CHECK(n == 240);
     for (int i = 0; i < 2 * n; ++i) CHECK(out[static_cast<size_t>(i)] == 0.0);
     CHECK(waited >= std::chrono::milliseconds(15));
@@ -147,15 +152,19 @@ TEST_CASE("Live decoder: the target grows by a step per stall and comes back dow
     d->read(out.data(), 1024);   // syncs
     bus.write(20000);
     REQUIRE(d->read(out.data(), 1024) > 0);
-    // a stall: drained, then several silences in a row; one step for all of them
+    // a stall: read until it runs dry, then on for a while; one starve and one step for all of it (it waits,
+    // silent, until it holds the target again)
     auto stall = [&] {
+        const int64_t before = live_stats().starves;
         int guard = 0;
-        while (d->read(out.data(), 4096) > 240 && ++guard < 200) {}
-        for (int i = 0; i < 3; ++i) d->read(out.data(), 4096);
+        while (live_stats().starves == before && ++guard < 400) d->read(out.data(), 4096);
+        for (int i = 0; i < 3; ++i) {
+            CHECK(d->read(out.data(), 4096) == 4096);   // silence at once, not 5 ms after a wait
+            for (int k = 0; k < 2 * 4096; ++k) REQUIRE(out[static_cast<size_t>(k)] == 0.0);
+        }
+        CHECK(live_stats().starves == before + 1);
     };
-    const int64_t s0 = live_stats().starves;
     stall();
-    CHECK(live_stats().starves >= s0 + 3);
     CHECK(live_stats().target == Catch::Approx(0.20));
     bus.write(20000);
     REQUIRE(d->read(out.data(), 1024) > 0);   // data again: the stall is over
@@ -188,6 +197,36 @@ TEST_CASE("Live decoder: the target grows by a step per stall and comes back dow
     CHECK(live_stats().target == Catch::Approx(0.25));    // about 30 s later: the next
     play(150.0);
     CHECK(live_stats().target == Catch::Approx(0.15));    // and no lower than 0.15
+}
+
+TEST_CASE("Live decoder: the learned target is kept for the next live source; after a starve it refills first", "[live]") {
+    Bus bus(96000);
+    std::string e;
+    std::vector<double> out(4096 * 2);
+    {
+        auto d = open_decoder(kLivePath, &e);
+        REQUIRE(d);
+        bus.write(20000);
+        d->read(out.data(), 1024);
+        bus.write(20000);
+        REQUIRE(d->read(out.data(), 1024) > 0);
+        int guard = 0;
+        while (live_stats().starves == 0 && ++guard < 400) d->read(out.data(), 4096);
+        CHECK(live_stats().target == Catch::Approx(0.20));
+        // not enough yet: silence, no second starve
+        bus.write(4800);   // 0.1 s, below the 0.20 s target
+        CHECK(d->read(out.data(), 1024) == 1024);
+        CHECK(out[0] == 0.0);
+        CHECK(live_stats().starves == 1);
+        bus.write(9600);   // now 0.3 s: it plays on, from 0.2 s behind the writer
+        REQUIRE(d->read(out.data(), 1024) > 0);
+        CHECK(live_stats().fill == Catch::Approx(0.20).margin(0.001));
+    }
+    auto d2 = open_decoder(kLivePath, &e);   // the next YouTube Music session
+    REQUIRE(d2);
+    CHECK(live_stats().target == Catch::Approx(0.20));
+    live_forget();
+    CHECK(live_stats().target == Catch::Approx(0.15));
 }
 
 TEST_CASE("Live decoder: without the host's ring it does not open", "[live]") {

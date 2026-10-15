@@ -15,6 +15,8 @@ namespace {
 // 2048-frame blocks every 40 or 60 ms, measured at most 109 ms behind its average pace: 0.15 s covers that,
 // the 10 ms reads and a margin. A busy page stalls longer now and then (304 ms measured): each starve raises
 // the target by 50 ms, up to 0.30 s, and 60 s without one lowers it by 25 ms, then every 30 s, back to 0.15 s.
+// What it learns is kept for the process: the next live source (the next YouTube Music session) starts there.
+// After a starve it waits until it holds the target again before playing on: one gap, not a run of them.
 constexpr double kTargetMin = 0.15;
 constexpr double kTargetMax = 0.30;
 constexpr double kTargetUp = 0.05;     // per starve (once for a whole stall, not per silence returned)
@@ -57,8 +59,7 @@ public:
         info_.frames = -1;
         pos_ = 0;
         synced_ = primed_ = jump_ = starving_ = false;
-        target_ = kTargetMin, quiet_ = 0;
-        g_target = target_;
+        target_ = g_target.load(), quiet_ = 0;   // what the last live source learned
         if (!open_) g_open++;
         open_ = true;
         g_resyncs = 0, g_starves = 0, g_read = 0;
@@ -94,13 +95,14 @@ public:
                 const int s = std::min(frames, primed_ ? std::max(1, info_.rate / 200) : frames);
                 std::memset(out, 0, static_cast<size_t>(s) * 2 * sizeof(double));
                 if (primed_) {
+                    // ran dry: more buffer from now on, and silence until it holds that much again (produce primes
+                    // at the target, the player's refill on top, and skips what came in beyond it)
                     g_starves++;
-                    if (!starving_) {   // a new stall: more buffer from now on
-                        starving_ = true;
-                        target_ = std::min(kTargetMax, target_ + kTargetUp);
-                        g_target = target_;
-                    }
+                    starving_ = true;
+                    target_ = std::min(kTargetMax, target_ + kTargetUp);
+                    g_target = target_;
                     quiet_ = 0;
+                    primed_ = false;
                 }
                 return advance(s);
             }
@@ -193,7 +195,7 @@ private:
     double frac_ = 0;     // between read_ and read_ + 1
     bool synced_ = false, primed_ = false;
     bool jump_ = false;   // seek(): back to the writer at the next read
-    bool starving_ = false;   // the last read returned silence (one target step per stall)
+    bool starving_ = false;   // ran dry, waiting to hold the target again
     double target_ = kTargetMin;
     int64_t quiet_ = 0;   // source frames read since the last starve or step down
     double adj_ = 0;      // smoothed rate correction
@@ -212,6 +214,8 @@ void set_live_rate(int rate) {
 }
 
 void set_live_reserve(double seconds) { g_reserve = std::clamp(seconds, 0.0, 1.0); }
+
+void live_forget() { g_target = kTargetMin; }
 
 LiveStats live_stats() {
     LiveStats s;

@@ -40,10 +40,13 @@ struct LiveStats {
     int64_t resyncs = 0;    // restarts close to the writer
     int64_t starves = 0;    // silence returned while running (the producer fell behind)
     double adjust = 0;      // the read rate correction (relative)
-    double target = 0;      // the buffer it aims for now (seconds; 0.15, more after starves, N2)
+    double target = 0;      // the buffer it aims for now (seconds; 0.15, more after starves, kept between sources, N2)
     bool active = false;    // a live decoder is open
 };
 LiveStats live_stats();
+// The live decoder keeps the jitter buffer target it has learned for the life of the process (a later live
+// source starts from it); this goes back to the minimum (tests).
+void live_forget();
 
 std::unique_ptr<Decoder> make_live_decoder();
 
