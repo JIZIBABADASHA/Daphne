@@ -53,6 +53,7 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
         xf.fading = false;
         xf.next.reset();
         xf.clear();
+        take_warm();   // a crossfade warming up: the chain is built anew for the settings below
         io.dev = open_output({out, s.output.buffer_ms, rates[attempt].rate, src.channels, rates[attempt].native}, &e);
         if (!io.dev) {
             if (fail_attempt()) return false;
@@ -186,8 +187,45 @@ void Player::Impl::finish_fade() {
 }
 
 void Player::Impl::begin_crossfade(std::unique_ptr<DspChain> nx) {
-    xf.begin(std::move(nx), hist, in_total, tl.abs_out, cur->content_delay(), ratio,
-             std::max<int64_t>(1, static_cast<int64_t>(crate * kFadeSeconds)));
+    std::vector<double> in;
+    Warm w = Crossfader::prepare(std::move(nx), hist, in_total, tl.abs_out, cur->content_delay(), ratio, dch, &in);
+    warm_rounds = 0;   // (poll_warm counts the rounds)
+    launch_warm(std::move(w), std::move(in));
+}
+
+// Up to 3 s of input through a long filter can take longer than the ring holds: the warm-up runs on a
+// background thread while the current chain plays on (N4).
+void Player::Impl::launch_warm(Warm w, std::vector<double> in) {
+    ++warm_rounds;
+    warm_last = static_cast<int64_t>(in.size() / static_cast<size_t>(ch));
+    warming = std::async(std::launch::async, [w = std::move(w), in = std::move(in), ch = ch]() mutable {
+        platform::set_thread_priority(platform::Priority::BelowNormal);
+        platform::set_fp_control(platform::with_flush_to_zero(platform::fp_control()));   // as on the processing thread
+        w.feed(in.data(), static_cast<int64_t>(in.size() / static_cast<size_t>(ch)), ch);
+        return std::move(w);
+    });
+}
+
+void Player::Impl::poll_warm() {
+    constexpr int kRounds = 4;
+    if (!warming.valid() || warming.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    Warm w = warming.get();
+    const int64_t fade = std::max<int64_t>(1, static_cast<int64_t>(crate * kFadeSeconds));
+    std::vector<double> in;
+    const int64_t left = in_total - w.in_done;   // decoded during the round
+    if (!copy_history(hist, w.in_done, in_total, &in)) {
+        // the history no longer holds it (a slow round at a high source rate): from the start, here
+        w.chain->reset();
+        xf.begin(std::move(w.chain), hist, in_total, tl.abs_out, cur->content_delay(), ratio, fade);
+    } else if (left > kChunk && left < warm_last && warm_rounds < kRounds) {
+        // another round while they get shorter (the background runs faster than the input comes)
+        launch_warm(std::move(w), std::move(in));
+        return;
+    } else {
+        // the rest here: at most a chunk, or (a chain slower than the input) at most what the last round had
+        w.feed(in.data(), left, ch);
+        xf.begin(std::move(w), tl.abs_out, cur->content_delay(), fade);
+    }
     tmp_n.assign(static_cast<size_t>(xf.next->max_output_frames()) * dch, 0.0);
     tmp_c.assign(static_cast<size_t>(cur->max_output_frames()) * dch, 0.0);
     const size_t need = std::max(tmp_n.size(), tmp_c.size());
@@ -195,6 +233,11 @@ void Player::Impl::begin_crossfade(std::unique_ptr<DspChain> nx) {
         dsp.resize(need);
         io.bytes.resize(dsdenc ? dsdenc->max_bytes(static_cast<int>(need / dch)) : need / dch * io.block);
     }
+}
+
+std::unique_ptr<DspChain> Player::Impl::take_warm() {
+    if (!warming.valid()) return nullptr;
+    return warming.get().chain;
 }
 
 bool Player::Impl::produce() {

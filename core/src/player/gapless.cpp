@@ -158,7 +158,7 @@ bool Player::Impl::try_gapless() {
             // track after a 16-bit one on a 16-bit device needs the quantizer): gapless only on the same
             // output, joined through the new chain built ahead for the current settings; otherwise the track
             // ends and the host loads the next one
-            if (!p || !p->done || !p->chain || xf.fading || building.valid() || p->key != TrackQueue::chain_key(chain_settings(s, run_osr), chain_fmt))
+            if (!p || !p->done || !p->chain || xf.fading || building.valid() || warming.valid() || p->key != TrackQueue::chain_key(chain_settings(s, run_osr), chain_fmt))
                 return false;
             cross_switch(std::move(nd), std::move(p->chain), np);
             apply_headroom(nh);
