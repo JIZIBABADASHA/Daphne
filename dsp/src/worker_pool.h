@@ -3,12 +3,16 @@
 // resampler's phases): created once, woken for every block, so no thread is created while
 // playing. run(n, f) calls f(i) for every i in [0, n) on the workers and the calling thread and
 // returns when all are done. Each index is one independent job, so results do not depend on the
-// thread count. Workers run at above-normal priority.
+// thread count. Workers run at above-normal priority, and in the realtime helper class while they
+// work for a realtime thread (platform::in_realtime_scope): a pool built for a chain warmed up in the
+// background serves the processing thread once the chain is swapped in. The class changes only when
+// the caller's does, not for every block.
 
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -46,6 +50,7 @@ public:
             ctx_ = &f;
             call_ = [](const void* c, int i) { (*static_cast<const F*>(c))(i); };
             n_ = n;
+            rt_ = platform::in_realtime_scope();
             next_.store(0);
             done_.store(0);
             ++gen_;
@@ -69,14 +74,19 @@ private:
     void loop() {
         platform::set_thread_priority(platform::Priority::AboveNormal);
         long long seen = 0;
+        std::optional<platform::RealtimeHelperScope> rt;
         for (;;) {
+            bool want_rt = false;
             {
                 std::unique_lock<std::mutex> l(m_);
                 start_.wait(l, [&] { return stop_ || gen_ != seen; });
                 if (stop_) return;
                 seen = gen_;
+                want_rt = rt_;
                 ++busy_;
             }
+            if (want_rt && !rt) rt.emplace();
+            else if (!want_rt && rt) rt.reset();
             work();
             {
                 std::lock_guard<std::mutex> l(m_);
@@ -93,6 +103,7 @@ private:
     long long gen_ = 0;
     int busy_ = 0;              // workers inside a job (the caller waits for them to leave it)
     int n_ = 0;
+    bool rt_ = false;           // the caller of this run is a realtime thread
     std::atomic<int> next_{0}, done_{0};
     const void* ctx_ = nullptr;
     void (*call_)(const void*, int) = nullptr;

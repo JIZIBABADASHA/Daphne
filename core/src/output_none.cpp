@@ -12,6 +12,11 @@ OutputOpener platform_output_opener() {
     };
 }
 
+// nothing to describe yet: the defaults (an exclusive PCM device, as the tests' fake one)
+OutputCapsQuery platform_output_caps() {
+    return [](const OutputChoice&) { return OutputCaps{}; };
+}
+
 std::vector<WasapiDevice> list_wasapi_devices(bool, std::string* error) {
     if (error) *error = "WASAPI is Windows only";
     return {};

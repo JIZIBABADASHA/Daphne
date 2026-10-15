@@ -16,6 +16,7 @@
 - `supported_rates()`：開啟中的驅動接受的 PCM 取樣率，給主程式的設定畫面（ASIO）。
 - `buffer_fallback()`：裝置不接受 `output.buffer_ms`，以預設緩衝執行（WASAPI 獨占）。
 - 播放器只透過這個介面使用裝置：裝置由 `PlayerDeps::open_output` 建立，Windows 預設為 `platform_output_opener()`（`core/src/output_win.cpp`：WASAPI / ASIO）；macOS / Linux 目前沒有裝置輸出（N25）。
+- 開裝置之前需要知道的三件事由 `PlayerDeps::output_caps`（`OutputCaps`，預設 `platform_output_caps()`）回答，播放器不看 API 名稱：`native_dsd`（直接收 DSD：ASIO）、`shared_mix`（系統混音器、自己的取樣率，不會 bit-perfect、不能送 DSD：WASAPI 共享）、`takes_buffer_ms`（`output.buffer_ms` 決定緩衝：ASIO 以外）。
 
 統計（`OutputStats`，原子變數）：回呼數、underrun、WASAPI 事件逾時（兩個緩衝長度、至少 50 ms 沒有裝置事件）、最長回呼間隔、ASIO 遲到回呼（相鄰回呼間隔 > 1.5 個緩衝區週期）。
 

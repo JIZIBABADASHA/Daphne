@@ -15,14 +15,15 @@ namespace daphne::playback {
 struct Playing {
     const Settings& s;                  // the settings playing now
     const OutputChoice& out;
-    int want;                           // the device rate asked for when the device was opened
+    OutputCaps caps;                    // what that output offers
+    int want;                          // the device rate asked for when the device was opened
     int source_rate;                    // the heard track's
     const std::filesystem::path& path;  // the heard track's
 };
 
 // The decoder is built from these settings (a DSD file converted to PCM: its low-pass).
 bool decoder_changes(const Playing& now, const Settings& ns);
-// The device buffer the player sets (WASAPI; ASIO keeps the driver's).
+// The device buffer the player sets (OutputCaps::takes_buffer_ms; ASIO keeps the driver's).
 bool buffer_changes(const Playing& now, const Settings& ns);
 // The device has to be reopened.
 bool needs_restart(const Playing& now, const Settings& ns, const OutputChoice& no);

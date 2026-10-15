@@ -49,7 +49,7 @@ bool Player::Impl::open_dsd(int64_t from, std::string* error) {
         if (error) *error = "DSD" + std::to_string(multiple) + " is above output.max_dsd (DSD" + std::to_string(s.output.max_dsd) + ")";
         return false;
     }
-    if (api_has_native_dsd(out.api) && s.output.dsd != DsdMode::Dop) at.push_back({di.dsd_rate, true});
+    if (caps().native_dsd && s.output.dsd != DsdMode::Dop) at.push_back({di.dsd_rate, true});
     if (s.output.dsd != DsdMode::Native) at.push_back({di.dsd_rate / 16, false});
     std::string e = at.empty() ? "output.dsd = native needs an ASIO driver with a DSD mode" : "";
     for (const auto& a : at) {

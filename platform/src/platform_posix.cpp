@@ -25,6 +25,7 @@ namespace daphne::platform {
 namespace {
 
 thread_local Priority t_priority = Priority::Normal;
+thread_local bool t_realtime = false;   // in_realtime_scope
 
 #if defined(__APPLE__)
 
@@ -85,7 +86,11 @@ void undo_realtime() {
 
 }  // namespace
 
+bool in_realtime_scope() { return t_realtime; }
+
 RealtimeScope::RealtimeScope() {
+    outer_ = t_realtime;
+    t_realtime = true;
     realtime_ = make_realtime();
     fp_ = fp_control();
     set_fp_control(with_flush_to_zero(fp_));
@@ -94,6 +99,7 @@ RealtimeScope::RealtimeScope() {
 RealtimeScope::~RealtimeScope() {
     set_fp_control(fp_);
     if (realtime_) undo_realtime();
+    t_realtime = outer_;
 }
 
 RealtimeHelperScope::RealtimeHelperScope() {

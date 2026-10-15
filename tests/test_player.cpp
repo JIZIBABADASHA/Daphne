@@ -69,10 +69,12 @@ struct Rig {
     int started = 0, tracks = 0, changed = 0;
     std::atomic<bool> ended{false};
     std::unique_ptr<Player> player;
+    OutputCaps caps;   // what the fake output says it offers
 
     PlayerDeps deps() {
         PlayerDeps d;
         d.open_output = test::fake_opener(dev);
+        d.output_caps = [this](const OutputChoice&) { return caps; };
         d.open_decoder = [this](const std::filesystem::path& p, std::string* e) -> std::unique_ptr<Decoder> {
             const auto it = sources.find(platform::path_to_utf8(p));
             if (it == sources.end()) return open_decoder(p, e);
@@ -672,6 +674,34 @@ TEST_CASE("Player: the dsd core sends PCM as DoP", "[player][dsd]") {
     CHECK(bad == 0);
     CHECK(n >= 176400 / 2);
     r.dump("dsd_core");
+}
+
+TEST_CASE("Player: the output's caps decide the DSD path, not its API", "[player][dsd]") {
+    SECTION("an output that takes DSD gets the DSF file as is") {
+        Rig r;
+        r.caps.native_dsd = true;
+        const auto path = write_dsf("daphne_player_caps.dsf", 2822400 / 8 / 2 / 5);   // 0.1 s per channel
+        Settings s;
+        s.output.dsd_lead_in_ms = 20;
+        REQUIRE(r.start(platform::path_to_utf8(path), s));
+        r.finish();
+        REQUIRE(!r.dev->opens.empty());
+        CHECK(r.dev->opens.front().dsd);
+        CHECK(r.dev->opens.front().rate == 2822400);
+        r.player.reset();
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+    SECTION("a shared mixer refuses the dsd core") {
+        Rig r;
+        r.caps.shared_mix = true;
+        r.sources["sine"] = sine(44100, 1000.0, 0.2);
+        Settings s;
+        s.core = CoreMode::Dsd;
+        s.modulator.osr = 64;
+        CHECK_FALSE(r.start("sine", s));
+        CHECK(r.dev->opens.empty());
+    }
 }
 
 TEST_CASE("Crossfader: a warm-up in rounds starts the same crossfade as one warm-up", "[player][crossfade]") {

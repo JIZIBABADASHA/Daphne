@@ -14,7 +14,7 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
     };
     std::vector<Attempt> rates;
     if (s.core == CoreMode::Dsd) {
-        if (api_is_shared(out.api)) {
+        if (caps().shared_mix) {
             if (error) *error = "DSD output (dsd core) needs WASAPI exclusive or ASIO: shared mode mixes everything to PCM";
             return false;
         }
@@ -26,7 +26,7 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
             event("DSD" + std::to_string(s.modulator.osr) + " is above output.max_dsd: modulating to DSD" + std::to_string(top));
         }
         for (int osr = top; osr >= 64; osr /= 2) {
-            if (api_has_native_dsd(out.api) && s.output.dsd != DsdMode::Dop) rates.push_back({dsd_clock(osr), osr, true});
+            if (caps().native_dsd && s.output.dsd != DsdMode::Dop) rates.push_back({dsd_clock(osr), osr, true});
             if (s.output.dsd != DsdMode::Native) rates.push_back({dop_rate(dsd_clock(osr)), osr, false});
         }
         if (rates.empty()) {

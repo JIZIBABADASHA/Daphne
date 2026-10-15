@@ -33,9 +33,15 @@ private:
     void* handle_ = nullptr;   // Windows: the MMCSS handle
     uint64_t fp_ = 0;          // the floating-point control state before
     bool realtime_ = false;
+    bool outer_ = false;       // in_realtime_scope() before
 };
 
-// A helper thread of the realtime one (the DSD modulator's second channel): the same class.
+// The calling thread is inside a RealtimeScope (asked for it, whether or not the OS accepted): a worker
+// pool gives its workers the helper class below while they work for such a thread.
+bool in_realtime_scope();
+
+// A helper thread of the realtime one (the DSD modulator's second channel, the double-double
+// resampler's workers): the same class.
 class RealtimeHelperScope {
 public:
     RealtimeHelperScope();
