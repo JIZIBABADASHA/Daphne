@@ -24,6 +24,22 @@ if(MSVC)
 endif()
 
 option(DAPHNE_BUILD_TESTS "Build unit tests" ON)
+option(DAPHNE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors (CI)" OFF)
+
+# Warnings for the project's own targets: /W4 (MSVC, above) or -Wall -Wextra. Third-party code stays
+# quiet (catch2_main has its own options; the vendored headers are system includes).
+function(daphne_warnings target)
+    if(MSVC)
+        if(DAPHNE_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE /WX)
+        endif()
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra)
+        if(DAPHNE_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE -Werror)
+        endif()
+    endif()
+endfunction()
 
 # header-only / vendored dependencies
 add_library(daphne_vendor INTERFACE)
