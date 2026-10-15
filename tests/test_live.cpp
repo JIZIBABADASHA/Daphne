@@ -1,9 +1,13 @@
 #include <catch_amalgamated.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <memory>
+#include <thread>
 #include <vector>
 
 #include "daphne/engine/decoder.h"
@@ -264,4 +268,78 @@ TEST_CASE("Live decoder: without the host's ring it does not open", "[live]") {
     std::string e;
     CHECK_FALSE(open_decoder(kLivePath, &e));
     CHECK_FALSE(e.empty());
+}
+
+TEST_CASE("Live decoder: a ring detached or replaced while it reads can be freed at once", "[live]") {
+    // The host frees (here: poisons with NaN, then frees) each ring as soon as set_live_bus returns. The ring
+    // holds 0.25 everywhere, so the decoder's output is 0.25 or silence; NaN or anything else means it read a
+    // ring after it was detached.
+    constexpr int cap = 48000;
+    auto make = [] {
+        auto m = std::make_unique<std::vector<float>>(4 + static_cast<size_t>(cap) * 2, 0.25f);
+        (*m)[0] = 0.0f;   // the write index (all bits zero = 0)
+        return m;
+    };
+    auto index = [](std::vector<float>& m) -> uint32_t& { return *reinterpret_cast<uint32_t*>(m.data()); };
+    auto poison = [](std::vector<float>& m) { std::fill(m.begin() + 4, m.end(), std::numeric_limits<float>::quiet_NaN()); };
+
+    auto cur = make();
+    set_live_bus(cur->data(), cap, 48000);
+    set_live_reserve(0);
+    live_forget();
+    std::string e;
+    auto d = open_decoder(kLivePath, &e);
+    REQUIRE(d);
+    std::atomic<bool> stop{false};
+    std::atomic<int64_t> good{0}, bad{0};
+    std::thread reader([&] {
+        std::vector<double> out(4096 * 2);
+        while (!stop) {
+            const int n = d->read(out.data(), 4096);
+            for (int i = 0; i < 2 * n; ++i) {
+                const double v = out[static_cast<size_t>(i)];
+                if (v == 0.0) continue;
+                if (std::abs(v - 0.25) < 1e-9) good++;
+                else bad++;
+            }
+        }
+    });
+    for (int it = 0; it < 200; ++it) {
+        // 8 ms of a steady trickle (48 frames every 10 us): the reader always finds a little more and spends its
+        // time inside the ring, where a detach can land. Spun, not slept (sleep_for(1 ms) is 15.6 ms on Windows
+        // without a raised timer resolution)
+        using clock = std::chrono::steady_clock;
+        const auto end = clock::now() + std::chrono::milliseconds(8);
+        while (clock::now() < end) {
+            index(*cur) += 48;
+            const auto until = clock::now() + std::chrono::microseconds(10);
+            while (clock::now() < until) std::this_thread::yield();
+        }
+        auto old = std::move(cur);
+        if (it % 2) {
+            set_live_bus(nullptr, 0, 0);   // detached: silence until the next ring
+            cur = make();
+            poison(*old);
+            old.reset();
+            set_live_bus(cur->data(), cap, 48000);
+        } else {
+            cur = make();
+            set_live_bus(cur->data(), cap, 48000);   // replaced directly
+            poison(*old);
+            old.reset();
+        }
+    }
+    stop = true;
+    reader.join();
+    set_live_bus(nullptr, 0, 0);
+    live_forget();
+    CHECK(bad == 0);
+    CHECK(good > 0);
+}
+
+TEST_CASE("Live input: the Unix socket source is reserved, not implemented yet", "[live]") {
+    std::string e;
+    CHECK_FALSE(live_connect("/tmp/daphne-live-test.sock", 48000, &e));
+    CHECK_FALSE(e.empty());
+    live_disconnect();   // nothing to stop
 }

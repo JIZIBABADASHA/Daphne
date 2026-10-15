@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 
 #include "daphne/engine/decoder.h"
 
@@ -29,8 +30,18 @@ namespace daphne {
 inline constexpr char kLivePath[] = "live:";
 inline bool is_live_path(const std::filesystem::path& p) { return p == std::filesystem::path(kLivePath); }
 
-// The host's shared ring (base = nullptr detaches it) and the producer's sample rate.
+// The host's shared ring (base = nullptr detaches it) and the producer's sample rate. Returns once no read
+// is left in the previous ring: the host may free that memory then, even while a live track plays (the
+// decoder reads silence until a ring is shared again).
 void set_live_bus(void* base, int cap_frames, int rate);
+// Reserved, not implemented yet (always false, N26): the producer's frames arriving on a Unix socket instead
+// (macOS MIKU's live-relay.js, used only when its settings say "ytThroughCore": true; by default the YouTube
+// Music page plays through the system output and the core lets go of the device). Meant to work as: a thread
+// of the engine connects (again while the socket is missing or after it closed), writes the interleaved
+// float32 stereo frames (no header, cut anywhere) into a ring of its own and shares that as above.
+bool live_connect(const std::string& socket_path, int rate, std::string* error = nullptr);
+// Stops that thread and detaches its ring; nothing when not connected.
+void live_disconnect();
 void set_live_rate(int rate);
 // What the player takes from the live decoder at once when it refills its ring after a seek, in seconds: a
 // seek goes back to that much more than the target behind the writer, so the decoder holds the target once

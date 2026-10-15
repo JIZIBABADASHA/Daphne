@@ -104,13 +104,17 @@ DC_API int dc_devices(char* json, int len);
 
 /* Live input (a browser page's audio tap): the host's shared ring, read by dc_load with the path L"live:".
  * Layout: uint32 write index in frames (wraps) | 12 bytes reserved | float32 stereo frames (cap_frames). The
- * memory must stay valid until dc_live_bus(NULL, 0, 0) or until no live track plays. rate: the producer's
+ * memory must stay valid until dc_live_bus(NULL, 0, 0) (or another ring) returns: it returns once no read is left
+ * in the previous ring, so the host may free it then, even while a live track plays. rate: the producer's
  * sample rate (dc_live_rate when it changes). While a live track plays, dc_state has
  *   "live": {"fill": s buffered in the ring, "read": s read, "resyncs": n, "starves": n, "adjust": x,
  *            "target": s of jitter buffer aimed for now (0.15, up to 0.30 after starves)}
  * (seconds from the producer to the DAC: fill + read - position + latency_ms / 1000). */
 DC_API void dc_live_bus(void* base, int cap_frames, int rate);
 DC_API void dc_live_rate(int rate);
+/* Reserved, not implemented yet (returns 0): the producer's frames on a Unix socket (path UTF-8) instead of a
+ * shared ring (macOS MIKU's live-relay.js). dc_live_bus(NULL, 0, 0) would end it. */
+DC_API int dc_live_socket(const char* path, int rate);
 
 #ifdef __cplusplus
 }

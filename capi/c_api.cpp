@@ -319,8 +319,12 @@ DC_API int dc_poll_event(dc_player* p, char* out, int len) {
 
 DC_API double dc_design(dc_player* p) { return p ? p->design.load() : 1.0; }
 
-DC_API void dc_live_bus(void* base, int cap_frames, int rate) { daphne::set_live_bus(base, cap_frames, rate); }
+DC_API void dc_live_bus(void* base, int cap_frames, int rate) {
+    daphne::live_disconnect();
+    daphne::set_live_bus(base, cap_frames, rate);
+}
 DC_API void dc_live_rate(int rate) { daphne::set_live_rate(rate); }
+DC_API int dc_live_socket(const char* path, int rate) { return path && daphne::live_connect(path, rate) ? 1 : 0; }
 
 DC_API void dc_meter(dc_player* p, double* l, double* r) {
     double a = 0, b = 0;

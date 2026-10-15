@@ -27,11 +27,15 @@
 - [x] Windows 的 `WorkerPool` worker：替處理執行緒工作時用 `RealtimeHelperScope`（MMCSS "Audio"），不再只是 `THREAD_PRIORITY_ABOVE_NORMAL`。
 - [x] 驗證：Windows 全部測試、`live.py`（行為不變）；三平台 CI。（PR #18：Windows 93 個測試、`live.py` 全過、CI 四個 job 通過）
 
-### 5. 即時輸入的 `LiveBus`（分支另開）
+### 5. 即時輸入的安全卸離（分支 `live-bus`）
 
-- [ ] 包成 `LiveBus`，兩種來源：host 給的記憶體（Windows MIKU，維持 `dc_live_bus`），以及 Daphne 自己的執行緒讀 Unix socket、寫進自己配置的環（macOS MIKU 的 `live-relay.js`，路徑是 `host.liveSocket`）。
-- [ ] 安全卸離：解碼器 `read()` 期間持有租約，`detach` 等到沒有人在讀才返回，host 之後才能釋放記憶體；socket 版的環由 Daphne 保管到解碼器關閉。
-- [ ] 測試：卸離與讀取並行的壓力測試；socket 斷線、重連、讀取跟不上（丟區塊）。
+範圍在 2026-10-16 縮小：MIKU 1.4.5（`a15a6f6`）起，Mac 上的 YouTube Music 一律由網頁經系統輸出播放，播放核心只需要讓出裝置（見步驟 7）；把網頁的聲音擷取下來、經 `live-relay.js` 交給核心的路線預設關閉（設定檔要寫 `"ytThroughCore": true`，原因是在真實網頁上啟動不穩定）。所以先做 A（網頁自己播），B（經過 Daphne）只保留接口。
+
+- [ ] 安全卸離：解碼器只在 `produce()` 裡碰共用的環，期間持有租約（`g_readers`）；`set_live_bus` 先清掉指標、等租約歸零，再換上新的環。返回之後 host 就能釋放記憶體，播放中也可以（Windows MIKU 的共用記憶體也受益）。
+- [ ] 測試：一條執行緒不停讀取，另一條反覆卸離 / 直接替換環，並在返回後立刻把舊的環填成 NaN 再釋放；輸出不得出現 NaN 或其他值。
+- [ ] B 的接口（未實作）：`live_connect` / `live_disconnect`（`live_source.h`）與 C API 的 `dc_live_socket`，目前一律回傳失敗；`dc_live_bus` 先結束 socket 來源再換環。
+
+**B 之後要補做時（Unix socket 來源）**：路徑在 MIKU 給模組的 `host.liveSocket`；資料是交錯的 float32 立體聲、沒有標頭、可能在任何位元組切開（一個 frame 會跨兩次 `recv`）；`live-relay.js` 會重啟（MIKU 0.5 s 後再開），要自動重連；讀得慢的連線會被丟區塊（積壓超過 1 MB）；取樣率由 MIKU 呼叫 engine 的 `setLiveRate(rate)` 告知（網頁要求 48 kHz，`tap` 訊息回報實際值）；Mac 外殼要回報 `supportsLive = true`，MIKU 才會走這條路。
 
 ### 7. macOS Core Audio 輸出與 MIKU 的 Mac 外殼（分支另開）
 
@@ -43,10 +47,11 @@
   - 裝置拔除、預設輸出改變、外部改取樣率的通知。
 - [ ] DSD 只走 DoP（macOS 沒有原生 DSD 的 API）。
 - [ ] 重新檢查 macOS 的 `RealtimeScope`：目前是 time-constraint policy（每 10 ms 最多 5 ms），但處理執行緒是一次補滿約 0.5 s 環的吞吐型工作，超過宣告的計算時間可能被系統降級。候選：處理執行緒改用 QoS user-interactive，真正的即時工作只留在 IOProc（環 → 裝置）；在 Mac 上加 CPU 負載量 underrun 決定。
+- [ ] 讓出與取回裝置（A 方案必需）：Mac MIKU 播 YouTube Music、或 MIKU 不在前景且沒有播放時，會檢查 engine 的 `holdsDevice`，呼叫 `stop({ release: true })` 或 `releaseDevice()`；Daphne 要完全放開裝置（還原取樣率與格式、放掉 hog），下一首曲庫的歌再取回。對照 MIKU 的 `native-audio.js`。外殼回報 `supportsLive = false`。
 - [ ] 裝置列舉（C API）給 MIKU 的設定頁。
 - [ ] helper 程序：一個執行檔，stdin / stdout 每行一個 JSON（與 MIKU 的 `miku-audio` 相同的模式），由 JS 外殼啟動，掛掉時重啟並接回原本的位置。
 - [ ] MIKU 的 Mac 外殼 `miku/extension.js`（MIKU 從 `Extensions/<名稱>/miku/` 載入，提供 `core.createEngine`）。不需要改 MIKU。
-- [ ] 驗證：Intel Mac（macOS 11）上用 CLI 與模擬 MIKU 的腳本測 helper、Core Audio、即時輸入。MIKU 的 Mac 版用 Electron 44，需要 macOS 12 以上，介面內的整合測試要等有新的 Mac（或試舊版 Electron 的開發模式）。
+- [ ] 驗證：Intel Mac（macOS 11）上用 CLI 與模擬 MIKU 的腳本測 helper、Core Audio、讓出 / 取回裝置。MIKU 的 Mac 版用 Electron 44，需要 macOS 12 以上，介面內的整合測試要等有新的 Mac（或試舊版 Electron 的開發模式）。
 
 ### 6. Linux ALSA 輸出（暫緩）
 
@@ -75,3 +80,11 @@
   - 加上 ReplayGain 的狀態（目前是否套用、增益多少）。
   - DSD 直送時，DSP 區加一列說明（直送不經任何處理）。
 - **設定頁**：不升頻時也顯示「濾波器暫存」那一列（目前只在升頻或轉 DSD 時出現）。
+
+**步驟 5（`live-bus`）**
+
+- 租約只包住 `produce()`（真正碰環的地方），不包住 `read()` 等待來源的 2 ms sleep：卸離最多等一次內插的時間。讀取端 `fetch_add` 之後才讀指標、卸離端清掉指標之後才讀計數，兩邊都是循序一致（seq_cst），所以「讀取端拿到舊指標」與「卸離端看到計數為 0」不會同時成立。
+- 換環時先清掉指標、等計數歸零，再設定新容量、最後放上新指標：讀取端不會拿到新指標配舊容量（原本 `g_cap` 與 `g_base` 分開寫，換環的一瞬間可能錯配）。
+- 壓力測試要確認真的抓得到錯誤：暫時拿掉等待那一行後，第一版（寫入方每 1 ms 推進 2400 frame）6 次只失敗 1～2 次，因為讀取端很快讀完，大部分時間在 `read()` 的 sleep 裡（Windows 上一次約 15.6 ms），卸離很少撞上讀取。改成每 10 µs 推進 48 frame 的細流之後，讀取端幾乎一直在環裡，拿掉等待時 6 次全部失敗（其中兩次直接存取已釋放的記憶體而當掉）；恢復等待後 10 次全部通過。
+- 測試的等待用 `steady_clock` 忙等，不用 `sleep_for(1 ms)`：Windows 沒有提高計時器解析度時那是 15.6 ms，第一版測試因此跑了 25 秒（現在約 1.6 秒）。
+
