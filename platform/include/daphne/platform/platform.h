@@ -30,7 +30,7 @@ public:
     bool realtime() const { return realtime_; }
 
 private:
-    void* handle_ = nullptr;   // Windows: the MMCSS handle
+    [[maybe_unused]] void* handle_ = nullptr;   // Windows: the MMCSS handle (unused elsewhere)
     uint64_t fp_ = 0;          // the floating-point control state before
     bool realtime_ = false;
     bool outer_ = false;       // in_realtime_scope() before

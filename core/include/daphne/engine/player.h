@@ -56,8 +56,8 @@ struct PlayCallbacks {
 
 // Device choice; the CLI fills it from the settings plus its overrides.
 struct OutputChoice {
-    OutputApi api = OutputApi::WasapiExclusive;
-    std::string device;   // WASAPI endpoint / index, or ASIO driver name / index / CLSID
+    OutputApi api = kDefaultOutputApi;
+    std::string device;   // WASAPI endpoint / index, ASIO driver name / index / CLSID, or Core Audio device UID / index
     bool operator==(const OutputChoice& o) const { return api == o.api && device == o.device; }
 };
 

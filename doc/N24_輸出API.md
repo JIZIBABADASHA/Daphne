@@ -1,6 +1,6 @@
-# N24 輸出 API（WASAPI / ASIO）
+# N24 輸出 API（WASAPI / ASIO / Core Audio）
 
-`core/include/daphne/engine/audio_output.h`、`wasapi_output.h`、`asio_output.h`、`devices.h`，以及對應的 `core/src/*.cpp`
+`core/include/daphne/engine/audio_output.h`、`wasapi_output.h`、`asio_output.h`、`coreaudio_output.h`、`devices.h`，以及對應的 `core/src/*.cpp`
 
 ## 共同介面（`AudioOutput`）
 
@@ -15,8 +15,9 @@
 - `probe_before_design()`：有些驅動接受了串流不了的取樣率，播放器先以靜音短暫啟動一次再設計濾波器（ASIO 為 true）。
 - `supported_rates()`：開啟中的驅動接受的 PCM 取樣率，給主程式的設定畫面（ASIO）。
 - `buffer_fallback()`：裝置不接受 `output.buffer_ms`，以預設緩衝執行（WASAPI 獨占）。
-- 播放器只透過這個介面使用裝置：裝置由 `PlayerDeps::open_output` 建立，Windows 預設為 `platform_output_opener()`（`core/src/output_win.cpp`：WASAPI / ASIO）；macOS / Linux 目前沒有裝置輸出（N25）。
-- 開裝置之前需要知道的三件事由 `PlayerDeps::output_caps`（`OutputCaps`，預設 `platform_output_caps()`）回答，播放器不看 API 名稱：`native_dsd`（直接收 DSD：ASIO）、`shared_mix`（系統混音器、自己的取樣率，不會 bit-perfect、不能送 DSD：WASAPI 共享）、`takes_buffer_ms`（`output.buffer_ms` 決定緩衝：ASIO 以外）。
+- 播放器只透過這個介面使用裝置：裝置由 `PlayerDeps::open_output` 建立，Windows 預設為 `platform_output_opener()`（`core/src/output_win.cpp`：WASAPI / ASIO），macOS 為 `core/src/output_mac.cpp`（Core Audio）；Linux 目前沒有裝置輸出（N25）。
+- 開裝置之前需要知道的三件事由 `PlayerDeps::output_caps`（`OutputCaps`，預設 `platform_output_caps()`）回答，播放器不看 API 名稱：`native_dsd`（直接收 DSD：ASIO）、`shared_mix`（系統混音器、自己的取樣率，不會 bit-perfect、不能送 DSD：WASAPI 共享）、`takes_buffer_ms`（`output.buffer_ms` 決定緩衝：ASIO 以外）。Core Audio：沒有原生 DSD（DoP 只在獨佔）、共享模式是 `shared_mix`、吃 `buffer_ms`。
+- `output.api` 的預設是這個平台的獨佔輸出（`kDefaultOutputApi`：Windows `wasapi_exclusive`、macOS `coreaudio_exclusive`）；別的平台的 API 開啟時回報原因。CLI 的 `--shared` / `--exclusive` 也對應到這個平台的 API。
 
 統計（`OutputStats`，原子變數）：回呼數、underrun、WASAPI 事件逾時（兩個緩衝長度、至少 50 ms 沒有裝置事件）、最長回呼間隔、ASIO 遲到回呼（相鄰回呼間隔 > 1.5 個緩衝區週期）。
 
@@ -53,11 +54,30 @@
 - 原生 DSD 在播完之前被停止時，先讓 DSD 靜音（0x69）送到 DAC 再停止，不在音樂中間切斷。
 - 需要建置時有 Steinberg ASIO SDK（`third_party/asiosdk`，`scripts/fetch_asiosdk.ps1`）；沒有時 `open()` 回報失敗，其他輸出不受影響。
 
+## Core Audio（macOS）
+
+| 模式 | 做法 |
+|---|---|
+| 獨佔 | hog mode（只有這個程序能在裝置上播放，也沒有其他聲音混進來）；裝置取樣率設成要求值（裝置有提供時；否則同家族、不超過要求的最高取樣率，再否則裝置的最高取樣率，`matches_request()` 為假）；DAC 實體格式調成該取樣率下位元數最多的整數格式（至少 24 bit，已足夠就不動，不重新鎖定） |
+| 共享 | 系統混音器：裝置維持自己的取樣率（與 WASAPI 共享相同，播放器依 `shared_mix` 轉到這個取樣率），不改實體格式、不拿 hog |
+
+- 樣本格式：環裡是 24-bit 整數靠左放在 32 bit（`int24-in-32`），IO 回呼寫進串流的 virtual format（32-bit 浮點，目前的 macOS 驅動都是）時除以 2^31。32-bit 浮點能精確表示每個 24-bit 整數，獨佔模式下 HAL 把浮點轉成 DAC 的整數格式也是精確的，所以 24 bit 以內的 PCM 與 DoP 都一個位元不差地送到 DAC（與 MIKU 自己的 Core Audio 輸出、Audirvana、Roon 在 macOS 上的作法相同）。播放器看到的裝置格式就是 `int24-in-32`：DoP 的標記照常寫在最高位元組（`dop_capable`），bit-perfect 的判斷也照 24 bit 計算。
+- hog mode 的裝置只在 IO 運轉中改設定：停止的 hog 裝置改了取樣率之後再放掉 hog，這個程序之後就無法在它上面開始 IO（`AudioDeviceStart` 卡住數秒，MIKU 的 Core Audio 輸出遇過）。所以 `open()` 先拿 hog、建立 IO procedure 並**先啟動 IO**（送靜音），再改取樣率與實體格式；`close()` 在 IO 還在跑時先還原實體格式與取樣率、等 IO 在原取樣率又跑了兩次回呼，才停止 IO、放掉 hog。
+- 取樣率變更：設定後每 10 ms 讀回，最多 1.5 s；裝置沒有接受時以它實際的取樣率繼續（`matches_request()` 為假，播放器會重新設計或重試），並記錄一則訊息。格式變更後等 HAL 回報的 virtual format 都是新的取樣率、且連續兩次讀到相同（最多約 1 s）才開始。
+- 「系統輸出」（`device` 空白或 `default`）：裝置被 hog 時 macOS 會把系統輸出移到別的裝置（只有一個裝置時就沒有系統輸出）。所以本程序 hog 住的裝置仍算是它拿到的系統輸出；系統輸出不存在而有裝置被其他程序 hog 時，回報「… is in exclusive use by another application (pid N)」，而不是「沒有系統輸出」。
+- 被其他程序 hog 住的裝置：獨佔與共享都開不了，回報同樣的訊息（不會卡住）。
+- 聲道：立體聲用裝置偏好的立體聲聲道（`kAudioDevicePropertyPreferredChannelsForStereo`）；單聲道寫到那兩個聲道；多聲道從第 1 個聲道依序對應（裝置聲道不夠時開啟失敗）。每次回呼先把整個 buffer list 清成 0，再寫入用到的聲道。
+- IO 緩衝：`output.buffer_ms` 換算成 HAL 的 buffer frame size，限制在裝置的範圍內；0 用裝置預設（內建輸出 512 frames）。
+- 通知：裝置被拔除（`DeviceIsAlive`）→ `failed()`（「the output device was removed」）；其他程式改了取樣率 → `reset_requested()`（播放器在原位置重開）。
+- IO 回呼不上鎖、不配置記憶體；`stop()` 等正在讀環的回呼離開後才返回（之後播放器可以釋放環）。
+- 延遲：裝置延遲 + safety offset + 串流延遲 + IO 緩衝。
+
 ## 裝置列表（`devices.h`）
 
 - `list_wasapi_devices(probe)`：作用中的 render 端點（ID、名稱、預設、混音器格式）；probe 時以 `IsFormatSupported` 測試獨占模式下 44.1k–768k × 16/24/32-bit 的立體聲格式。
 - `list_asio_drivers()`：`HKLM\SOFTWARE\ASIO` 下安裝的驅動（不需要 SDK）。
-- CLI：`daphne devices [--probe]`。
+- `list_coreaudio_devices()`（macOS）：有輸出聲道的裝置（UID、名稱、是否為系統輸出、目前取樣率、聲道數、提供的標準取樣率、連接方式、hog 的持有程序）。`output.device` 用 UID（重開機後不變），也接受清單索引與名稱。
+- CLI：`daphne devices [--probe]`（macOS 列出 Core Audio 裝置）；C API：`dc_devices` 的 `coreaudio` 陣列。
 
 ## 驗證
 
@@ -67,3 +87,6 @@
 | WASAPI 獨占，44.1 kHz、24 / 16-bit 隨機樣本（含滿刻度極值）錄回比對（`verify/live.py` 第 1 節） | 每個樣本都相同（bit-perfect） |
 | WASAPI 獨占 176.4 kHz：無縫跨取樣率、ReplayGain 換軌、DoP 傳輸（第 2–4 節） | 全部通過，underrun 0 |
 | ASIO | 編譯通過；ASIO 只能透過實體裝置測試（會發出聲音），尚待實機聆聽確認 |
+| Core Audio（macOS 11.7、Intel、內建輸出：44.1 / 48 / 88.2 / 96 kHz、24-bit 整數） | `daphne_tests "[.coreaudio]"`（隱藏測試，CI 不跑）3 個全過：獨佔把 44.1 kHz 換成 96 kHz、hog 由本程序持有、實體格式 24 bit，播完 `drained()`，關閉後取樣率回到 44.1 kHz、hog 放開；共享維持 44.1 kHz、不拿 hog；播放器以 96 kHz `int24-in-32` 播到結尾，之後裝置還原 |
+| Core Audio，CLI | 44.1 k → 96 k 連續兩首：都是 bit-perfect、underrun 0，第二首換取樣率，結束後回到 44.1 kHz；44.1 k 以 `2x` 升到 88.2 kHz、`buffer_ms` 50（延遲 52 ms）：underrun 0；兩個程序：第一個獨佔播放中，第二個（獨佔或共享）立即回報「Built-in Output is in exclusive use by another application (pid N)」，第一個照常播完 |
+| Core Audio，尚未驗證 | 外接 DAC：錄音比對 bit-perfect、DoP（內建輸出最高 96 kHz，DSD64 的 DoP 需要 176.4 kHz，播放器改成轉 PCM）、拔除 DAC、其他程式改取樣率 |

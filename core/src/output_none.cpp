@@ -1,4 +1,4 @@
-// macOS / Linux: no device output yet (Core Audio and ALSA are later steps, N25). The player, the
+// Linux: no device output yet (ALSA is a later step, N25). The player, the
 // chain and the decoders build and run here; tests give the player a fake device (PlayerDeps).
 #include "daphne/engine/devices.h"
 #include "daphne/engine/player.h"
@@ -24,6 +24,11 @@ std::vector<WasapiDevice> list_wasapi_devices(bool, std::string* error) {
 
 std::vector<AsioDriver> list_asio_drivers(std::string* error) {
     if (error) *error = "ASIO is Windows only";
+    return {};
+}
+
+std::vector<CoreAudioDevice> list_coreaudio_devices(std::string* error) {
+    if (error) *error = "Core Audio is macOS only";
     return {};
 }
 

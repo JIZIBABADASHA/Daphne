@@ -23,6 +23,11 @@ add_executable(daphne_tests
     test_resampler.cpp
 )
 target_link_libraries(daphne_tests PRIVATE daphne_engine daphne_core catch2_main)
+# the Core Audio output on a real Mac (hidden tests: daphne_tests "[.coreaudio]")
+if(APPLE)
+    target_sources(daphne_tests PRIVATE test_coreaudio.cpp)
+    target_include_directories(daphne_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/src)
+endif()
 add_test(NAME daphne_tests COMMAND daphne_tests)
 # Catch2 defines wmain when UNICODE is set (it is, project-wide).
 if(MSVC)

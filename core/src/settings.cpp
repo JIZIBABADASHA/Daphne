@@ -14,7 +14,8 @@ template <class E>
 using EnumTable = std::initializer_list<std::pair<const char*, E>>;
 
 const EnumTable<OutputApi> kOutputApi = {
-    {"wasapi_exclusive", OutputApi::WasapiExclusive}, {"wasapi_shared", OutputApi::WasapiShared}, {"asio", OutputApi::Asio}};
+    {"wasapi_exclusive", OutputApi::WasapiExclusive}, {"wasapi_shared", OutputApi::WasapiShared}, {"asio", OutputApi::Asio},
+    {"coreaudio_exclusive", OutputApi::CoreAudioExclusive}, {"coreaudio_shared", OutputApi::CoreAudioShared}};
 const EnumTable<CoreMode> kCoreMode = {{"pcm", CoreMode::Pcm}, {"dsd", CoreMode::Dsd}};
 const EnumTable<DsdMode> kDsdMode = {{"auto", DsdMode::Auto}, {"native", DsdMode::Native}, {"dop", DsdMode::Dop}, {"pcm", DsdMode::Pcm}};
 const EnumTable<FilterPhase> kPhase = {{"linear", FilterPhase::Linear}, {"intermediate", FilterPhase::Intermediate},

@@ -99,7 +99,9 @@ DC_API int dc_filter_cache_dir_utf8(char* out, int len);
  * or -1 when the settings do not parse. */
 DC_API long long dc_filter_cache_prune(const char* settings, int limit_mb);
 
-/* Output devices as JSON: {"wasapi": [{"id","name","default"}], "asio": [{"name","clsid"}]}. */
+/* Output devices as JSON: {"wasapi": [{"id","name","default"}], "asio": [{"name","clsid"}],
+ * "coreaudio": [{"uid","name","default","rate","channels","rates","transport","hog_pid"}]} (each list empty on the
+ * platforms without that API; output.device takes the WASAPI id, the ASIO name or the Core Audio uid). */
 DC_API int dc_devices(char* json, int len);
 
 /* Live input (a browser page's audio tap): the host's shared ring, read by dc_load with the path L"live:".
