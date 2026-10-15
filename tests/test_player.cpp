@@ -357,7 +357,8 @@ TEST_CASE("Player: a volume change is applied in place", "[player]") {
     Rig r;
     use_float_device(*r.dev);
     r.dev->speed = 4.0;
-    r.sources["sine"] = sine(44100, 1000.0, 2.0);
+    // 4 s: the change reaches the processing thread well before it has decoded the end, also on a busy CI machine
+    r.sources["sine"] = sine(44100, 1000.0, 4.0);
     Settings s;
     s.volume.mode = VolumeMode::Digital;
     REQUIRE(r.start("sine", s));
