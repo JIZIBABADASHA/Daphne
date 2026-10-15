@@ -43,7 +43,7 @@ void Player::Impl::update_diag() {
     const OutputStats* st = io.dev ? &io.dev->stats() : nullptr;
     std::snprintf(b, sizeof b,
                   "{\"ring\":%zu,\"ring_cap\":%zu,\"pend\":%zu,\"eof\":%d,\"fading\":%d,\"building\":%d,\"paused\":%d,"
-                  "\"dev_paused\":%d,\"callbacks\":%lld,\"underruns\":%lld,\"drained\":%d,\"failed\":%d,\"late\":%lld,\"tl.abs_out\":%lld,\"in\":%lld}",
+                  "\"dev_paused\":%d,\"callbacks\":%lld,\"underruns\":%lld,\"drained\":%d,\"failed\":%d,\"late\":%lld,\"abs_out\":%lld,\"in\":%lld}",
                   io.ring ? io.ring->readable() : 0, io.ring ? io.ring->capacity() : 0, io.pend - io.pend_off, io.eof.load() ? 1 : 0, xf.fading ? 1 : 0,
                   building.valid() ? 1 : 0, want_pause.load() ? 1 : 0, io.dev && io.dev->paused() ? 1 : 0,
                   st ? static_cast<long long>(st->callbacks.load()) : -1LL, st ? static_cast<long long>(st->underruns.load()) : -1LL,

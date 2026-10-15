@@ -13,6 +13,8 @@
 #include <random>
 #include <thread>
 
+#include <nlohmann/json.hpp>
+
 #include "daphne/engine/live_source.h"
 #include "daphne/engine/player.h"
 #include "daphne/engine/settings.h"
@@ -193,6 +195,22 @@ TEST_CASE("Player: a 24-bit source at its own rate is sent bit-perfectly", "[pla
     for (size_t i = a->x.size(); i < y.size(); ++i) diff += y[i] != 0;
     CHECK(diff == 0);
     r.dump("bitperfect");
+}
+
+TEST_CASE("Player: the debug JSON for the host's log keeps its keys", "[player]") {
+    Rig r;
+    r.dev->speed = 4.0;
+    r.sources["a"] = int24_noise(44100, 2, 4 * 44100, 7);
+    REQUIRE(r.start("a", Settings{}));
+    sleep_s(0.7);   // updated every 500 ms
+    const auto j = nlohmann::json::parse(r.player->debug_json(), nullptr, false);
+    r.player->stop();
+    r.finish();
+    REQUIRE(j.is_object());
+    for (const char* k : {"ring", "ring_cap", "pend", "eof", "fading", "building", "paused", "dev_paused", "callbacks", "underruns",
+                          "drained", "failed", "late", "abs_out", "in"})
+        CHECK(j.contains(k));
+    CHECK(j["abs_out"].get<int64_t>() > 0);
 }
 
 TEST_CASE("Player: upsampling keeps the speed and the pitch", "[player]") {
