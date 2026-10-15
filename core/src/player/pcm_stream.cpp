@@ -158,8 +158,8 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
         const bool live = is_live_path(cur_path);
         read_frames = live ? std::clamp(src.rate / 100, 64, kChunk) : kChunk;
         io.limit = live ? io.live_limit(rep.device.frame_rate()) : 0;
-        const int out = static_cast<int>((static_cast<int64_t>(read_frames) * crate + src.rate - 1) / src.rate);
-        io.chunk = !live ? 0 : dsdenc ? dsdenc->max_bytes(out) : static_cast<size_t>(out) * io.block;
+        const int read_out = static_cast<int>((static_cast<int64_t>(read_frames) * crate + src.rate - 1) / src.rate);   // chain frames per read
+        io.chunk = !live ? 0 : dsdenc ? dsdenc->max_bytes(read_out) : static_cast<size_t>(read_out) * io.block;
         // DSD: silence first, so the DAC has switched to DSD and locked before the music (output.dsd_lead_in_ms)
         if (dsdenc) push_dsd_idle(s.output.dsd_lead_in_ms);
         while (!cancel && io.room() >= io.chunk_bytes()) {   // prefill
