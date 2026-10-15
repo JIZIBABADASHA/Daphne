@@ -10,7 +10,7 @@ bool decoder_changes(const Playing& now, const Settings& ns) {
 }
 
 bool buffer_changes(const Playing& now, const Settings& ns) {
-    return api_takes_buffer_ms(now.out.api) && ns.output.buffer_ms != now.s.output.buffer_ms;
+    return now.caps.takes_buffer_ms && ns.output.buffer_ms != now.s.output.buffer_ms;
 }
 
 bool needs_restart(const Playing& now, const Settings& ns, const OutputChoice& no) {

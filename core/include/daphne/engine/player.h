@@ -72,15 +72,27 @@ struct OutputRequest {
 using OutputOpener = std::function<std::unique_ptr<AudioOutput>(const OutputRequest&, std::string* error)>;
 using DecoderOpener = std::function<std::unique_ptr<Decoder>(const std::filesystem::path&, std::string* error)>;
 
+// What an output offers, known before a device is open: the player decides its attempts from it and
+// never looks at the API itself.
+struct OutputCaps {
+    bool native_dsd = false;        // takes DSD as is (ASIO); otherwise DoP or PCM
+    bool shared_mix = false;        // a system mixer at its own rate: never bit-perfect, no DSD (WASAPI shared)
+    bool takes_buffer_ms = true;    // output.buffer_ms sets its buffer (ASIO: the driver's own setting)
+};
+using OutputCapsQuery = std::function<OutputCaps(const OutputChoice&)>;
+
 // The outputs of this platform (Windows: WASAPI exclusive / shared, ASIO); fails with a message for an
 // API the platform does not have.
 OutputOpener platform_output_opener();
+// What each of them offers.
+OutputCapsQuery platform_output_caps();
 
 // Where the player gets its device and its PCM decoders from. Tests give a fake device and synthetic
-// sources; empty members take the defaults (platform_output_opener, open_decoder).
+// sources; empty members take the defaults (platform_output_opener, open_decoder, platform_output_caps).
 struct PlayerDeps {
     OutputOpener open_output;
     DecoderOpener open_decoder;
+    OutputCapsQuery output_caps;
 };
 
 class Player {

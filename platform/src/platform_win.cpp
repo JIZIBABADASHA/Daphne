@@ -19,9 +19,15 @@ std::string utf8(const wchar_t* w, int n) {
     return s;
 }
 
+thread_local bool t_realtime = false;   // in_realtime_scope
+
 }  // namespace
 
+bool in_realtime_scope() { return t_realtime; }
+
 RealtimeScope::RealtimeScope() {
+    outer_ = t_realtime;
+    t_realtime = true;
     timeBeginPeriod(1);
     PROCESS_POWER_THROTTLING_STATE pt{};
     pt.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
@@ -39,6 +45,7 @@ RealtimeScope::~RealtimeScope() {
     set_fp_control(fp_);
     if (handle_) AvRevertMmThreadCharacteristics(handle_);
     timeEndPeriod(1);
+    t_realtime = outer_;
 }
 
 RealtimeHelperScope::RealtimeHelperScope() {

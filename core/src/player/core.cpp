@@ -248,7 +248,7 @@ void Player::Impl::run() {
             event(s.output.dsd == DsdMode::Pcm ? "converting the DSD file to PCM (output.dsd = pcm)"
                                                 : "DSD cannot be sent directly (" + de + "): converting the DSD file to PCM");
             // shared mode runs at the mixer rate: convert to it when it divides the DSD rate
-            if (api_is_shared(out.api)) {
+            if (caps().shared_mix) {
                 std::string pe;
                 if (auto probe = open_output({out, s.output.buffer_ms, dsdf->info().dsd_rate / 16, dsdf->info().channels, false}, &pe)) {
                     const int mix = probe->format().rate;

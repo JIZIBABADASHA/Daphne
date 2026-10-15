@@ -34,12 +34,6 @@ constexpr int kChunk = 4096;           // source frames the processing thread de
 constexpr double kFadeSeconds = 0.05;  // crossfade to a rebuilt chain
 constexpr double kPi = 3.141592653589793;
 
-// What the output API offers, decided before a device is open: native DSD (ASIO), a mixer that is never
-// bit-perfect and cannot carry DSD (WASAPI shared), a buffer length the player sets (WASAPI).
-inline bool api_has_native_dsd(OutputApi a) { return a == OutputApi::Asio; }
-inline bool api_is_shared(OutputApi a) { return a == OutputApi::WasapiShared; }
-inline bool api_takes_buffer_ms(OutputApi a) { return a != OutputApi::Asio; }
-
 // The device rate asked for: pcm core, the output rate for the source; dsd core, the DoP rate
 // (DSD clock / 16).
 int requested_rate(const Settings& s, int fs_in);

@@ -18,4 +18,14 @@ OutputOpener platform_output_opener() {
     };
 }
 
+OutputCapsQuery platform_output_caps() {
+    return [](const OutputChoice& o) {
+        OutputCaps c;
+        c.native_dsd = o.api == OutputApi::Asio;
+        c.shared_mix = o.api == OutputApi::WasapiShared;
+        c.takes_buffer_ms = o.api != OutputApi::Asio;
+        return c;
+    };
+}
+
 }  // namespace daphne

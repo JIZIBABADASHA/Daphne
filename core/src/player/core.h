@@ -142,6 +142,7 @@ struct Player::Impl {
     // ------------------------------------------------------------------ small helpers
 
     std::unique_ptr<AudioOutput> open_output(const OutputRequest& req, std::string* error) { return deps.open_output(req, error); }
+    OutputCaps caps() const { return deps.output_caps(out); }   // what the chosen output offers
     void event(const std::string& e) const { report.event(e); }
     // a faded frame on an integer device: TPDF re-quantization (FadeQuantizer)
     void requantize(double* frame) { fq.requantize(frame, rep.device, dch, dsdenc != nullptr); }
@@ -151,7 +152,7 @@ struct Player::Impl {
     // The source of the track being decoded (the last switched-to one, or the heard one).
     const AudioInfo& decoding_info() const { return tl.switches.empty() ? rep.source : tl.switches.back().info; }
     // what plays now, for the change decisions (change_plan.h)
-    Playing playing() const { return {s, out, want, rep.source.rate, cur_path}; }
+    Playing playing() const { return {s, out, caps(), want, rep.source.rate, cur_path}; }
 
     // ------------------------------------------------------------------ core.cpp: the thread
 

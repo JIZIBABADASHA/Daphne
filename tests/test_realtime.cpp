@@ -13,6 +13,7 @@
 #include "daphne/engine/audio_output.h"
 #include "daphne/engine/ring_buffer.h"
 #include "daphne/engine/ring_feeder.h"
+#include "daphne/platform/platform.h"
 
 using namespace daphne;
 
@@ -137,4 +138,16 @@ TEST_CASE("Mailbox: the audio thread never frees, and the last post is always ta
         box.reset();
     }
     CHECK(g_freed_on_audio == 0);
+}
+
+TEST_CASE("RealtimeScope: in_realtime_scope follows the scope on its own thread only", "[realtime]") {
+    CHECK_FALSE(platform::in_realtime_scope());
+    {
+        platform::RealtimeScope rt;
+        CHECK(platform::in_realtime_scope());
+        bool other = true;
+        std::thread([&] { other = platform::in_realtime_scope(); }).join();
+        CHECK_FALSE(other);
+    }
+    CHECK_FALSE(platform::in_realtime_scope());
 }
