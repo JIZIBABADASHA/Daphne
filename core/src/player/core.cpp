@@ -1,6 +1,8 @@
 // Player::Impl, the processing thread (core.h): start, the playback loop, transport, device upkeep, the end.
 #include "core.h"
 
+#include "daphne/engine/live_source.h"
+
 namespace daphne {
 
 // PCM: settings changes in place / rebuilt / with a restart; the background rebuild and the change
@@ -161,7 +163,7 @@ void Player::Impl::do_seek(double sec) {
     io.eof = false;
     end_queued = false;
     io.dev->rearm();
-    while (!cancel && io.ring->writable() >= io.bytes.size()) {   // refill
+    while (!cancel && io.room() >= io.chunk_bytes()) {   // refill
         if (!(dsdf ? produce_dsd() : produce())) {
             if (!try_gapless()) {
                 queue_end();
@@ -174,7 +176,8 @@ void Player::Impl::do_seek(double sec) {
     io.push();
     io.dev->set_paused(want_pause.load());
     pos = heard_position();
-    event("seek to " + std::to_string(sec) + " s");
+    event(is_live_path(cur_path) ? std::string("live input: back to the writer (what it wrote meanwhile is skipped)")
+                                 : "seek to " + std::to_string(sec) + " s");
 }
 
 void Player::Impl::service_transport() {
@@ -184,6 +187,11 @@ void Player::Impl::service_transport() {
         sk.swap(seek_req);
     }
     if (sk) do_seek(*sk);
+    // a live source resumed: the producer kept writing while it was paused, so it goes back to the writer
+    // (a seek: the device is already silent, the ring is refilled, it fades in) instead of playing that late
+    const bool paused_now = want_pause.load();
+    if (io.dev && was_paused && !paused_now && !dsdf && is_live_path(cur_path)) do_seek(pos_sec.load());
+    was_paused = paused_now;
     if (io.dev) {
         io.dev->set_paused(want_pause.load());
         double l = 0, r = 0;
@@ -208,6 +216,7 @@ void Player::Impl::run() {
     dsp::set_design_threads(s.design.threads);
     std::string e;
     bool started_dsd = false;
+    cur_path = path;   // the opening already depends on it (a live source, open_and_start)
     if (is_dsd_path(path)) {
         auto f = std::make_unique<DsdFile>();
         if (!f->open(path, &e)) {
@@ -289,7 +298,6 @@ void Player::Impl::run() {
 void Player::Impl::play(Stream& st) {
     stream = &st;
     ok = true;
-    cur_path = path;
     while (!cancel) {
         std::optional<std::pair<Settings, OutputChoice>> p;
         {

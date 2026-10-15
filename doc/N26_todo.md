@@ -30,7 +30,6 @@
 
 ## 已知問題（暫不處理）
 
-- **即時輸入（YouTube Music）延遲大**：兩層緩衝（MIKU 環 0.3 s + 播放器環 0.5 s）。
 - **Linux 上 double-double 的 worker 優先權**：處理執行緒拿到 `SCHED_FIFO` 時，每個 block 都要等的 `WorkerPool` worker 只是 `SCHED_OTHER`（「高於一般」的 nice −5 沒有權限時失敗），可能拖慢處理執行緒。Windows 的 worker 也不是 MMCSS（`THREAD_PRIORITY_ABOVE_NORMAL`）。做 ALSA 輸出時一起檢查。
 - **處理執行緒的 sleep 輪詢**（環滿時 2 ms、排空時 5 ms、等待裝置的迴圈）：之後改成事件等待。
 

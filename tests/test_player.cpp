@@ -442,6 +442,66 @@ TEST_CASE("Player: a driver reset reopens the device and resumes", "[player]") {
 }
 
 TEST_CASE("Player: live input plays the producer's stream", "[player][live]") {
+    for (const char* rate : {"native", "192000"}) {
+        DYNAMIC_SECTION("output.rate " << rate) {
+            Rig r;
+            use_float_device(*r.dev);
+            r.dev->speed = 1.0;
+            const int cap = 96000;
+            std::vector<uint8_t> mem(16 + static_cast<size_t>(cap) * 8, 0);
+            set_live_bus(mem.data(), cap, 48000);
+            std::atomic<bool> stop{false};
+            std::thread producer([&] {
+                auto* index = reinterpret_cast<uint32_t*>(mem.data());
+                auto* ring = reinterpret_cast<float*>(mem.data() + 16);
+                int64_t t = 0;
+                const auto t0 = std::chrono::steady_clock::now();
+                while (!stop) {
+                    const int64_t due =
+                        static_cast<int64_t>(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 48000);
+                    for (; t < due; ++t) {
+                        const float v = static_cast<float>(0.5 * std::sin(2 * kPi * 1000.0 * t / 48000.0));
+                        const size_t k = static_cast<size_t>(t % cap);
+                        ring[2 * k] = v, ring[2 * k + 1] = v;
+                    }
+                    std::atomic_thread_fence(std::memory_order_release);
+                    *reinterpret_cast<volatile uint32_t*>(index) = static_cast<uint32_t>(t);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+            });
+            Settings s;
+            s.output.rate = rate;
+            s.filter.taps = 256;
+            REQUIRE(r.start(kLivePath, s));
+            // the player's part of the delay: what the live decoder has read and the device has not played yet
+            double held = 0;
+            for (int i = 0; i < 25; ++i) {
+                sleep_s(0.1);
+                if (i >= 10) held = std::max(held, live_stats().read - r.player->position_seconds());
+            }
+            r.player->stop();
+            const auto rep = r.finish();
+            stop = true;
+            producer.join();
+            set_live_bus(nullptr, 0, 0);
+            const int dr = rep.device.rate;
+            CHECK(dr == (std::string(rate) == "192000" ? 192000 : 48000));
+            const auto y = r.dev->samples_f32();
+            const size_t frames = y.size() / 2;
+            // silence first (the player's prefill and the live decoder's 0.15 s jitter buffer), then the sine
+            size_t music = 0;
+            while (music < frames && std::abs(y[music * 2]) < 1e-4f) ++music;
+            const size_t half = static_cast<size_t>(dr / 2), ms = static_cast<size_t>(dr / 1000);
+            REQUIRE(music + half < frames);   // at least half a second of it
+            CHECK(frequency(y, 2, music + 20 * ms, music + half - 20 * ms, dr) == Catch::Approx(1000.0).margin(3.0));
+            CHECK(longest_quiet(y, 2, music + 20 * ms, music + half - 20 * ms) < static_cast<size_t>(dr / 4800));
+            INFO("held by the player: " << held << " s");
+            CHECK(held < 0.12);   // a short ring for a live source (N4), not the 0.5 s of a file
+        }
+    }
+}
+
+TEST_CASE("Player: a live source resumed after a pause goes back to the writer", "[player][live]") {
     Rig r;
     use_float_device(*r.dev);
     r.dev->speed = 1.0;
@@ -449,38 +509,32 @@ TEST_CASE("Player: live input plays the producer's stream", "[player][live]") {
     std::vector<uint8_t> mem(16 + static_cast<size_t>(cap) * 8, 0);
     set_live_bus(mem.data(), cap, 48000);
     std::atomic<bool> stop{false};
-    std::thread producer([&] {
+    std::thread producer([&] {   // writes on through the pause, as the page does
         auto* index = reinterpret_cast<uint32_t*>(mem.data());
-        auto* ring = reinterpret_cast<float*>(mem.data() + 16);
-        int64_t t = 0;
         const auto t0 = std::chrono::steady_clock::now();
         while (!stop) {
-            const int64_t due = static_cast<int64_t>(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 48000);
-            for (; t < due; ++t) {
-                const float v = static_cast<float>(0.5 * std::sin(2 * kPi * 1000.0 * t / 48000.0));
-                const size_t k = static_cast<size_t>(t % cap);
-                ring[2 * k] = v, ring[2 * k + 1] = v;
-            }
+            const auto t = static_cast<uint32_t>(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 48000);
             std::atomic_thread_fence(std::memory_order_release);
-            *reinterpret_cast<volatile uint32_t*>(index) = static_cast<uint32_t>(t);
+            *reinterpret_cast<volatile uint32_t*>(index) = t;
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     });
     REQUIRE(r.start(kLivePath, Settings{}));
-    sleep_s(2.5);
+    sleep_s(1.0);
+    r.player->pause(true);
+    sleep_s(0.6);   // the producer gets 0.6 s ahead (the decoder does not read meanwhile: its fill is not updated)
+    r.player->pause(false);
+    sleep_s(0.4);
+    const double fill = live_stats().fill;
     r.player->stop();
     r.finish();
     stop = true;
     producer.join();
     set_live_bus(nullptr, 0, 0);
-    const auto y = r.dev->samples_f32();
-    const size_t frames = y.size() / 2;
-    // silence first (the player's prefill and the live decoder's 0.3 s jitter buffer), then the sine
-    size_t music = 0;
-    while (music < frames && std::abs(y[music * 2]) < 1e-4f) ++music;
-    REQUIRE(music + 24000 < frames);   // at least half a second of it
-    CHECK(frequency(y, 2, music + 1000, music + 23000, 48000) == Catch::Approx(1000.0).margin(3.0));
-    CHECK(longest_quiet(y, 2, music + 1000, music + 23000) < 10);
+    CHECK(r.saw("live input: back to the writer"));
+    INFO("fill after the resume: " << fill << " s");
+    CHECK(fill > 0.1);    // the player's refill came out of the reserve, not out of the target
+    CHECK(fill < 0.25);   // about the 0.15 s target again, not 0.75 s
 }
 
 namespace {

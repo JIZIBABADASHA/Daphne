@@ -1,6 +1,8 @@
 // Player::Impl, PCM (core.h): opening the device and the chain, producing chunks, the crossfade to a rebuilt chain.
 #include "core.h"
 
+#include "daphne/engine/live_source.h"
+
 namespace daphne {
 
 bool Player::Impl::open_and_start(int64_t from, std::string* error) {
@@ -151,9 +153,21 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
         tmp_c = dsp;
         tmp_n = dsp;
         io.bytes.assign(dsdenc ? dsdenc->max_bytes(cur->max_output_frames()) : static_cast<size_t>(cur->max_output_frames()) * io.block, 0);
+        // a live source is read 10 ms at a time into a short ring: its delay is the live decoder's jitter
+        // buffer, not the player's (N4); a file reads whole chunks into about 0.5 s
+        const bool live = is_live_path(cur_path);
+        read_frames = live ? std::clamp(src.rate / 100, 64, kChunk) : kChunk;
+        io.limit = live ? io.live_limit(rep.device.frame_rate()) : 0;
+        // what the prefill (and a refill after a resume) takes from the live decoder at once: the ring up to
+        // its limit plus a read, so the decoder holds its target once the ring is full
+        if (live && rep.device.frame_rate() > 0 && io.block > 0)
+            set_live_reserve(static_cast<double>(io.limit) / (static_cast<double>(io.block) * rep.device.frame_rate()) +
+                             static_cast<double>(read_frames) / src.rate);
+        const int read_out = static_cast<int>((static_cast<int64_t>(read_frames) * crate + src.rate - 1) / src.rate);   // chain frames per read
+        io.chunk = !live ? 0 : dsdenc ? dsdenc->max_bytes(read_out) : static_cast<size_t>(read_out) * io.block;
         // DSD: silence first, so the DAC has switched to DSD and locked before the music (output.dsd_lead_in_ms)
         if (dsdenc) push_dsd_idle(s.output.dsd_lead_in_ms);
-        while (!cancel && io.ring->writable() >= io.bytes.size()) {   // prefill
+        while (!cancel && io.room() >= io.chunk_bytes()) {   // prefill
             if (!produce()) {
                 io.eof = true;
                 break;
@@ -269,7 +283,7 @@ bool Player::Impl::produce() {
             work += Throughput::Clock::now() - tj;
             continue;   // (0: the join is over, its last frames are in the carry)
         }
-        const int got = dec->read(pcm.data(), kChunk);
+        const int got = dec->read(pcm.data(), read_frames);
         const auto t0 = Throughput::Clock::now();
         if (got > 0) {
             hist.store(pcm.data(), got, in_total);

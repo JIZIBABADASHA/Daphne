@@ -99,6 +99,7 @@ struct Player::Impl {
     int ratio = 1, ch = 0, dch = 0, want = 0;
     // chain output rate / format (= the device's, except for the dsd core: the modulator's PCM)
     int crate = 0;
+    int read_frames = kChunk;          // source frames per decoder read (shorter for a live source)
     DeviceFormat chain_fmt{};
     std::unique_ptr<DsdEncoder> dsdenc;
     std::unique_ptr<DsdFile> dsdf;     // DSD file played directly (no chain)
@@ -110,6 +111,7 @@ struct Player::Impl {
     std::optional<double> seek_req;
     std::filesystem::path cur_path;    // the track being heard
     std::atomic<double> pos_sec{0.0};
+    bool was_paused = false;           // the last pause request seen (service_transport: a live source resumed)
     std::atomic<double> meter_l{0.0}, meter_r{0.0};
     bool end_queued = false;           // the stream end (DSD silence) is queued
     std::atomic<bool> device_fail{false};

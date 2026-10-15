@@ -106,7 +106,7 @@ public sealed partial class DaphneEngine
         PathRow decode = t.IsLive
             ? Row("解碼", "瀏覽器解碼 · 32-bit 浮點", true,
                   "YouTube Music 網頁的聲音由瀏覽器（WebView2）解碼，經共用記憶體送進 Daphne",
-                  "時鐘校正：瀏覽器與 DAC 的時鐘不同，讀取速率微調（最多 ±0.5%）讓緩衝維持約 0.3 秒，以 4 點 Hermite 內插",
+                  "時鐘校正：瀏覽器與 DAC 的時鐘不同，讀取速率微調（最多 ±0.5%）讓緩衝維持約 0.15 秒（網頁送得不穩、出現斷流時自動加大，最多 0.3 秒，穩定後再降回），以 4 點 Hermite 內插",
                   "不丟也不重複樣本，所以沒有爆音")
               with { pin = new[] { To(Pcm(F64, pcmRate)), new PathPin("解碼器", "瀏覽器（WebView2）") } }
             : isDsd

@@ -17,7 +17,10 @@ constexpr double kPi = 3.141592653589793;
 
 // The host's shared ring: uint32 write index | 12 bytes | float32 stereo.
 struct Bus {
-    explicit Bus(int cap) : cap(cap), mem(16 + static_cast<size_t>(cap) * 8, 0) { set_live_bus(mem.data(), cap, 48000); }
+    explicit Bus(int cap) : cap(cap), mem(16 + static_cast<size_t>(cap) * 8, 0) {
+        set_live_bus(mem.data(), cap, 48000);
+        set_live_reserve(0);   // no player here (a player test may have set it)
+    }
     ~Bus() { set_live_bus(nullptr, 0, 0); }
     uint32_t& index() { return *reinterpret_cast<uint32_t*>(mem.data()); }
     float* ring() { return reinterpret_cast<float*>(mem.data() + 16); }
@@ -90,7 +93,7 @@ TEST_CASE("Live decoder: lapped by the writer it restarts close to it; a starve 
     bus.write(20000);
     d->read(out.data(), 1024);   // syncs to the writer (silence)
     bus.write(20000);
-    REQUIRE(d->read(out.data(), 1024) > 0);   // primed (more than 0.3 s ahead), reading
+    REQUIRE(d->read(out.data(), 1024) > 0);   // primed (more than the 0.15 s target ahead), reading
     bus.write(47000);                          // laps the reader
     d->read(out.data(), 1024);
     CHECK(live_stats().resyncs == 1);
@@ -107,6 +110,84 @@ TEST_CASE("Live decoder: lapped by the writer it restarts close to it; a starve 
     CHECK(waited >= std::chrono::milliseconds(15));
     CHECK(waited < std::chrono::milliseconds(200));
     CHECK(live_stats().starves >= 1);
+}
+
+TEST_CASE("Live decoder: a seek (the player resuming) skips the backlog beyond the target", "[live]") {
+    Bus bus(96000);
+    std::string e;
+    auto d = open_decoder(kLivePath, &e);
+    REQUIRE(d);
+    std::vector<double> out(4096 * 2);
+    bus.write(20000);
+    d->read(out.data(), 1024);                 // syncs to the writer (silence)
+    bus.write(20000);
+    REQUIRE(d->read(out.data(), 1024) > 0);   // primed, reading
+    bus.write(24000);                          // half a second written while the player was paused (below kOverflow)
+    d->read(out.data(), 1024);
+    CHECK(live_stats().fill > 0.6);            // the target it started at (0.15 s) plus the half second
+    REQUIRE(d->seek(12345));
+    REQUIRE(d->read(out.data(), 1024) > 0);
+    CHECK(live_stats().fill == Catch::Approx(0.15).margin(0.001));   // back at the target behind the writer (no reserve set)
+    CHECK(live_stats().resyncs == 0);                                 // not counted as a resync
+    // without a backlog a seek changes nothing
+    const double before = live_stats().fill;
+    REQUIRE(d->seek(20000));
+    d->read(out.data(), 256);
+    CHECK(live_stats().fill <= before);
+}
+
+TEST_CASE("Live decoder: the target grows by a step per stall and comes back down after quiet minutes", "[live]") {
+    Bus bus(96000);
+    std::string e;
+    auto d = open_decoder(kLivePath, &e);
+    REQUIRE(d);
+    std::vector<double> out(4096 * 2);
+    CHECK(live_stats().target == Catch::Approx(0.15));
+    bus.write(20000);
+    d->read(out.data(), 1024);   // syncs
+    bus.write(20000);
+    REQUIRE(d->read(out.data(), 1024) > 0);
+    // a stall: drained, then several silences in a row; one step for all of them
+    auto stall = [&] {
+        int guard = 0;
+        while (d->read(out.data(), 4096) > 240 && ++guard < 200) {}
+        for (int i = 0; i < 3; ++i) d->read(out.data(), 4096);
+    };
+    const int64_t s0 = live_stats().starves;
+    stall();
+    CHECK(live_stats().starves >= s0 + 3);
+    CHECK(live_stats().target == Catch::Approx(0.20));
+    bus.write(20000);
+    REQUIRE(d->read(out.data(), 1024) > 0);   // data again: the stall is over
+    stall();
+    CHECK(live_stats().target == Catch::Approx(0.25));
+    for (int k = 0; k < 4; ++k) {   // capped at 0.30
+        bus.write(20000);
+        REQUIRE(d->read(out.data(), 1024) > 0);
+        stall();
+    }
+    CHECK(live_stats().target == Catch::Approx(0.30));
+    // quiet: the producer keeps up (it writes what is read, the buffer stays put)
+    auto play = [&](double seconds) {
+        for (int64_t got = 0; got < static_cast<int64_t>(seconds * 48000);) {
+            bus.write(4096);
+            const int n = d->read(out.data(), 4096);
+            REQUIRE(n > 240);   // no starve
+            got += n;
+        }
+    };
+    bus.write(24000);   // a cushion, so the reads never wait
+    // (a few seconds' margin around the steps: what is counted is the audio read, interpolated)
+    play(57.0);
+    CHECK(live_stats().target == Catch::Approx(0.30));    // not yet
+    play(5.0);
+    CHECK(live_stats().target == Catch::Approx(0.275));   // about 60 s quiet: one step down
+    play(25.0);
+    CHECK(live_stats().target == Catch::Approx(0.275));
+    play(5.0);
+    CHECK(live_stats().target == Catch::Approx(0.25));    // about 30 s later: the next
+    play(150.0);
+    CHECK(live_stats().target == Catch::Approx(0.15));    // and no lower than 0.15
 }
 
 TEST_CASE("Live decoder: without the host's ring it does not open", "[live]") {
