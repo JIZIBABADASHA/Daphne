@@ -11,6 +11,7 @@
 #include <fstream>
 #include <map>
 #include <random>
+#include <future>
 #include <thread>
 
 #include <nlohmann/json.hpp>
@@ -618,6 +619,30 @@ TEST_CASE("Crossfader: a warm-up in rounds starts the same crossfade as one warm
     CHECK(std::equal(one.fn.data(), one.fn.data() + 2 * one.fn.frames(), rounds.fn.data()));
     // the history has moved past what a round still needs
     CHECK_FALSE(playback::copy_history(h, 0, h.cap + 1, &in));
+
+    // a cancelled round stops at once (a seek, a restart or the end does not wait for it)
+    std::atomic<bool> stop{true};
+    auto wc = playback::Crossfader::prepare(chain(), h, 30000, abs_last, cur_delay, ratio, 2, &in);
+    const int64_t at = wc.in_done;
+    wc.cancel = &stop;
+    wc.feed(in.data(), 30000 - wc.in_done, 2);
+    CHECK(wc.in_done == at);
+}
+
+TEST_CASE("PoolThreadScope: a std::async task leaves its thread as it found it", "[player]") {
+    // MSVC runs std::async tasks on a thread pool and reuses the threads: a priority or FTZ set by one task
+    // would reach the next (a filter design)
+    const uint64_t fp0 = std::async(std::launch::async, [] { return platform::fp_control(); }).get();
+    for (int i = 0; i < 5; ++i) {
+        std::async(std::launch::async, [] {
+            playback::PoolThreadScope pool;
+            platform::set_thread_priority(platform::Priority::BelowNormal);
+            platform::set_fp_control(platform::with_flush_to_zero(platform::fp_control()));
+        }).get();
+        const auto [prio, fp] = std::async(std::launch::async, [] { return std::make_pair(platform::thread_priority(), platform::fp_control()); }).get();
+        CHECK(prio == platform::Priority::Normal);
+        CHECK(fp == fp0);
+    }
 }
 
 TEST_CASE("Player: gapless to another rate keeps the next track in time with a long filter", "[player]") {

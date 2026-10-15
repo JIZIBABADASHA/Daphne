@@ -19,6 +19,7 @@ bool copy_history(const History& h, int64_t from, int64_t to, std::vector<double
 void Warm::feed(const double* x, int64_t n, int ch) {
     std::vector<double> o(static_cast<size_t>(chain->max_output_frames()) * out.ch);
     for (int64_t f = 0; f < n;) {
+        if (cancel && cancel->load(std::memory_order_relaxed)) return;   // dropped: its state does not matter
         const int k = static_cast<int>(std::min<int64_t>(kChunk, n - f));
         const int got = chain->process(x + static_cast<size_t>(f) * ch, k, o.data());
         const int d = static_cast<int>(std::min<int64_t>(drop, got));

@@ -90,6 +90,7 @@ struct Player::Impl {
     std::unique_ptr<DspChain> cur;
     std::future<std::unique_ptr<DspChain>> building;
     std::future<Warm> warming;         // a built chain's warm-up round in the background (begin_crossfade)
+    std::shared_ptr<std::atomic<bool>> warm_cancel;   // stops that round (take_warm)
     int warm_rounds = 0;
     int64_t warm_last = 0;             // input frames of the last round
     std::optional<std::pair<Settings, OutputChoice>> build_target, queued;

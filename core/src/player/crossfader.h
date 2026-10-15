@@ -3,6 +3,7 @@
 // the playing one by content delay and crossfaded in (raised cosine, 50 ms). Also the input history the
 // warm-up needs, and the re-quantization of faded frames on integer devices (N21).
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -64,6 +65,7 @@ struct Warm {
     int64_t target = 0;      // the content the playing chain played next when the warm-up started
     int64_t in_done = 0;     // input frame it is fed up to (stream timeline)
     int64_t drop = 0;        // chain output frames before `target`, still to drop
+    const std::atomic<bool>* cancel = nullptr;   // set: feed stops at the next chunk (the warm-up is dropped)
 
     // n input frames (interleaved, ch channels), the ones at in_done ..
     void feed(const double* x, int64_t n, int ch);

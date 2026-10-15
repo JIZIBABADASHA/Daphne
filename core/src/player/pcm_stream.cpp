@@ -201,10 +201,14 @@ void Player::Impl::begin_crossfade(std::unique_ptr<DspChain> nx) {
 void Player::Impl::launch_warm(Warm w, std::vector<double> in) {
     ++warm_rounds;
     warm_last = static_cast<int64_t>(in.size() / static_cast<size_t>(ch));
-    warming = std::async(std::launch::async, [w = std::move(w), in = std::move(in), ch = ch]() mutable {
+    warm_cancel = std::make_shared<std::atomic<bool>>(false);
+    warming = std::async(std::launch::async, [w = std::move(w), in = std::move(in), ch = ch, flag = warm_cancel]() mutable {
+        PoolThreadScope pool;   // what this task sets on its thread is undone when it ends (common.h)
         platform::set_thread_priority(platform::Priority::BelowNormal);
         platform::set_fp_control(platform::with_flush_to_zero(platform::fp_control()));   // as on the processing thread
+        w.cancel = flag.get();
         w.feed(in.data(), static_cast<int64_t>(in.size() / static_cast<size_t>(ch)), ch);
+        w.cancel = nullptr;   // the flag lives with this task; a later round sets its own
         return std::move(w);
     });
 }
@@ -240,6 +244,7 @@ void Player::Impl::poll_warm() {
 
 std::unique_ptr<DspChain> Player::Impl::take_warm() {
     if (!warming.valid()) return nullptr;
+    if (warm_cancel) *warm_cancel = true;   // the round stops at its next chunk instead of running to the end
     return warming.get().chain;
 }
 

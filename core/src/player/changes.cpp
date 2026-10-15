@@ -11,6 +11,7 @@ void Player::Impl::launch_build(const Settings& ns, const OutputChoice& no) {
     build_designs = (chain_fmt.rate != src.rate || cs.filter.apodize) && !filter_cached(cs.filter, src.rate, chain_fmt.rate);
     build_cancel = std::make_shared<std::atomic<bool>>(false);
     building = std::async(std::launch::async, [cs, src, devf = chain_fmt, this, flag = build_cancel]() -> std::unique_ptr<DspChain> {
+        PoolThreadScope pool;   // the priority below is undone when the task ends (common.h)
         // playback is running: stay below it (the design workers take this priority)
         platform::set_thread_priority(platform::Priority::BelowNormal);
         dsp::ProgressScope scope(&report.design_prog);
