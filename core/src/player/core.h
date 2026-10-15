@@ -111,6 +111,7 @@ struct Player::Impl {
     std::optional<double> seek_req;
     std::filesystem::path cur_path;    // the track being heard
     std::atomic<double> pos_sec{0.0};
+    bool was_paused = false;           // the last pause request seen (service_transport: a live source resumed)
     std::atomic<double> meter_l{0.0}, meter_r{0.0};
     bool end_queued = false;           // the stream end (DSD silence) is queued
     std::atomic<bool> device_fail{false};

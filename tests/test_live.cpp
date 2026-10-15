@@ -90,7 +90,7 @@ TEST_CASE("Live decoder: lapped by the writer it restarts close to it; a starve 
     bus.write(20000);
     d->read(out.data(), 1024);   // syncs to the writer (silence)
     bus.write(20000);
-    REQUIRE(d->read(out.data(), 1024) > 0);   // primed (more than 0.3 s ahead), reading
+    REQUIRE(d->read(out.data(), 1024) > 0);   // primed (more than the 0.15 s target ahead), reading
     bus.write(47000);                          // laps the reader
     d->read(out.data(), 1024);
     CHECK(live_stats().resyncs == 1);
@@ -107,6 +107,30 @@ TEST_CASE("Live decoder: lapped by the writer it restarts close to it; a starve 
     CHECK(waited >= std::chrono::milliseconds(15));
     CHECK(waited < std::chrono::milliseconds(200));
     CHECK(live_stats().starves >= 1);
+}
+
+TEST_CASE("Live decoder: a seek (the player resuming) skips the backlog beyond the target", "[live]") {
+    Bus bus(96000);
+    std::string e;
+    auto d = open_decoder(kLivePath, &e);
+    REQUIRE(d);
+    std::vector<double> out(4096 * 2);
+    bus.write(20000);
+    d->read(out.data(), 1024);                 // syncs to the writer (silence)
+    bus.write(20000);
+    REQUIRE(d->read(out.data(), 1024) > 0);   // primed, reading
+    bus.write(24000);                          // half a second written while the player was paused (below kOverflow)
+    d->read(out.data(), 1024);
+    CHECK(live_stats().fill > 0.8);
+    REQUIRE(d->seek(12345));
+    REQUIRE(d->read(out.data(), 1024) > 0);
+    CHECK(live_stats().fill == Catch::Approx(0.15).margin(0.001));   // back at the target behind the writer
+    CHECK(live_stats().resyncs == 0);                                 // not counted as a resync
+    // without a backlog a seek changes nothing
+    const double before = live_stats().fill;
+    REQUIRE(d->seek(20000));
+    d->read(out.data(), 256);
+    CHECK(live_stats().fill <= before);
 }
 
 TEST_CASE("Live decoder: without the host's ring it does not open", "[live]") {

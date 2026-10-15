@@ -34,10 +34,10 @@ public:
     size_t ring_bytes(int frame_rate) const {
         return std::max(static_cast<size_t>(frame_rate) * block / 2, static_cast<size_t>(dev->buffer_frames()) * 3 * block);
     }
-    // live input: what the ring holds is delay, so it is kept at about three device buffers (at least
-    // 50 ms) instead of 0.5 s; the capacity stays (it is rounded up to a power of two anyway)
+    // live input: what the ring holds is delay, so it is kept at two device buffers (at least 50 ms) instead
+    // of 0.5 s: one being played, one ready; the capacity stays (it is rounded up to a power of two anyway)
     size_t live_limit(int frame_rate) const {
-        return std::max(static_cast<size_t>(frame_rate) * block / 20, static_cast<size_t>(dev->buffer_frames()) * 3 * block);
+        return std::max(static_cast<size_t>(frame_rate) * block / 20, static_cast<size_t>(dev->buffer_frames()) * 2 * block);
     }
     // what the prefill and refill loops wait room for
     size_t chunk_bytes() const { return chunk ? std::min(chunk, bytes.size()) : bytes.size(); }

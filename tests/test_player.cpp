@@ -488,7 +488,7 @@ TEST_CASE("Player: live input plays the producer's stream", "[player][live]") {
             CHECK(dr == (std::string(rate) == "192000" ? 192000 : 48000));
             const auto y = r.dev->samples_f32();
             const size_t frames = y.size() / 2;
-            // silence first (the player's prefill and the live decoder's 0.3 s jitter buffer), then the sine
+            // silence first (the player's prefill and the live decoder's 0.15 s jitter buffer), then the sine
             size_t music = 0;
             while (music < frames && std::abs(y[music * 2]) < 1e-4f) ++music;
             const size_t half = static_cast<size_t>(dr / 2), ms = static_cast<size_t>(dr / 1000);
@@ -499,6 +499,41 @@ TEST_CASE("Player: live input plays the producer's stream", "[player][live]") {
             CHECK(held < 0.12);   // a short ring for a live source (N4), not the 0.5 s of a file
         }
     }
+}
+
+TEST_CASE("Player: a live source resumed after a pause goes back to the writer", "[player][live]") {
+    Rig r;
+    use_float_device(*r.dev);
+    r.dev->speed = 1.0;
+    const int cap = 96000;
+    std::vector<uint8_t> mem(16 + static_cast<size_t>(cap) * 8, 0);
+    set_live_bus(mem.data(), cap, 48000);
+    std::atomic<bool> stop{false};
+    std::thread producer([&] {   // writes on through the pause, as the page does
+        auto* index = reinterpret_cast<uint32_t*>(mem.data());
+        const auto t0 = std::chrono::steady_clock::now();
+        while (!stop) {
+            const auto t = static_cast<uint32_t>(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 48000);
+            std::atomic_thread_fence(std::memory_order_release);
+            *reinterpret_cast<volatile uint32_t*>(index) = t;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    });
+    REQUIRE(r.start(kLivePath, Settings{}));
+    sleep_s(1.0);
+    r.player->pause(true);
+    sleep_s(0.6);   // the producer gets 0.6 s ahead (the decoder does not read meanwhile: its fill is not updated)
+    r.player->pause(false);
+    sleep_s(0.4);
+    const double fill = live_stats().fill;
+    r.player->stop();
+    r.finish();
+    stop = true;
+    producer.join();
+    set_live_bus(nullptr, 0, 0);
+    CHECK(r.saw("live input: back to the writer"));
+    INFO("fill after the resume: " << fill << " s");
+    CHECK(fill < 0.25);   // about the 0.15 s target again, not 0.75 s
 }
 
 namespace {

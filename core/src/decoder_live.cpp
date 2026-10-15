@@ -11,7 +11,10 @@ namespace daphne {
 
 namespace {
 
-constexpr double kTarget = 0.30;     // seconds of buffered input aimed for
+// seconds of buffered input aimed for: the YouTube Music page (MIKU) delivers 2048-frame blocks every 40 or
+// 60 ms and was measured at most 109 ms behind its average pace; 0.15 s covers that, the 10 ms reads and a
+// margin (N2)
+constexpr double kTarget = 0.15;
 constexpr double kOverflow = 1.2;    // beyond this something stalled: restart near the writer
 constexpr int kWaitMs = 20;          // running: how long to wait for the producer before a starve
 
@@ -46,7 +49,7 @@ public:
         info_.codec = "Live";
         info_.frames = -1;
         pos_ = 0;
-        synced_ = primed_ = false;
+        synced_ = primed_ = jump_ = false;
         if (!open_) g_open++;
         open_ = true;
         g_resyncs = 0, g_starves = 0, g_read = 0;
@@ -58,8 +61,12 @@ public:
         open_ = false;
     }
 
-    bool seek(int64_t frame) override {   // a stream: only the position counter moves
+    // A stream has nowhere to seek to: the position counter moves, and the reader goes back to the writer. The
+    // player seeks a live source when it resumes after a pause: what the producer wrote meanwhile (it does not
+    // stop) would otherwise be played late, and the rate trim takes minutes to work off half a second.
+    bool seek(int64_t frame) override {
         pos_ = std::max<int64_t>(0, frame);
+        jump_ = true;
         return true;
     }
 
@@ -108,6 +115,11 @@ private:
             if (avail < kTarget * rate) return 0;
             primed_ = true;
         }
+        if (jump_) {   // after a seek (a resume): a backlog beyond the target is skipped
+            jump_ = false;
+            const int keep = static_cast<int>(kTarget * rate);
+            if (avail > keep) read_ = w - static_cast<uint32_t>(keep), frac_ = 0, adj_ = 0, avail = keep;
+        }
         const double fill = static_cast<double>(avail) / rate;
         g_fill = fill;
         if (fill > kOverflow) {
@@ -145,6 +157,7 @@ private:
     uint32_t read_ = 0;   // integer read position in the ring (frames, wraps like the writer's)
     double frac_ = 0;     // between read_ and read_ + 1
     bool synced_ = false, primed_ = false;
+    bool jump_ = false;   // seek(): back to the writer at the next read
     double adj_ = 0;      // smoothed rate correction
 };
 
