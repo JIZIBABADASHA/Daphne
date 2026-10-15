@@ -74,4 +74,5 @@ TEST_CASE("C API: dc_filter_cache_dir_utf8 returns the folder in UTF-8", "[capi]
     const std::filesystem::path off("off");
     test::set_env("DAPHNE_FILTER_CACHE", &off);
     CHECK(dc_filter_cache_dir_utf8(out, sizeof out) == 0);   // the cache is disabled
+    test::set_env("DAPHNE_FILTER_CACHE", nullptr);   // the tests after this one run as before
 }
