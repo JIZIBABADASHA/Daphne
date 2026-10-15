@@ -1,6 +1,8 @@
 // Player::Impl, PCM (core.h): opening the device and the chain, producing chunks, the crossfade to a rebuilt chain.
 #include "core.h"
 
+#include "daphne/engine/live_source.h"
+
 namespace daphne {
 
 bool Player::Impl::open_and_start(int64_t from, std::string* error) {
@@ -148,9 +150,16 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
         tmp_c = dsp;
         tmp_n = dsp;
         io.bytes.assign(dsdenc ? dsdenc->max_bytes(cur->max_output_frames()) : static_cast<size_t>(cur->max_output_frames()) * io.block, 0);
+        // a live source is read 10 ms at a time into a short ring: its delay is the live decoder's jitter
+        // buffer, not the player's (N4); a file reads whole chunks into about 0.5 s
+        const bool live = is_live_path(cur_path);
+        read_frames = live ? std::clamp(src.rate / 100, 64, kChunk) : kChunk;
+        io.limit = live ? io.live_limit(rep.device.frame_rate()) : 0;
+        const int out = static_cast<int>((static_cast<int64_t>(read_frames) * crate + src.rate - 1) / src.rate);
+        io.chunk = !live ? 0 : dsdenc ? dsdenc->max_bytes(out) : static_cast<size_t>(out) * io.block;
         // DSD: silence first, so the DAC has switched to DSD and locked before the music (output.dsd_lead_in_ms)
         if (dsdenc) push_dsd_idle(s.output.dsd_lead_in_ms);
-        while (!cancel && io.ring->writable() >= io.bytes.size()) {   // prefill
+        while (!cancel && io.room() >= io.chunk_bytes()) {   // prefill
             if (!produce()) {
                 io.eof = true;
                 break;
@@ -207,7 +216,7 @@ bool Player::Impl::produce() {
             xf.carry.pop(n);
             break;
         }
-        const int got = dec->read(pcm.data(), kChunk);
+        const int got = dec->read(pcm.data(), read_frames);
         if (got > 0) {
             hist.store(pcm.data(), got, in_total);
             in_total += got;

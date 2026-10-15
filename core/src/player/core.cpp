@@ -155,7 +155,7 @@ void Player::Impl::do_seek(double sec) {
     io.eof = false;
     end_queued = false;
     io.dev->rearm();
-    while (!cancel && io.ring->writable() >= io.bytes.size()) {   // refill
+    while (!cancel && io.room() >= io.chunk_bytes()) {   // refill
         if (!(dsdf ? produce_dsd() : produce())) {
             if (!try_gapless()) {
                 queue_end();
@@ -194,6 +194,7 @@ void Player::Impl::run() {
     dsp::set_design_threads(s.design.threads);
     std::string e;
     bool started_dsd = false;
+    cur_path = path;   // the opening already depends on it (a live source, open_and_start)
     if (is_dsd_path(path)) {
         auto f = std::make_unique<DsdFile>();
         if (!f->open(path, &e)) {
@@ -275,7 +276,6 @@ void Player::Impl::run() {
 void Player::Impl::play(Stream& st) {
     stream = &st;
     ok = true;
-    cur_path = path;
     while (!cancel) {
         std::optional<std::pair<Settings, OutputChoice>> p;
         {

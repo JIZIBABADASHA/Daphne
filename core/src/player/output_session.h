@@ -27,15 +27,30 @@ public:
     size_t pend = 0, pend_off = 0;
     int block = 0;                   // bytes per device frame
     std::atomic<bool> eof{false};    // the end of the stream is queued (the device drains then)
+    size_t limit = 0;                // the most the ring is filled to (0: its capacity); short for a live source (N4)
+    size_t chunk = 0;                // bytes one produce() makes at most (0: a whole chunk, bytes.size()); live: 10 ms
 
     // about 0.5 s, and at least three device buffers (a long output.buffer_ms takes a whole buffer per event)
     size_t ring_bytes(int frame_rate) const {
         return std::max(static_cast<size_t>(frame_rate) * block / 2, static_cast<size_t>(dev->buffer_frames()) * 3 * block);
     }
-    // The pending chunk into the ring; false when the ring is full.
+    // live input: what the ring holds is delay, so it is kept at about three device buffers (at least
+    // 50 ms) instead of 0.5 s; the capacity stays (it is rounded up to a power of two anyway)
+    size_t live_limit(int frame_rate) const {
+        return std::max(static_cast<size_t>(frame_rate) * block / 20, static_cast<size_t>(dev->buffer_frames()) * 3 * block);
+    }
+    // what the prefill and refill loops wait room for
+    size_t chunk_bytes() const { return chunk ? std::min(chunk, bytes.size()) : bytes.size(); }
+    // Room in the ring up to the limit.
+    size_t room() const {
+        const size_t cap = limit ? std::min(limit, ring->capacity()) : ring->capacity();
+        const size_t r = ring->readable();
+        return cap > r ? cap - r : 0;
+    }
+    // The pending chunk into the ring; false when the ring is full (up to the limit).
     bool push() {
         while (pend_off < pend) {
-            const size_t n = ring->write(bytes.data() + pend_off, pend - pend_off);
+            const size_t n = ring->write(bytes.data() + pend_off, std::min(pend - pend_off, room()));
             pend_off += n;
             if (n == 0) return false;
         }

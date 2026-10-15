@@ -81,10 +81,11 @@ bool Player::Impl::open_dsd(int64_t from, std::string* error) {
         io.ring = std::make_unique<ByteRing>(io.ring_bytes(rep.device.frame_rate()));
         dsd_in.assign(static_cast<size_t>(kChunk) * 4 * di.channels, 0);
         io.bytes.assign(static_cast<size_t>(kChunk) * 4 * io.block, 0);
+        io.limit = io.chunk = 0;
         // silence first, so the DAC has switched to DSD and locked before the music (output.dsd_lead_in_ms;
         // at least 30 ms after a restart)
         push_dsd_idle(std::max(s.output.dsd_lead_in_ms, want_fade_in ? 30 : 0));
-        while (!cancel && io.ring->writable() >= io.bytes.size()) {
+        while (!cancel && io.room() >= io.chunk_bytes()) {
             if (!produce_dsd()) {
                 io.eof = true;
                 break;

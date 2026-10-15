@@ -93,6 +93,7 @@ struct Player::Impl {
     int ratio = 1, ch = 0, dch = 0, want = 0;
     // chain output rate / format (= the device's, except for the dsd core: the modulator's PCM)
     int crate = 0;
+    int read_frames = kChunk;          // source frames per decoder read (shorter for a live source)
     DeviceFormat chain_fmt{};
     std::unique_ptr<DsdEncoder> dsdenc;
     std::unique_ptr<DsdFile> dsdf;     // DSD file played directly (no chain)
