@@ -1,5 +1,6 @@
 // The outputs of the Windows build: WASAPI exclusive / shared and ASIO (N24).
 #include "daphne/engine/asio_output.h"
+#include "daphne/engine/devices.h"
 #include "daphne/engine/player.h"
 #include "daphne/engine/wasapi_output.h"
 
@@ -16,6 +17,11 @@ OutputOpener platform_output_opener() {
         if (!w->open({r.out.device, r.out.api != OutputApi::WasapiShared, r.buffer_ms}, r.rate, r.channels, error)) return nullptr;
         return w;
     };
+}
+
+std::vector<CoreAudioDevice> list_coreaudio_devices(std::string* error) {
+    if (error) *error = "Core Audio is macOS only";
+    return {};
 }
 
 OutputCapsQuery platform_output_caps() {

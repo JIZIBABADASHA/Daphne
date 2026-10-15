@@ -30,7 +30,7 @@ add_library(daphne_engine STATIC
 )
 target_include_directories(daphne_engine PUBLIC include)
 target_link_libraries(daphne_engine PUBLIC daphne_dsp daphne_platform daphne_vendor)
-# the device outputs (N24, N25): WASAPI and ASIO on Windows; none yet elsewhere
+# the device outputs (N24, N25): WASAPI and ASIO on Windows, Core Audio on macOS; none yet on Linux
 if(WIN32)
     target_sources(daphne_engine PRIVATE
         src/output_win.cpp
@@ -39,6 +39,12 @@ if(WIN32)
         src/devices_wasapi.cpp
         src/devices_asio.cpp)
     target_link_libraries(daphne_engine PRIVATE ole32 advapi32 avrt winmm propsys)
+elseif(APPLE)
+    target_sources(daphne_engine PRIVATE
+        src/output_mac.cpp
+        src/coreaudio_output.cpp
+        src/devices_coreaudio.cpp)
+    target_link_libraries(daphne_engine PRIVATE "-framework CoreAudio" "-framework CoreFoundation")
 else()
     target_sources(daphne_engine PRIVATE src/output_none.cpp)
 endif()

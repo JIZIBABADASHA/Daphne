@@ -72,7 +72,8 @@ void usage() {
     std::cout << "daphne " << kVersion << "\n\n"
               << "usage:\n"
               << "  daphne version\n"
-              << "  daphne devices [--probe]                list WASAPI endpoints (--probe: exclusive formats) and ASIO drivers\n"
+              << "  daphne devices [--probe]                list WASAPI endpoints (--probe: exclusive formats) and ASIO drivers;\n"
+              << "                                          on macOS the Core Audio devices\n"
               << "  daphne play [--settings file] [--device id|index] [--shared|--exclusive|--asio [driver]]\n"
               << "              [--start S] [--length S] [--next file] [--watch] [--script t:cmd,...] files...\n"
               << "  daphne render-dsp <in> <out.wav> [--settings file] [--channels N] [--bits 16|24|32] [--float]\n"
@@ -455,6 +456,45 @@ int cmd_resampler_run(std::vector<std::string> args) {
 
 // ---------------------------------------------------------------- devices / play / render-dsp
 
+// --shared / --exclusive: this platform's API
+daphne::OutputApi shared_api() {
+#if defined(__APPLE__)
+    return daphne::OutputApi::CoreAudioShared;
+#else
+    return daphne::OutputApi::WasapiShared;
+#endif
+}
+
+const char* api_label(daphne::OutputApi a) {
+    switch (a) {
+        case daphne::OutputApi::Asio: return "ASIO";
+        case daphne::OutputApi::WasapiShared: return "shared";
+        case daphne::OutputApi::WasapiExclusive: return "exclusive";
+        case daphne::OutputApi::CoreAudioShared: return "Core Audio shared";
+        case daphne::OutputApi::CoreAudioExclusive: return "Core Audio exclusive (hog mode)";
+    }
+    return "?";
+}
+
+#if defined(__APPLE__)
+int cmd_devices(bool) {
+    std::string err;
+    const auto devs = daphne::list_coreaudio_devices(&err);
+    std::cout << "Core Audio output devices (" << devs.size() << ")\n";
+    if (!err.empty()) std::cout << "  error: " << err << "\n";
+    for (size_t i = 0; i < devs.size(); ++i) {
+        const auto& d = devs[i];
+        std::cout << "  [" << i << "] " << d.name << (d.is_default ? "  (system output)" : "") << "\n"
+                  << "      uid:   " << d.uid << "\n"
+                  << "      now:   " << d.rate << " Hz, " << d.channels << " ch, " << d.transport
+                  << (d.hog_pid >= 0 ? ", held in exclusive mode by pid " + std::to_string(d.hog_pid) : "") << "\n"
+                  << "      rates:";
+        for (int r : d.rates) std::cout << " " << r;
+        std::cout << "\n";
+    }
+    return 0;
+}
+#else
 int cmd_devices(bool probe) {
     std::string err;
     auto devs = daphne::list_wasapi_devices(probe, &err);
@@ -489,6 +529,7 @@ int cmd_devices(bool probe) {
                   << "\n      clsid: " << a.clsid << "\n";
     return 0;
 }
+#endif
 
 struct PlayConfig {
     daphne::Settings settings;
@@ -512,8 +553,8 @@ bool play_config(std::vector<std::string> args, PlayConfig& c) {
     c.files.clear();
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "--device" && i + 1 < args.size()) c.out.device = args[++i];
-        else if (args[i] == "--shared") c.out.api = daphne::OutputApi::WasapiShared;
-        else if (args[i] == "--exclusive") c.out.api = daphne::OutputApi::WasapiExclusive;
+        else if (args[i] == "--shared") c.out.api = shared_api();
+        else if (args[i] == "--exclusive") c.out.api = daphne::kDefaultOutputApi;
         else if (args[i] == "--watch") c.watch = true;
         else if (args[i] == "--start" && i + 1 < args.size()) c.start = std::stod(args[++i]);
         else if (args[i] == "--length" && i + 1 < args.size()) c.length = std::stod(args[++i]);
@@ -559,7 +600,7 @@ int cmd_play(std::vector<std::string> args) {
                 std::cout << "  source: " << r.source.codec << " " << r.source.rate << " Hz, " << r.source.channels << " ch"
                           << (r.source.bits ? ", " + std::to_string(r.source.bits) + "-bit" : "") << "\n";
             std::cout << "  device: " << r.device_name << " | "
-                      << (api == daphne::OutputApi::Asio ? "ASIO" : api == daphne::OutputApi::WasapiShared ? "shared" : "exclusive")
+                      << api_label(api)
                       << " | " << daphne::describe(r.device) << " | latency " << r.latency_ms << " ms\n"
                       << "  bit-perfect: " << (r.bit_perfect ? "yes" : "no (" + r.not_bit_perfect_reason + ")") << "\n";
             std::string chain;

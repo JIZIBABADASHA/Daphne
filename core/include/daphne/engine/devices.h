@@ -1,5 +1,6 @@
 #pragma once
-// Output device enumeration (Phase 0: listing only).
+// Output device enumeration: WASAPI and ASIO (Windows), Core Audio (macOS). Elsewhere each list is empty
+// with an error.
 
 #include <string>
 #include <vector>
@@ -22,6 +23,17 @@ struct WasapiDevice {
     std::vector<ExclusiveFormat> exclusive;  // filled only when probed
 };
 
+struct CoreAudioDevice {
+    std::string uid;            // kAudioDevicePropertyDeviceUID (stable across restarts): the output.device to use
+    std::string name;           // UTF-8
+    bool is_default = false;    // the system output
+    int rate = 0;               // nominal rate now
+    int channels = 0;           // output channels
+    std::vector<int> rates;     // standard rates (44.1k ... 768k) it offers
+    std::string transport;      // "built-in", "usb", "bluetooth", "airplay", "virtual", ...
+    int hog_pid = -1;           // the process holding it in hog mode (exclusive), -1 none
+};
+
 struct AsioDriver {
     std::string name;           // registry key name
     std::string description;
@@ -34,5 +46,8 @@ std::vector<WasapiDevice> list_wasapi_devices(bool probe_exclusive, std::string*
 
 // Installed ASIO drivers from HKLM\SOFTWARE\ASIO (no SDK needed for listing).
 std::vector<AsioDriver> list_asio_drivers(std::string* error = nullptr);
+
+// Core Audio devices with output channels.
+std::vector<CoreAudioDevice> list_coreaudio_devices(std::string* error = nullptr);
 
 }  // namespace daphne

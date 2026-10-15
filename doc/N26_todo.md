@@ -37,21 +37,38 @@
 
 **B 之後要補做時（Unix socket 來源）**：路徑在 MIKU 給模組的 `host.liveSocket`；資料是交錯的 float32 立體聲、沒有標頭、可能在任何位元組切開（一個 frame 會跨兩次 `recv`）；`live-relay.js` 會重啟（MIKU 0.5 s 後再開），要自動重連；讀得慢的連線會被丟區塊（積壓超過 1 MB）；取樣率由 MIKU 呼叫 engine 的 `setLiveRate(rate)` 告知（網頁要求 48 kHz，`tap` 訊息回報實際值）；Mac 外殼要回報 `supportsLive = true`，MIKU 才會走這條路。
 
-### 7. macOS Core Audio 輸出與 MIKU 的 Mac 外殼（分支另開）
+### 7. macOS Core Audio 輸出與 MIKU 的 Mac 外殼
 
-- [ ] Core Audio 輸出（共享 / 獨佔），照 MIKU 的 `mac/native/audio.mm`：
-  - 設定 nominal rate 後輪詢確認，不接受就改成重新取樣並留下記錄；
+拆成四個 PR：7a 輸出本身、7b 排程、7c helper 程序、7d MIKU 的 Mac 外殼。
+
+**7a. Core Audio 輸出（分支 `coreaudio-output`）**
+
+- [x] Core Audio 輸出（共享 / 獨佔），照 MIKU 的 `mac/native/audio.mm`（N24「Core Audio」）：
+  - 設定 nominal rate 後輪詢確認，不接受就以裝置實際的取樣率繼續（播放器重新取樣）並留下記錄；
   - 獨佔時才把 DAC 實體格式調到該取樣率下位元數最多的整數格式（至少 24 bit），已足夠就不動（不重新鎖定）；
   - 格式變更後等 HAL 回報的格式連續兩次相同才開始；
-  - hog 住的裝置只在運轉中改取樣率（停止時改取樣率再放掉 hog，之後 `AudioDeviceStart` 會卡住約 7 秒）；結束時先還原取樣率與格式，最後放掉 hog；
-  - 裝置拔除、預設輸出改變、外部改取樣率的通知。
-- [ ] DSD 只走 DoP（macOS 沒有原生 DSD 的 API）。
-- [ ] 重新檢查 macOS 的 `RealtimeScope`：目前是 time-constraint policy（每 10 ms 最多 5 ms），但處理執行緒是一次補滿約 0.5 s 環的吞吐型工作，超過宣告的計算時間可能被系統降級。候選：處理執行緒改用 QoS user-interactive，真正的即時工作只留在 IOProc（環 → 裝置）；在 Mac 上加 CPU 負載量 underrun 決定。
-- [ ] 讓出與取回裝置（A 方案必需）：Mac MIKU 播 YouTube Music、或 MIKU 不在前景且沒有播放時，會檢查 engine 的 `holdsDevice`，呼叫 `stop({ release: true })` 或 `releaseDevice()`；Daphne 要完全放開裝置（還原取樣率與格式、放掉 hog），下一首曲庫的歌再取回。對照 MIKU 的 `native-audio.js`。外殼回報 `supportsLive = false`。
-- [ ] 裝置列舉（C API）給 MIKU 的設定頁。
-- [ ] helper 程序：一個執行檔，stdin / stdout 每行一個 JSON（與 MIKU 的 `miku-audio` 相同的模式），由 JS 外殼啟動，掛掉時重啟並接回原本的位置。
-- [ ] MIKU 的 Mac 外殼 `miku/extension.js`（MIKU 從 `Extensions/<名稱>/miku/` 載入，提供 `core.createEngine`）。不需要改 MIKU。
-- [ ] 驗證：Intel Mac（macOS 11）上用 CLI 與模擬 MIKU 的腳本測 helper、Core Audio、讓出 / 取回裝置。MIKU 的 Mac 版用 Electron 44，需要 macOS 12 以上，介面內的整合測試要等有新的 Mac（或試舊版 Electron 的開發模式）。
+  - hog 住的裝置只在運轉中改設定：`open()` 先啟動 IO（靜音）再改取樣率與格式，`close()` 在 IO 運轉中還原，最後才停止 IO、放掉 hog；
+  - 裝置拔除（`failed()`）、外部改取樣率（`reset_requested()`）的通知。
+- [x] `output.api` 加上 `coreaudio_exclusive` / `coreaudio_shared`，預設是平台的獨佔輸出（`kDefaultOutputApi`）；CLI 的 `--shared` / `--exclusive` 跟著平台。
+- [x] DSD 只走 DoP（macOS 沒有原生 DSD 的 API）：裝置格式是 `int24-in-32`，DoP 照常寫入，回呼精確轉成 float32。（程式完成；實機驗證要外接 DAC，見下）
+- [x] 裝置列舉：`list_coreaudio_devices()`、`daphne devices`、C API `dc_devices` 的 `coreaudio` 陣列。
+- [x] 實機驗證（Intel Mac、macOS 11.7、內建輸出）：隱藏測試 `[.coreaudio]` 3 個、CLI 跨取樣率連播、升頻、兩個程序搶裝置（N24「驗證」）。
+- [ ] 外接 DAC 驗證：bit-perfect 錄音比對（需要 loopback 裝置，例如 BlackHole）、DoP（DSD64 需要 176.4 kHz，內建輸出最高 96 kHz）、拔除 DAC、其他程式改取樣率。
+- [ ] 換曲時保留裝置（之後）：現在每次重開裝置都先還原再設定取樣率（跨取樣率的下一首多一次 DAC 重新鎖定，約 0.5–1 s）；MIKU 的作法是保留裝置一段時間、同一台裝置直接改取樣率。
+
+**7b. 排程（分支另開）**
+
+- [ ] 重新檢查 macOS 的 `RealtimeScope`：目前是 time-constraint policy（每 10 ms 最多 5 ms），但處理執行緒是一次補滿約 0.5 s 環的吞吐型工作，超過宣告的計算時間可能被系統降級。候選：處理執行緒改用 QoS user-interactive，真正的即時工作只留在 IOProc（環 → 裝置，已是 HAL 的即時執行緒）；`WorkerPool` 的 worker（步驟 0 起跟著拿 time-constraint）一起決定。在 Mac 上加 CPU 負載量 underrun 決定。
+
+**7c. helper 程序（分支另開）**
+
+- [ ] 一個執行檔，stdin / stdout 每行一個 JSON（與 MIKU 的 `miku-audio` 相同的模式），由 JS 外殼啟動，掛掉時重啟並接回原本的位置。
+- [ ] 讓出與取回裝置（A 方案必需）：Mac MIKU 播 YouTube Music、或 MIKU 不在前景且沒有播放時，會檢查 engine 的 `holdsDevice`，呼叫 `stop({ release: true })` 或 `releaseDevice()`；Daphne 要完全放開裝置（還原取樣率與格式、放掉 hog，7a 的 `close()` 已經做到），下一首曲庫的歌再取回。對照 MIKU 的 `native-audio.js`。
+
+**7d. MIKU 的 Mac 外殼（分支另開）**
+
+- [ ] `miku/extension.js`（MIKU 從 `Extensions/<名稱>/miku/` 載入，提供 `core.createEngine`），外殼回報 `supportsLive = false`。不需要改 MIKU。
+- [ ] 驗證：Intel Mac（macOS 11）上用模擬 MIKU 的腳本測 helper、讓出 / 取回裝置。MIKU 的 Mac 版用 Electron 44，需要 macOS 12 以上，介面內的整合測試要等有新的 Mac（或試舊版 Electron 的開發模式）。
 
 ### 6. Linux ALSA 輸出（暫緩）
 
@@ -87,4 +104,12 @@
 - 換環時先清掉指標、等計數歸零，再設定新容量、最後放上新指標：讀取端不會拿到新指標配舊容量（原本 `g_cap` 與 `g_base` 分開寫，換環的一瞬間可能錯配）。
 - 壓力測試要確認真的抓得到錯誤：暫時拿掉等待那一行後，第一版（寫入方每 1 ms 推進 2400 frame）6 次只失敗 1～2 次，因為讀取端很快讀完，大部分時間在 `read()` 的 sleep 裡（Windows 上一次約 15.6 ms），卸離很少撞上讀取。改成每 10 µs 推進 48 frame 的細流之後，讀取端幾乎一直在環裡，拿掉等待時 6 次全部失敗（其中兩次直接存取已釋放的記憶體而當掉）；恢復等待後 10 次全部通過。
 - 測試的等待用 `steady_clock` 忙等，不用 `sleep_for(1 ms)`：Windows 沒有提高計時器解析度時那是 15.6 ms，第一版測試因此跑了 25 秒（現在約 1.6 秒）。
+
+**步驟 7a（`coreaudio-output`）**
+
+- DoP 與 float32：Daphne 的 DoP 只接受 24 / 32-bit 整數的裝置格式，而 Core Audio 的 IO 回呼收的是 32-bit 浮點。輸出對播放器宣稱 `int24-in-32`，回呼再除以 2^31 轉成浮點：24-bit 整數在 float32 裡精確，HAL 再轉成 DAC 的整數格式也精確，PCM 與 DoP 都不必另外處理。
+- 「系統輸出」在 hog 之後會消失：第一次兩個程序搶裝置的測試裡，第二個程序拿到的是「no system output device」——裝置被 hog 時 macOS 把系統輸出移走，內建輸出是唯一的裝置，系統輸出就變成沒有。改成：本程序 hog 住的裝置仍算系統輸出（同一個程序重開時也找得到），系統輸出不存在而有裝置被別人 hog 時回報是誰佔著。
+- Apple clang 12 的 `-Wunused-private-field`：`RealtimeScope::handle_` 只有 Windows 用，在這台 Mac 以 `DAPHNE_WARNINGS_AS_ERRORS` 建置時才報錯（CI 的 Xcode 15 不報，之前在 Mac 上沒有開 `-Werror`）；加上 `[[maybe_unused]]`。
+- 隱藏測試（`[.coreaudio]`）只在實機上手動跑：CI 的 macOS runner 不保證有音訊裝置。測試訊號是 −60 dBFS，夜裡在內建喇叭上跑也幾乎聽不到。
+- 跨取樣率的下一首比較慢（1.5 s 的 96 kHz 檔播了 2.4 s）：關閉時還原 44.1 kHz、開啟時再設 96 kHz，DAC 重新鎖定兩次。列為之後的改進（保留裝置）。
 

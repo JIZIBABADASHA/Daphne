@@ -377,10 +377,13 @@ DC_API long long dc_filter_cache_prune(const char* settings, int limit_mb) {
 
 DC_API int dc_devices(char* out, int len) {
     try {
-        json w = json::array(), a = json::array();
+        json w = json::array(), a = json::array(), c = json::array();
         for (const auto& d : daphne::list_wasapi_devices(false)) w.push_back({{"id", d.id}, {"name", d.name}, {"default", d.is_default}});
         for (const auto& d : daphne::list_asio_drivers()) a.push_back({{"name", d.name}, {"clsid", d.clsid}});
-        return put_json(out, len, json{{"wasapi", w}, {"asio", a}}.dump());
+        for (const auto& d : daphne::list_coreaudio_devices())
+            c.push_back({{"uid", d.uid}, {"name", d.name}, {"default", d.is_default}, {"rate", d.rate}, {"channels", d.channels},
+                         {"rates", d.rates}, {"transport", d.transport}, {"hog_pid", d.hog_pid}});
+        return put_json(out, len, json{{"wasapi", w}, {"asio", a}, {"coreaudio", c}}.dump());
     } catch (...) {
         return DC_ERR_ARG;
     }
