@@ -40,6 +40,7 @@ struct LiveStats {
     int64_t resyncs = 0;    // restarts close to the writer
     int64_t starves = 0;    // silence returned while running (the producer fell behind)
     double adjust = 0;      // the read rate correction (relative)
+    double target = 0;      // the buffer it aims for now (seconds; 0.15, more after starves, N2)
     bool active = false;    // a live decoder is open
 };
 LiveStats live_stats();

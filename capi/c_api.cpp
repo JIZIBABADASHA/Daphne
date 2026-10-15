@@ -294,7 +294,7 @@ DC_API int dc_state(dc_player* p, char* out, int len) {
         j = {{"state", state}, {"position", position}, {"duration", duration}, {"track", p->track},
              {"design", p->design.load()}, {"error", p->error}, {"report", report_json(p->report)}};
         if (const auto ls = daphne::live_stats(); ls.active && p->player)
-            j["live"] = {{"fill", ls.fill}, {"read", ls.read}, {"resyncs", ls.resyncs}, {"starves", ls.starves}, {"adjust", ls.adjust}};
+            j["live"] = {{"fill", ls.fill}, {"read", ls.read}, {"resyncs", ls.resyncs}, {"starves", ls.starves}, {"adjust", ls.adjust}, {"target", ls.target}};
         if (p->player) {
             // the report is the one of the last start / change; the speed is measured on as it plays
             j["report"]["realtime"] = p->player->realtime_factor();

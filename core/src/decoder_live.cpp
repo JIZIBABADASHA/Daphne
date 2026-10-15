@@ -11,10 +11,16 @@ namespace daphne {
 
 namespace {
 
-// seconds of buffered input aimed for: the YouTube Music page (MIKU) delivers 2048-frame blocks every 40 or
-// 60 ms and was measured at most 109 ms behind its average pace; 0.15 s covers that, the 10 ms reads and a
-// margin (N2)
-constexpr double kTarget = 0.15;
+// Seconds of buffered input aimed for, adapting to the producer (N2). The YouTube Music page (MIKU) delivers
+// 2048-frame blocks every 40 or 60 ms, measured at most 109 ms behind its average pace: 0.15 s covers that,
+// the 10 ms reads and a margin. A busy page stalls longer now and then (304 ms measured): each starve raises
+// the target by 50 ms, up to 0.30 s, and 60 s without one lowers it by 25 ms, then every 30 s, back to 0.15 s.
+constexpr double kTargetMin = 0.15;
+constexpr double kTargetMax = 0.30;
+constexpr double kTargetUp = 0.05;     // per starve (once for a whole stall, not per silence returned)
+constexpr double kTargetDown = 0.025;
+constexpr double kQuietFirst = 60.0;   // seconds of audio without a starve before the first step down
+constexpr double kQuietNext = 30.0;    // and between the next ones
 constexpr double kOverflow = 1.2;    // beyond this something stalled: restart near the writer
 constexpr int kWaitMs = 20;          // running: how long to wait for the producer before a starve
 
@@ -24,7 +30,7 @@ std::atomic<int> g_rate{48000};
 std::atomic<double> g_reserve{0};   // set_live_reserve
 
 // stats of the open decoder (one live decoder at a time)
-std::atomic<double> g_fill{0}, g_read{0}, g_adjust{0};
+std::atomic<double> g_fill{0}, g_read{0}, g_adjust{0}, g_target{kTargetMin};
 std::atomic<int64_t> g_resyncs{0}, g_starves{0};
 std::atomic<int> g_open{0};
 
@@ -50,7 +56,9 @@ public:
         info_.codec = "Live";
         info_.frames = -1;
         pos_ = 0;
-        synced_ = primed_ = jump_ = false;
+        synced_ = primed_ = jump_ = starving_ = false;
+        target_ = kTargetMin, quiet_ = 0;
+        g_target = target_;
         if (!open_) g_open++;
         open_ = true;
         g_resyncs = 0, g_starves = 0, g_read = 0;
@@ -76,12 +84,24 @@ public:
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kWaitMs);
         for (;;) {
             const int n = produce(out, frames);
-            if (n > 0) return advance(n);
+            if (n > 0) {
+                starving_ = false;
+                quiet(n);
+                return advance(n);
+            }
             if (!primed_ || std::chrono::steady_clock::now() >= deadline) {
                 // nothing yet (prefill) or the producer fell behind: silence, so the player does not block
                 const int s = std::min(frames, primed_ ? std::max(1, info_.rate / 200) : frames);
                 std::memset(out, 0, static_cast<size_t>(s) * 2 * sizeof(double));
-                if (primed_) g_starves++;
+                if (primed_) {
+                    g_starves++;
+                    if (!starving_) {   // a new stall: more buffer from now on
+                        starving_ = true;
+                        target_ = std::min(kTargetMax, target_ + kTargetUp);
+                        g_target = target_;
+                    }
+                    quiet_ = 0;
+                }
                 return advance(s);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -89,6 +109,16 @@ public:
     }
 
 private:
+    // audio read without a starve: after long enough, the target steps back down
+    void quiet(int n) {
+        if (target_ <= kTargetMin) return;
+        quiet_ += n;
+        if (quiet_ < static_cast<int64_t>(kQuietFirst * info_.rate)) return;
+        target_ = std::max(kTargetMin, target_ - kTargetDown);
+        g_target = target_;
+        quiet_ = static_cast<int64_t>((kQuietFirst - kQuietNext) * info_.rate);   // the next step after kQuietNext
+    }
+
     int advance(int n) {
         pos_ += n;
         g_read = static_cast<double>(pos_) / info_.rate;
@@ -115,7 +145,7 @@ private:
         // the start and a seek (a resume) leave the target plus what the player's refill takes at once
         // behind the writer: more (a burst from the producer, or what it wrote while the player was paused)
         // is skipped instead of played late and worked off by the rate trim over minutes
-        const int keep = static_cast<int>((kTarget + g_reserve.load()) * rate);
+        const int keep = static_cast<int>((target_ + g_reserve.load()) * rate);
         if (!primed_) {
             if (avail < keep) return 0;
             primed_ = true;
@@ -129,13 +159,13 @@ private:
         g_fill = fill;
         if (fill > kOverflow) {
             g_resyncs++;
-            read_ = w - static_cast<uint32_t>(kTarget * rate), frac_ = 0, adj_ = 0;
+            read_ = w - static_cast<uint32_t>(target_ * rate), frac_ = 0, adj_ = 0;
             avail = static_cast<int>(w - read_);
         }
         if (avail < 4) return 0;
 
         // proportional control of the buffer level through a tiny rate change
-        const double want = std::clamp((fill - kTarget) * 0.02, -0.005, 0.005);
+        const double want = std::clamp((fill - target_) * 0.02, -0.005, 0.005);
         adj_ += (want - adj_) * 0.02;
         g_adjust = adj_;
         const double step = static_cast<double>(rate) / info_.rate * (1 + adj_);
@@ -163,6 +193,9 @@ private:
     double frac_ = 0;     // between read_ and read_ + 1
     bool synced_ = false, primed_ = false;
     bool jump_ = false;   // seek(): back to the writer at the next read
+    bool starving_ = false;   // the last read returned silence (one target step per stall)
+    double target_ = kTargetMin;
+    int64_t quiet_ = 0;   // source frames read since the last starve or step down
     double adj_ = 0;      // smoothed rate correction
 };
 
@@ -187,6 +220,7 @@ LiveStats live_stats() {
     s.resyncs = g_resyncs.load();
     s.starves = g_starves.load();
     s.adjust = g_adjust.load();
+    s.target = g_target.load();
     s.active = g_open.load() > 0;
     return s;
 }

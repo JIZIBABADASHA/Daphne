@@ -136,6 +136,60 @@ TEST_CASE("Live decoder: a seek (the player resuming) skips the backlog beyond t
     CHECK(live_stats().fill <= before);
 }
 
+TEST_CASE("Live decoder: the target grows by a step per stall and comes back down after quiet minutes", "[live]") {
+    Bus bus(96000);
+    std::string e;
+    auto d = open_decoder(kLivePath, &e);
+    REQUIRE(d);
+    std::vector<double> out(4096 * 2);
+    CHECK(live_stats().target == Catch::Approx(0.15));
+    bus.write(20000);
+    d->read(out.data(), 1024);   // syncs
+    bus.write(20000);
+    REQUIRE(d->read(out.data(), 1024) > 0);
+    // a stall: drained, then several silences in a row; one step for all of them
+    auto stall = [&] {
+        int guard = 0;
+        while (d->read(out.data(), 4096) > 240 && ++guard < 200) {}
+        for (int i = 0; i < 3; ++i) d->read(out.data(), 4096);
+    };
+    const int64_t s0 = live_stats().starves;
+    stall();
+    CHECK(live_stats().starves >= s0 + 3);
+    CHECK(live_stats().target == Catch::Approx(0.20));
+    bus.write(20000);
+    REQUIRE(d->read(out.data(), 1024) > 0);   // data again: the stall is over
+    stall();
+    CHECK(live_stats().target == Catch::Approx(0.25));
+    for (int k = 0; k < 4; ++k) {   // capped at 0.30
+        bus.write(20000);
+        REQUIRE(d->read(out.data(), 1024) > 0);
+        stall();
+    }
+    CHECK(live_stats().target == Catch::Approx(0.30));
+    // quiet: the producer keeps up (it writes what is read, the buffer stays put)
+    auto play = [&](double seconds) {
+        for (int64_t got = 0; got < static_cast<int64_t>(seconds * 48000);) {
+            bus.write(4096);
+            const int n = d->read(out.data(), 4096);
+            REQUIRE(n > 240);   // no starve
+            got += n;
+        }
+    };
+    bus.write(24000);   // a cushion, so the reads never wait
+    // (a few seconds' margin around the steps: what is counted is the audio read, interpolated)
+    play(57.0);
+    CHECK(live_stats().target == Catch::Approx(0.30));    // not yet
+    play(5.0);
+    CHECK(live_stats().target == Catch::Approx(0.275));   // about 60 s quiet: one step down
+    play(25.0);
+    CHECK(live_stats().target == Catch::Approx(0.275));
+    play(5.0);
+    CHECK(live_stats().target == Catch::Approx(0.25));    // about 30 s later: the next
+    play(150.0);
+    CHECK(live_stats().target == Catch::Approx(0.15));    // and no lower than 0.15
+}
+
 TEST_CASE("Live decoder: without the host's ring it does not open", "[live]") {
     set_live_bus(nullptr, 0, 0);
     std::string e;
