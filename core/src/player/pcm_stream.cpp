@@ -53,6 +53,7 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
         xf.fading = false;
         xf.next.reset();
         xf.clear();
+        cross_join.clear();
         io.dev = open_output({out, s.output.buffer_ms, rates[attempt].rate, src.channels, rates[attempt].native}, &e);
         if (!io.dev) {
             if (fail_attempt()) return false;
@@ -212,6 +213,13 @@ bool Player::Impl::produce() {
             xf.carry.pop(n);
             carried = true;
             break;
+        }
+        if (cross_join.active()) {
+            // both chains' work (Throughput; it also reads the next track, a small overcount)
+            const auto tj = Throughput::Clock::now();
+            n = join_produce();
+            work += Throughput::Clock::now() - tj;
+            continue;   // (0: the join is over, its last frames are in the carry)
         }
         const int got = dec->read(pcm.data(), kChunk);
         const auto t0 = Throughput::Clock::now();

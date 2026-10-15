@@ -11,7 +11,7 @@ public:
     bool apply(const Settings& ns, const OutputChoice& no) override { return p_.handle(ns, no); }
     bool poll() override {
         if (!p_.poll_build()) return false;
-        if (!p_.xf.fading && !p_.building.valid() && !p_.tl.cross_pending() && p_.queued) {
+        if (!p_.xf.fading && !p_.building.valid() && !p_.tl.cross_pending() && !p_.cross_join.active() && p_.queued) {
             auto q = *p_.queued;
             p_.queued.reset();
             return p_.handle(q.first, q.second);
@@ -93,6 +93,7 @@ void Player::Impl::check_switch() {
             tl.track_origin_in = w.at_in;
         }
         const bool cross = w.cross;
+        if (cross && cross_join.active() && cross_join.old == w.old_chain.get()) cross_join.owned = std::move(w.old_chain);   // its tail is still being made
         rep.source = w.info;
         cur_path = w.path;
         tl.switches.pop_front();
@@ -116,6 +117,7 @@ void Player::Impl::do_seek(double sec) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     io.ring->clear();
     io.pend = io.pend_off = 0;
+    cross_join.clear();   // the old chain's tail is not played after a seek
     std::string e;
     check_switch();   // a track heard just now is the one the seek is in
     if (!tl.switches.empty()) {

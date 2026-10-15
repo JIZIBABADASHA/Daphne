@@ -568,6 +568,39 @@ TEST_CASE("Player: the dsd core sends PCM as DoP", "[player][dsd]") {
     r.dump("dsd_core");
 }
 
+TEST_CASE("Player: gapless to another rate keeps the next track in time with a long filter", "[player]") {
+    // the old chain's tail (about twice its delay) is longer than the first chunk through the new chain:
+    // the new chain's output has to cover all of it, or the next track starts again after the tail
+    Rig r;
+    use_float_device(*r.dev);
+    r.dev->speed = 4.0;
+    const int secs = 10;   // long enough for the 8192-tap chain to be built ahead on a slow machine (CI)
+    r.sources["a"] = sine(44100, 1000.0, secs);
+    r.sources["b"] = sine(88200, 1000.0, 1.0);   // the same 1 kHz, its phase continuing from a's end
+    Settings s;
+    s.output.rate = "176400";
+    s.filter.taps = 8192;
+    REQUIRE(r.start("a", s));
+    r.player->set_next(platform::path_from_utf8("b"));
+    r.finish();
+    REQUIRE(r.tracks == 1);
+    const auto y = r.dev->samples_f32();
+    const size_t join = static_cast<size_t>(secs) * 176400;
+    REQUIRE(y.size() / 2 > join + 100000);
+    // the phase of the 1 kHz sine before and after the join (the filter delay is the same on both sides)
+    auto phase = [&](size_t from, size_t to) {
+        double c = 0, sn = 0;
+        for (size_t i = from; i < to; ++i) {
+            const double w = 2 * kPi * 1000.0 * static_cast<double>(i) / 176400.0;
+            c += y[2 * i] * std::cos(w), sn += y[2 * i] * std::sin(w);
+        }
+        return std::atan2(c, sn);
+    };
+    const double d = std::remainder(phase(join + 60000, join + 100000) - phase(join - 60000, join - 20000), 2 * kPi);
+    CHECK(std::abs(d) < 0.1);   // 12491 frames late before the fix: 1.13 rad
+    CHECK(longest_quiet(y, 2, join - 50000, join + 50000) < 10);
+}
+
 TEST_CASE("Throughput: the factor per 2 s window, one warning per slow stretch", "[player][throughput]") {
     using playback::Throughput;
     using namespace std::chrono_literals;

@@ -95,7 +95,7 @@ bool Player::Impl::restart(const Settings& ns, const OutputChoice& no, bool drai
 
 bool Player::Impl::handle(const Settings& ns, const OutputChoice& no) {
     queue.drop();   // a chain prepared for the next track was built for the old settings
-    if (xf.fading || building.valid() || tl.cross_pending()) {   // one change at a time (and not across a rate switch); the latest waits
+    if (xf.fading || building.valid() || tl.cross_pending() || cross_join.active()) {   // one change at a time (and not across a rate switch); the latest waits
         queued = std::make_pair(ns, no);
         if (building.valid() && build_cancel) *build_cancel = true;   // superseded: stop designing it
         return true;

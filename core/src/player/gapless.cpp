@@ -26,42 +26,21 @@ void Player::Impl::cross_switch(std::unique_ptr<Decoder> nd, std::unique_ptr<Dsp
     const size_t nb = dsdenc ? dsdenc->max_bytes(static_cast<int>(need / dch)) : need / dch * io.block;
     if (io.bytes.size() < nb) io.bytes.resize(nb);
 
-    const int64_t start = tl.abs_out + xf.carry.frames();   // device frame where the joined part begins
-    const int64_t a_end = tl.latest_base() + in_total * ratio + cur->content_delay();   // where A's frame K is heard
-    std::vector<double> tail;
-    auto put = [&](std::vector<double>& v, int n) { v.insert(v.end(), dsp.begin(), dsp.begin() + static_cast<std::ptrdiff_t>(n) * dch); };
-    std::fill(pcm.begin(), pcm.end(), 0.0);
-    const int64_t zeros = 2 * static_cast<int64_t>(cur->content_delay()) / std::max(1, ratio) + 1;
-    for (int64_t z = 0; z < zeros;) {
-        const int n = static_cast<int>(std::min<int64_t>(kChunk, zeros - z));
-        put(tail, cur->process(pcm.data(), n, dsp.data()));
-        z += n;
-    }
-    put(tail, cur->flush(dsp.data()));
-
-    // B through the new chain until its first sample (new-chain frame dn) is out
+    // the join is made by join_produce, a chunk at a time: A's tail (2 x its delay of zeros, then the flush)
+    // with B through the new chain on top. New-chain frame j lands on join frame j + off, so that B's first
+    // sample (new-chain frame dn) is heard right where A's frame K would have been (a_end)
+    const int64_t start = tl.abs_out + xf.carry.frames();   // device frame where the join begins
+    const int64_t a_end = tl.latest_base() + in_total * ratio + cur->content_delay();
     const int dn = nc->content_delay();
+    const int64_t off = (a_end - start) - dn;
+    cross_join.clear();
+    cross_join.old = cur.get();
+    cross_join.zeros_left = 2 * static_cast<int64_t>(cur->content_delay()) / std::max(1, ratio) + 1;
+    cross_join.a.ch = cross_join.b.ch = dch;
+    cross_join.b_from = std::max<int64_t>(0, off);
+    cross_join.skip_b = std::max<int64_t>(0, -off);
     in_total = 0;
     hist.valid_from = 0;
-    std::vector<double> head;
-    int64_t produced = 0;
-    while (produced <= dn) {
-        const int got = nd->read(pcm.data(), kChunk);
-        if (got <= 0) break;
-        hist.store(pcm.data(), got, in_total);
-        in_total += got;
-        const int o = nc->process(pcm.data(), got, dsp.data());
-        put(head, o);
-        produced += o;
-    }
-    // new-chain frame j lands on tail frame j + off; frames before what has been played already are dropped
-    const int64_t off = (a_end - start) - dn;
-    for (int64_t j = std::max<int64_t>(0, -off); j < produced; ++j) {
-        const int64_t t = j + off;
-        if (t >= static_cast<int64_t>(tail.size()) / dch) tail.resize(static_cast<size_t>(t + 1) * dch, 0.0);
-        for (int c = 0; c < dch; ++c) tail[static_cast<size_t>(t) * dch + c] += head[static_cast<size_t>(j) * dch + c];
-    }
-    xf.carry.push(tail.data(), static_cast<int>(tail.size() / dch));
 
     Switch w;
     w.info = nd->info();
@@ -72,13 +51,76 @@ void Player::Impl::cross_switch(std::unique_ptr<Decoder> nd, std::unique_ptr<Dsp
     w.old_ratio = ratio;
     w.old_delay = cur->content_delay();
     w.old_base = tl.latest_base();
-    rep.clipped += cur->take_clips();   // its tail, now in carry
     w.old_chain = std::move(cur);
     tl.switches.push_back(std::move(w));
     cur = std::move(nc);
     dec = std::move(nd);
     ratio = std::max(1, crate / dec->info().rate);
     throughput.reset();
+}
+
+int Player::Impl::join_produce() {
+    Join& j = cross_join;
+    const int room = static_cast<int>(dsp.size() / dch);
+    for (;;) {
+        if (!j.old_done && j.a.frames() == 0) {   // more of A's tail
+            int o = 0;
+            if (j.zeros_left > 0) {
+                const int k = static_cast<int>(std::min<int64_t>(kChunk, j.zeros_left));
+                std::fill(pcm.begin(), pcm.begin() + static_cast<std::ptrdiff_t>(k) * ch, 0.0);
+                o = j.old->process(pcm.data(), k, tmp_c.data());
+                j.zeros_left -= k;
+            } else {
+                o = j.old->flush(tmp_c.data());
+                j.old_done = true;
+            }
+            j.a.push(tmp_c.data(), o);
+            continue;
+        }
+        const bool a_over = j.old_done && j.a.frames() == 0;
+        if (j.t < j.b_from) {   // before B: the tail alone (zeros if it is shorter)
+            const int n = static_cast<int>(std::min<int64_t>({room, j.b_from - j.t, a_over ? INT64_MAX : j.a.frames()}));
+            if (a_over) std::fill(dsp.begin(), dsp.begin() + static_cast<std::ptrdiff_t>(n) * dch, 0.0);
+            else std::copy(j.a.data(), j.a.data() + static_cast<size_t>(n) * dch, dsp.begin()), j.a.pop(n);
+            j.t += n;
+            return n;
+        }
+        if (a_over) {   // the tail is out: what the new chain made beyond it plays next, then the normal path
+            if (j.b.frames() > 0) xf.carry.push(j.b.data(), j.b.frames());
+            rep.clipped += j.old->take_clips();
+            j.clear();
+            return 0;
+        }
+        if (j.b.frames() == 0 && !j.b_ended) {   // more of B through the new chain
+            const int got = dec->read(pcm.data(), kChunk);
+            if (got <= 0) {
+                j.b_ended = true;   // B is shorter than the tail: its flush follows the join (the normal path)
+                continue;
+            }
+            hist.store(pcm.data(), got, in_total);
+            in_total += got;
+            const int o = cur->process(pcm.data(), got, tmp_n.data());
+            const int d = static_cast<int>(std::min<int64_t>(j.skip_b, o));
+            j.skip_b -= d;
+            j.b.push(tmp_n.data() + static_cast<size_t>(d) * dch, o - d);
+            continue;
+        }
+        if (j.b.frames() == 0) {   // B ended: the rest of the tail alone
+            const int n = std::min(room, j.a.frames());
+            std::copy(j.a.data(), j.a.data() + static_cast<size_t>(n) * dch, dsp.begin());
+            j.a.pop(n);
+            j.t += n;
+            return n;
+        }
+        const int n = std::min({room, j.a.frames(), j.b.frames()});
+        const double* x = j.a.data();
+        const double* y = j.b.data();
+        for (size_t i = 0; i < static_cast<size_t>(n) * dch; ++i) dsp[i] = x[i] + y[i];
+        j.a.pop(n);
+        j.b.pop(n);
+        j.t += n;
+        return n;
+    }
 }
 
 void Player::Impl::apply_headroom(std::optional<double> h) {
@@ -159,7 +201,7 @@ bool Player::Impl::try_gapless() {
             // track after a 16-bit one on a 16-bit device needs the quantizer): gapless only on the same
             // output, joined through the new chain built ahead for the current settings; otherwise the track
             // ends and the host loads the next one
-            if (!p || !p->done || !p->chain || xf.fading || building.valid() || p->key != TrackQueue::chain_key(chain_settings(s, run_osr), chain_fmt))
+            if (!p || !p->done || !p->chain || xf.fading || building.valid() || cross_join.active() || p->key != TrackQueue::chain_key(chain_settings(s, run_osr), chain_fmt))
                 return false;
             cross_switch(std::move(nd), std::move(p->chain), np);
             apply_headroom(nh);
