@@ -41,7 +41,7 @@
 
 拆成四個 PR：7a 輸出本身、7b 排程、7c helper 程序、7d MIKU 的 Mac 外殼。
 
-**7a. Core Audio 輸出（分支 `coreaudio-output`）**
+**7a. Core Audio 輸出（分支 `coreaudio-output`，PR #20）✅**
 
 - [x] Core Audio 輸出（共享 / 獨佔），照 MIKU 的 `mac/native/audio.mm`（N24「Core Audio」）：
   - 設定 nominal rate 後輪詢確認，不接受就以裝置實際的取樣率繼續（播放器重新取樣）並留下記錄；
@@ -56,14 +56,14 @@
 - [ ] 外接 DAC 驗證：bit-perfect 錄音比對（需要 loopback 裝置，例如 BlackHole）、DoP（DSD64 需要 176.4 kHz，內建輸出最高 96 kHz）、拔除 DAC、其他程式改取樣率。
 - [ ] 換曲時保留裝置（之後）：現在每次重開裝置都先還原再設定取樣率（跨取樣率的下一首多一次 DAC 重新鎖定，約 0.5–1 s）；MIKU 的作法是保留裝置一段時間、同一台裝置直接改取樣率。
 
-**7b. 排程（分支另開）**
+**7b. 排程（不改程式，量測結果記在實作筆記）✅**
 
-- [ ] 重新檢查 macOS 的 `RealtimeScope`：目前是 time-constraint policy（每 10 ms 最多 5 ms），但處理執行緒是一次補滿約 0.5 s 環的吞吐型工作，超過宣告的計算時間可能被系統降級。候選：處理執行緒改用 QoS user-interactive，真正的即時工作只留在 IOProc（環 → 裝置，已是 HAL 的即時執行緒）；`WorkerPool` 的 worker（步驟 0 起跟著拿 time-constraint）一起決定。在 Mac 上加 CPU 負載量 underrun 決定。
+- [x] 重新檢查 macOS 的 `RealtimeScope`：目前是 time-constraint policy（每 10 ms 最多 5 ms），但處理執行緒是一次補滿約 0.5 s 環的吞吐型工作，超過宣告的計算時間可能被系統降級。候選：處理執行緒改用 QoS user-interactive，真正的即時工作只留在 IOProc（環 → 裝置，已是 HAL 的即時執行緒）；`WorkerPool` 的 worker（步驟 0 起跟著拿 time-constraint）一起決定。在 Mac 上加 CPU 負載量 underrun 決定。→ 結論：維持 time-constraint（滿載下比 QoS user-interactive 多拿到約 35% 的處理速度，兩者都沒有 underrun）。
 
-**7c. helper 程序（分支另開）**
+**7c. helper 程序（分支 `mac-helper`）**
 
-- [ ] 一個執行檔，stdin / stdout 每行一個 JSON（與 MIKU 的 `miku-audio` 相同的模式），由 JS 外殼啟動，掛掉時重啟並接回原本的位置。
-- [ ] 讓出與取回裝置（A 方案必需）：Mac MIKU 播 YouTube Music、或 MIKU 不在前景且沒有播放時，會檢查 engine 的 `holdsDevice`，呼叫 `stop({ release: true })` 或 `releaseDevice()`；Daphne 要完全放開裝置（還原取樣率與格式、放掉 hog，7a 的 `close()` 已經做到），下一首曲庫的歌再取回。對照 MIKU 的 `native-audio.js`。
+- [x] 一個執行檔，stdin / stdout 每行一個 JSON（與 MIKU 的 `miku-audio` 相同的模式），由 JS 外殼啟動（`helper/main.cpp`，`daphne-helper`，協定見 N4）。掛掉時重啟並接回原本的位置是 JS 外殼的事（7d）。
+- [x] 讓出與取回裝置（A 方案必需）：Mac MIKU 播 YouTube Music、或 MIKU 不在前景且沒有播放時，會檢查 engine 的 `holdsDevice`，呼叫 `stop({ release: true })` 或 `releaseDevice()`；Daphne 要完全放開裝置（還原取樣率與格式、放掉 hog，7a 的 `close()` 已經做到），下一首曲庫的歌再取回。對照 MIKU 的 `native-audio.js`。→ helper 的 `stop` 就是讓出（`verify/helper.py` 在 Mac 上確認 stop 之後沒有裝置被 hog、取樣率還原），下一次 `load` 取回；`holdsDevice` 由 JS 外殼依載入 / 暫停狀態回答（7d）。
 
 **7d. MIKU 的 Mac 外殼（分支另開）**
 
@@ -112,4 +112,15 @@
 - Apple clang 12 的 `-Wunused-private-field`：`RealtimeScope::handle_` 只有 Windows 用，在這台 Mac 以 `DAPHNE_WARNINGS_AS_ERRORS` 建置時才報錯（CI 的 Xcode 15 不報，之前在 Mac 上沒有開 `-Werror`）；加上 `[[maybe_unused]]`。
 - 隱藏測試（`[.coreaudio]`）只在實機上手動跑：CI 的 macOS runner 不保證有音訊裝置。測試訊號是 −60 dBFS，夜裡在內建喇叭上跑也幾乎聽不到。
 - 跨取樣率的下一首比較慢（1.5 s 的 96 kHz 檔播了 2.4 s）：關閉時還原 44.1 kHz、開啟時再設 96 kHz，DAC 重新鎖定兩次。列為之後的改進（保留裝置）。
+
+**步驟 7b（排程的量測）**
+
+- Intel Mac（i5-4308U，2 核 4 執行緒）、Core Audio 獨佔、48 k → 96 k、1048576 taps、double-double（無負載時 2.5 倍即時），另外開 4 個 `yes` 把 CPU 吃滿，各跑兩次：time-constraint（現在的作法）2.55 / 2.74 倍即時，QoS user-interactive 1.85 / 2.02 倍；underrun 都是 0，最長回呼間隔都在 16–26 ms。time-constraint 沒有因為超過宣告的計算時間而變慢，反而在滿載下拿到更多 CPU，所以維持不變（`WorkerPool` 的 worker 一樣）。實驗用環境變數切換，只在 Mac 上編譯，沒有進 repo。
+- 順帶看到：1048576 taps 時 CLI 結尾的「last position」是 0 s（262144 taps 時 3.8 s），應該是濾波器延遲比整首還長時位置被截成 0，與 Core Audio 無關，待查。
+
+**步驟 7c（`mac-helper`）**
+
+- helper 底下直接用 C API（與 Windows 擴充相同），沒有另寫一套播放邏輯；JSON 用 nlohmann（已在 `third_party`）。
+- `quit` 一開始在工作執行緒裡 `fclose(stdin)` 想打斷讀取執行緒的 `getline`，Windows 上打斷不了阻塞中的 pipe 讀取（`verify/helper.py` 的 quit 項目逾時）；改成由讀取執行緒自己處理 `quit`。
+- 主程式結束時 stdin 讀到結尾，走與 `quit` 相同的清理：MIKU 當掉也不會把 DAC 留在 hog mode。
 
