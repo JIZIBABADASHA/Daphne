@@ -28,6 +28,7 @@ constexpr int kWaitMs = 20;          // running: how long to wait for the produc
 
 std::atomic<uint8_t*> g_base{nullptr};
 std::atomic<int> g_cap{0};
+std::atomic<int> g_readers{0};   // reads inside the ring right now (set_live_bus waits for them to leave)
 std::atomic<int> g_rate{48000};
 std::atomic<double> g_reserve{0};   // set_live_reserve
 
@@ -127,11 +128,21 @@ private:
         return n;
     }
 
-    // Frames interpolated from the ring, or 0 when there is nothing to read now.
+    // Frames interpolated from the ring, or 0 when there is nothing to read now. The ring is only touched in
+    // here, under a lease: set_live_bus clears g_base and then waits for g_readers to reach 0 before the host
+    // may free the memory (both sides sequentially consistent: either this sees the cleared pointer, or the
+    // host sees this reader and waits).
     int produce(double* out, int frames) {
-        uint8_t* base = g_base.load(std::memory_order_acquire);
+        g_readers.fetch_add(1);
+        uint8_t* base = g_base.load();
+        const int n = base ? produce_from(base, out, frames) : 0;
+        g_readers.fetch_sub(1, std::memory_order_release);
+        return n;
+    }
+
+    int produce_from(uint8_t* base, double* out, int frames) {
         const uint32_t cap = static_cast<uint32_t>(g_cap.load());
-        if (!base || cap == 0) return 0;
+        if (cap == 0) return 0;
         const uint32_t w = *reinterpret_cast<volatile const uint32_t*>(base);
         std::atomic_thread_fence(std::memory_order_acquire);   // the frames before the index
         const float* ring = reinterpret_cast<const float*>(base + 16);
@@ -208,10 +219,20 @@ private:
 }  // namespace
 
 void set_live_bus(void* base, int cap_frames, int rate) {
+    // off the old ring first, and no read left in it, before the new one (with its capacity) is published
+    g_base.store(nullptr);
+    while (g_readers.load(std::memory_order_acquire) != 0) std::this_thread::yield();
     g_cap = base ? cap_frames : 0;
     if (rate > 8000) g_rate = rate;
-    g_base.store(static_cast<uint8_t*>(base), std::memory_order_release);
+    g_base.store(static_cast<uint8_t*>(base));
 }
+
+bool live_connect(const std::string&, int, std::string* error) {
+    if (error) *error = "live input over a Unix socket is not implemented yet";
+    return false;
+}
+
+void live_disconnect() {}
 
 void set_live_rate(int rate) {
     if (rate > 8000) g_rate = rate;
