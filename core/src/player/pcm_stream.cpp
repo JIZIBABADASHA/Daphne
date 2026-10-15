@@ -158,6 +158,11 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
         const bool live = is_live_path(cur_path);
         read_frames = live ? std::clamp(src.rate / 100, 64, kChunk) : kChunk;
         io.limit = live ? io.live_limit(rep.device.frame_rate()) : 0;
+        // what the prefill (and a refill after a resume) takes from the live decoder at once: the ring up to
+        // its limit plus a read, so the decoder holds its target once the ring is full
+        if (live && rep.device.frame_rate() > 0 && io.block > 0)
+            set_live_reserve(static_cast<double>(io.limit) / (static_cast<double>(io.block) * rep.device.frame_rate()) +
+                             static_cast<double>(read_frames) / src.rate);
         const int read_out = static_cast<int>((static_cast<int64_t>(read_frames) * crate + src.rate - 1) / src.rate);   // chain frames per read
         io.chunk = !live ? 0 : dsdenc ? dsdenc->max_bytes(read_out) : static_cast<size_t>(read_out) * io.block;
         // DSD: silence first, so the DAC has switched to DSD and locked before the music (output.dsd_lead_in_ms)

@@ -17,7 +17,10 @@ constexpr double kPi = 3.141592653589793;
 
 // The host's shared ring: uint32 write index | 12 bytes | float32 stereo.
 struct Bus {
-    explicit Bus(int cap) : cap(cap), mem(16 + static_cast<size_t>(cap) * 8, 0) { set_live_bus(mem.data(), cap, 48000); }
+    explicit Bus(int cap) : cap(cap), mem(16 + static_cast<size_t>(cap) * 8, 0) {
+        set_live_bus(mem.data(), cap, 48000);
+        set_live_reserve(0);   // no player here (a player test may have set it)
+    }
     ~Bus() { set_live_bus(nullptr, 0, 0); }
     uint32_t& index() { return *reinterpret_cast<uint32_t*>(mem.data()); }
     float* ring() { return reinterpret_cast<float*>(mem.data() + 16); }
@@ -121,10 +124,10 @@ TEST_CASE("Live decoder: a seek (the player resuming) skips the backlog beyond t
     REQUIRE(d->read(out.data(), 1024) > 0);   // primed, reading
     bus.write(24000);                          // half a second written while the player was paused (below kOverflow)
     d->read(out.data(), 1024);
-    CHECK(live_stats().fill > 0.8);
+    CHECK(live_stats().fill > 0.6);            // the target it started at (0.15 s) plus the half second
     REQUIRE(d->seek(12345));
     REQUIRE(d->read(out.data(), 1024) > 0);
-    CHECK(live_stats().fill == Catch::Approx(0.15).margin(0.001));   // back at the target behind the writer
+    CHECK(live_stats().fill == Catch::Approx(0.15).margin(0.001));   // back at the target behind the writer (no reserve set)
     CHECK(live_stats().resyncs == 0);                                 // not counted as a resync
     // without a backlog a seek changes nothing
     const double before = live_stats().fill;

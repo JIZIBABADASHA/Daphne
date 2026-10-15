@@ -21,6 +21,7 @@ constexpr int kWaitMs = 20;          // running: how long to wait for the produc
 std::atomic<uint8_t*> g_base{nullptr};
 std::atomic<int> g_cap{0};
 std::atomic<int> g_rate{48000};
+std::atomic<double> g_reserve{0};   // set_live_reserve
 
 // stats of the open decoder (one live decoder at a time)
 std::atomic<double> g_fill{0}, g_read{0}, g_adjust{0};
@@ -111,13 +112,17 @@ private:
             return 0;
         }
         int avail = static_cast<int>(w - read_);
+        // the start and a seek (a resume) leave the target plus what the player's refill takes at once
+        // behind the writer: more (a burst from the producer, or what it wrote while the player was paused)
+        // is skipped instead of played late and worked off by the rate trim over minutes
+        const int keep = static_cast<int>((kTarget + g_reserve.load()) * rate);
         if (!primed_) {
-            if (avail < kTarget * rate) return 0;
+            if (avail < keep) return 0;
             primed_ = true;
+            jump_ = true;
         }
-        if (jump_) {   // after a seek (a resume): a backlog beyond the target is skipped
+        if (jump_) {
             jump_ = false;
-            const int keep = static_cast<int>(kTarget * rate);
             if (avail > keep) read_ = w - static_cast<uint32_t>(keep), frac_ = 0, adj_ = 0, avail = keep;
         }
         const double fill = static_cast<double>(avail) / rate;
@@ -172,6 +177,8 @@ void set_live_bus(void* base, int cap_frames, int rate) {
 void set_live_rate(int rate) {
     if (rate > 8000) g_rate = rate;
 }
+
+void set_live_reserve(double seconds) { g_reserve = std::clamp(seconds, 0.0, 1.0); }
 
 LiveStats live_stats() {
     LiveStats s;

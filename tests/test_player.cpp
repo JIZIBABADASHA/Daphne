@@ -533,6 +533,7 @@ TEST_CASE("Player: a live source resumed after a pause goes back to the writer",
     set_live_bus(nullptr, 0, 0);
     CHECK(r.saw("live input: back to the writer"));
     INFO("fill after the resume: " << fill << " s");
+    CHECK(fill > 0.1);    // the player's refill came out of the reserve, not out of the target
     CHECK(fill < 0.25);   // about the 0.15 s target again, not 0.75 s
 }
 
