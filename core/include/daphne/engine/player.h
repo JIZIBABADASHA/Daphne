@@ -38,6 +38,7 @@ struct PlayReport {
     int64_t clipped = 0;         // samples clamped to full scale (final quantizer, device conversion) or NaN
     int64_t max_interval_us = 0;
     double latency_ms = 0;
+    double realtime_factor = 0;       // PCM: audio seconds the chain produces per second of work (last 2 s; 0 = not measured yet)
     std::vector<std::string> chain;   // active DSP stages
     std::string filter;               // resampling filter in use, e.g. "4096 taps, minimum phase"
 };

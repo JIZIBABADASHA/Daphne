@@ -34,6 +34,7 @@
 #include "crossfader.h"
 #include "output_session.h"
 #include "report.h"
+#include "throughput.h"
 #include "timeline.h"
 #include "track_queue.h"
 
@@ -127,6 +128,7 @@ struct Player::Impl {
     // the background rebuild can be cancelled when a newer change supersedes it
     std::shared_ptr<std::atomic<bool>> build_cancel;
     bool build_designs = false;        // the background build designs a filter (not only loads it from the cache)
+    Throughput throughput;             // the chain's speed against real time (PCM)
 
     // ------------------------------------------------------------------ small helpers
 

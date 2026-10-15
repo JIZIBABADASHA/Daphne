@@ -18,6 +18,7 @@
 #include "daphne/engine/live_source.h"
 #include "daphne/engine/player.h"
 #include "daphne/engine/settings.h"
+#include "../core/src/player/throughput.h"
 #include "fake_output.h"
 #include "test_util.h"
 
@@ -564,4 +565,44 @@ TEST_CASE("Player: the dsd core sends PCM as DoP", "[player][dsd]") {
     CHECK(bad == 0);
     CHECK(n >= 176400 / 2);
     r.dump("dsd_core");
+}
+
+TEST_CASE("Throughput: the factor per 2 s window, one warning per slow stretch", "[player][throughput]") {
+    using playback::Throughput;
+    using namespace std::chrono_literals;
+    Throughput t;
+    CHECK(t.factor() == 0.0);
+    t.add(100ms, 1.0);
+    CHECK(t.factor() == 0.0);   // the window is not full yet
+    t.add(100ms, 1.0);
+    CHECK(t.factor() == Catch::Approx(10.0));
+    CHECK_FALSE(t.warn());
+    // slow: one window below 1.2x is not enough, two are
+    t.add(2000ms, 2.0);
+    CHECK(t.factor() == Catch::Approx(1.0));
+    CHECK_FALSE(t.warn());
+    t.add(2500ms, 2.0);
+    CHECK(t.warn());
+    CHECK_FALSE(t.warn());   // once
+    t.add(2500ms, 2.0);
+    t.add(2500ms, 2.0);
+    CHECK_FALSE(t.warn());   // still the same stretch
+    // recovered above 1.5x, then slow again: warned again
+    t.add(1000ms, 2.0);
+    t.add(2500ms, 2.0);
+    t.add(2500ms, 2.0);
+    CHECK(t.warn());
+}
+
+TEST_CASE("Player: the report says how fast the chain runs", "[player][throughput]") {
+    Rig r;
+    use_float_device(*r.dev);
+    r.sources["sine"] = sine(44100, 1000.0, 3.0);
+    Settings s;
+    s.output.rate = "2x";
+    s.filter.taps = 256;
+    REQUIRE(r.start("sine", s));
+    const auto rep = r.finish();
+    CHECK(rep.realtime_factor > 1.5);   // a short filter: far faster than real time on any machine
+    CHECK_FALSE(r.saw("real time (it needs"));
 }
