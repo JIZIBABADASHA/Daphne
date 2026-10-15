@@ -56,6 +56,7 @@ void Player::Impl::cross_switch(std::unique_ptr<Decoder> nd, std::unique_ptr<Dsp
     cur = std::move(nc);
     dec = std::move(nd);
     ratio = std::max(1, crate / dec->info().rate);
+    throughput.reset();
 }
 
 int Player::Impl::join_produce() {

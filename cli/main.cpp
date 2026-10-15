@@ -652,7 +652,8 @@ int cmd_play(std::vector<std::string> args) {
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         std::cout << "  played " << rep.frames_played << " frames in " << secs << " s | underruns " << rep.underruns
                   << " | event timeouts " << rep.event_timeouts << " | max event interval " << rep.max_interval_us / 1000.0
-                  << " ms | clipped " << rep.clipped << (g_cancel ? " | cancelled" : "") << (ended ? " | ended" : "")
+                  << " ms | clipped " << rep.clipped << " | processing " << rep.realtime_factor << "x real time"
+                  << (g_cancel ? " | cancelled" : "") << (ended ? " | ended" : "")
                   << " | last position " << end_pos << " s\n";
     }
     return failures ? 2 : 0;

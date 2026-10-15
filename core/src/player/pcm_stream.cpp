@@ -139,6 +139,7 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
             continue;
         }
         ratio = std::max(1, crate / src.rate);
+        throughput.reset();   // a new chain, a new speed
         tl.h_base = 0;
         dch = rep.device.channels;
         io.block = rep.device.block_align();
@@ -179,6 +180,7 @@ void Player::Impl::finish_fade() {
     tl.abs_out += xf.delay_shift;
     rep.clipped += cur->take_clips();   // its last mixed block
     cur = xf.finish();
+    throughput.reset();
     rep.chain = cur->stages();
     rep.filter = report.filter(s, dsdenc.get());
     report.bit_perfect(tl.heard_chain(cur.get()));
@@ -200,19 +202,27 @@ void Player::Impl::begin_crossfade(std::unique_ptr<DspChain> nx) {
 
 bool Player::Impl::produce() {
     if (io.pend_off < io.pend) return true;
+    // the chain's work on this chunk (Throughput): not the decoder, a gapless switch or the carried output
+    Throughput::Clock::duration work{};
+    bool carried = false;
     int n = 0;
     while (n == 0) {
         if (!xf.fading && xf.carry.frames() > 0) {
             n = std::min(xf.carry.frames(), static_cast<int>(dsp.size() / dch));
             std::copy(xf.carry.data(), xf.carry.data() + static_cast<size_t>(n) * dch, dsp.begin());
             xf.carry.pop(n);
+            carried = true;
             break;
         }
         if (cross_join.active()) {
+            // both chains' work (Throughput; it also reads the next track, a small overcount)
+            const auto tj = Throughput::Clock::now();
             n = join_produce();
+            work += Throughput::Clock::now() - tj;
             continue;   // (0: the join is over, its last frames are in the carry)
         }
         const int got = dec->read(pcm.data(), kChunk);
+        const auto t0 = Throughput::Clock::now();
         if (got > 0) {
             hist.store(pcm.data(), got, in_total);
             in_total += got;
@@ -226,16 +236,20 @@ bool Player::Impl::produce() {
                 n = xf.mix(dsp.data(), static_cast<int>(dsp.size() / dch), fq, rep.device, dsdenc != nullptr);
                 if (xf.pos >= xf.len) finish_fade();
             }
+            work += Throughput::Clock::now() - t0;
         } else {
             if (!flushed && try_gapless()) continue;   // the next track follows without a gap
             if (xf.fading) finish_fade();
             if (xf.carry.frames() > 0) continue;
             if (flushed) return false;
             flushed = true;
+            const auto t1 = Throughput::Clock::now();
             n = cur->flush(dsp.data());
+            work += Throughput::Clock::now() - t1;
             if (n == 0) return false;
         }
     }
+    const auto t2 = Throughput::Clock::now();
     if (ramp_in_left > 0) {
         for (int i = 0; i < n && ramp_in_left > 0; ++i, --ramp_in_left) {
             const double g = static_cast<double>(ramp_in_len - ramp_in_left) / static_cast<double>(ramp_in_len);
@@ -262,6 +276,10 @@ bool Player::Impl::produce() {
         rep.clipped += cur->take_clips() + (xf.next ? xf.next->take_clips() : 0);   // clamped by the final quantizer
         io.pend = static_cast<size_t>(n) * io.block;
     }
+    work += Throughput::Clock::now() - t2;
+    throughput.add(work, carried || crate <= 0 ? 0.0 : static_cast<double>(n) / crate);
+    rep.realtime_factor = throughput.factor();
+    rt_factor.store(rep.realtime_factor, std::memory_order_relaxed);
     io.pend_off = 0;
     tl.abs_out += n;
     rep.frames_played += n;

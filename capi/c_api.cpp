@@ -63,7 +63,7 @@ json report_json(const daphne::PlayReport& r) {
                 {"bits", r.device.valid_bits}, {"container", r.device.container_bits}, {"text", daphne::describe(r.device)}};
     return {{"source", src},           {"device", dev},       {"device_name", r.device_name}, {"bit_perfect", r.bit_perfect},
             {"reason", r.not_bit_perfect_reason}, {"filter", r.filter}, {"chain", r.chain},  {"latency_ms", r.latency_ms},
-            {"underruns", r.underruns}, {"clipped", r.clipped}};
+            {"underruns", r.underruns}, {"clipped", r.clipped}, {"realtime", r.realtime_factor}};
 }
 
 void push_event(dc_player* p, json e) {
@@ -296,6 +296,8 @@ DC_API int dc_state(dc_player* p, char* out, int len) {
         if (const auto ls = daphne::live_stats(); ls.active && p->player)
             j["live"] = {{"fill", ls.fill}, {"read", ls.read}, {"resyncs", ls.resyncs}, {"starves", ls.starves}, {"adjust", ls.adjust}};
         if (p->player) {
+            // the report is the one of the last start / change; the speed is measured on as it plays
+            j["report"]["realtime"] = p->player->realtime_factor();
             j["asio_rates"] = p->player->asio_rates();
             j["debug"] = json::parse(p->player->debug_json(), nullptr, false);
         }
