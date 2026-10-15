@@ -32,8 +32,10 @@
 #include "change_plan.h"
 #include "common.h"
 #include "crossfader.h"
+#include "join.h"
 #include "output_session.h"
 #include "report.h"
+#include "throughput.h"
 #include "timeline.h"
 #include "track_queue.h"
 
@@ -87,6 +89,10 @@ struct Player::Impl {
     std::unique_ptr<Decoder> dec;
     std::unique_ptr<DspChain> cur;
     std::future<std::unique_ptr<DspChain>> building;
+    std::future<Warm> warming;         // a built chain's warm-up round in the background (begin_crossfade)
+    std::shared_ptr<std::atomic<bool>> warm_cancel;   // stops that round (take_warm)
+    int warm_rounds = 0;
+    int64_t warm_last = 0;             // input frames of the last round
     std::optional<std::pair<Settings, OutputChoice>> build_target, queued;
     std::vector<double> pcm, dsp, tmp_c, tmp_n;
     int64_t in_total = 0;              // source frames read since the start of the track
@@ -112,6 +118,7 @@ struct Player::Impl {
     std::vector<uint8_t> dsd_bytes;
     bool flushed = false;
     Crossfader xf;                     // a rebuilt chain fading in; the chain output carried over
+    Join cross_join;                   // a gapless join through a new chain being made (cross_switch)
     History hist;                      // recent input, for a rebuilt chain's warm-up
     FadeQuantizer fq;                  // fades on integer devices (N21)
     // device restart: fade the last chunk out, the first frames after the restart in
@@ -128,6 +135,8 @@ struct Player::Impl {
     // the background rebuild can be cancelled when a newer change supersedes it
     std::shared_ptr<std::atomic<bool>> build_cancel;
     bool build_designs = false;        // the background build designs a filter (not only loads it from the cache)
+    Throughput throughput;             // the chain's speed against real time (PCM)
+    std::atomic<double> rt_factor{0};  // its last factor, for other threads (Player::realtime_factor)
 
     // ------------------------------------------------------------------ small helpers
 
@@ -176,9 +185,16 @@ struct Player::Impl {
     bool open_and_start(int64_t from, std::string* error);
     // One chunk into bytes; false at the end of the stream.
     bool produce();
-    // Starts the crossfade to nx: warm it up on the recent input and align it to the current
-    // chain by content delay.
+    // Starts the crossfade to nx: warm it up on the recent input (in the background, poll_warm) and
+    // align it to the current chain by content delay.
     void begin_crossfade(std::unique_ptr<DspChain> nx);
+    void launch_warm(Warm w, std::vector<double> in);
+    // A warm-up round done: another round, or the rest here and the crossfade starts.
+    void poll_warm();
+    // The warm-up stops (a seek, a restart, the end); its chain, or null.
+    std::unique_ptr<DspChain> take_warm();
+    // A change, a gapless join through a new chain or the next build has to wait for this one.
+    bool chain_busy() const { return xf.fading || building.valid() || warming.valid() || tl.cross_pending() || cross_join.active(); }
     void finish_fade();
 
     // ------------------------------------------------------------------ dsd_stream.cpp: DSD files sent directly, the stream end
@@ -212,6 +228,8 @@ struct Player::Impl {
     // ahead) is overlap-added so that B's first sample comes exactly one source period after A's last, its
     // pre-ringing over A's end. The hearing side follows when B is heard (check_switch).
     void cross_switch(std::unique_ptr<Decoder> nd, std::unique_ptr<DspChain> nc, const std::filesystem::path& np);
+    // The next chunk of the join into dsp (frames); 0 when it is over (the rest is in the carry).
+    int join_produce();
     // The track just switched to (switches.back()) has its own headroom (ReplayGain per track): applied from its
     // first decoded sample on (the gain stage ramps over 20 ms); the old value is kept for an undo.
     void apply_headroom(std::optional<double> h);

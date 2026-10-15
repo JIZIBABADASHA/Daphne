@@ -11,11 +11,16 @@
 #include <fstream>
 #include <map>
 #include <random>
+#include <future>
 #include <thread>
+
+#include <nlohmann/json.hpp>
 
 #include "daphne/engine/live_source.h"
 #include "daphne/engine/player.h"
 #include "daphne/engine/settings.h"
+#include "../core/src/player/crossfader.h"
+#include "../core/src/player/throughput.h"
 #include "fake_output.h"
 #include "test_util.h"
 
@@ -195,6 +200,22 @@ TEST_CASE("Player: a 24-bit source at its own rate is sent bit-perfectly", "[pla
     r.dump("bitperfect");
 }
 
+TEST_CASE("Player: the debug JSON for the host's log keeps its keys", "[player]") {
+    Rig r;
+    r.dev->speed = 4.0;
+    r.sources["a"] = int24_noise(44100, 2, 4 * 44100, 7);
+    REQUIRE(r.start("a", Settings{}));
+    sleep_s(0.7);   // updated every 500 ms
+    const auto j = nlohmann::json::parse(r.player->debug_json(), nullptr, false);
+    r.player->stop();
+    r.finish();
+    REQUIRE(j.is_object());
+    for (const char* k : {"ring", "ring_cap", "pend", "eof", "fading", "building", "paused", "dev_paused", "callbacks", "underruns",
+                          "drained", "failed", "late", "abs_out", "in"})
+        CHECK(j.contains(k));
+    CHECK(j["abs_out"].get<int64_t>() > 0);
+}
+
 TEST_CASE("Player: upsampling keeps the speed and the pitch", "[player]") {
     for (const char* rate : {"2x", "auto"}) {
         DYNAMIC_SECTION("output.rate " << rate) {
@@ -338,7 +359,8 @@ TEST_CASE("Player: a volume change is applied in place", "[player]") {
     Rig r;
     use_float_device(*r.dev);
     r.dev->speed = 4.0;
-    r.sources["sine"] = sine(44100, 1000.0, 2.0);
+    // 4 s: the change reaches the processing thread well before it has decoded the end, also on a busy CI machine
+    r.sources["sine"] = sine(44100, 1000.0, 4.0);
     Settings s;
     s.volume.mode = VolumeMode::Digital;
     REQUIRE(r.start("sine", s));
@@ -358,7 +380,8 @@ TEST_CASE("Player: a new filter is built in the background and crossfaded in", "
     Rig r;
     use_float_device(*r.dev);
     r.dev->speed = 4.0;
-    r.sources["sine"] = sine(44100, 1000.0, 6.0);   // long enough for the background build on a slow machine
+    const int secs = 10;   // long enough for the background build and warm-up on a slow machine (a sanitizer build)
+    r.sources["sine"] = sine(44100, 1000.0, secs);
     Settings s;
     s.output.rate = "2x";
     s.filter.taps = 256;
@@ -372,9 +395,9 @@ TEST_CASE("Player: a new filter is built in the background and crossfaded in", "
     CHECK(r.changed >= 1);
     const auto y = r.dev->samples_f32();
     const size_t frames = y.size() / 2;
-    REQUIRE(frames >= 6 * 88200u - 2 * 512);
-    CHECK(frames <= 6 * 88200u + 4 * 512 * 2 + 2 * 512);
-    CHECK(longest_quiet(y, 2, 1000, 6 * 88200 - 2000) < 10);
+    REQUIRE(frames >= secs * 88200u - 2 * 512);
+    CHECK(frames <= secs * 88200u + 4 * 512 * 2 + 2 * 512);
+    CHECK(longest_quiet(y, 2, 1000, secs * 88200 - 2000) < 10);
 }
 
 TEST_CASE("Player: an output rate change restarts the device where it was", "[player]") {
@@ -564,4 +587,151 @@ TEST_CASE("Player: the dsd core sends PCM as DoP", "[player][dsd]") {
     CHECK(bad == 0);
     CHECK(n >= 176400 / 2);
     r.dump("dsd_core");
+}
+
+TEST_CASE("Crossfader: a warm-up in rounds starts the same crossfade as one warm-up", "[player][crossfade]") {
+    // 44.1 -> 88.2 kHz on a 16-bit device: a resampler and a TPDF quantizer (the dither depends on every
+    // frame the chain has made)
+    AudioInfo src{};
+    src.rate = 44100, src.channels = 2, src.bits = 16, src.lossless_int = true, src.codec = "test";
+    DeviceFormat dev{};
+    dev.rate = 88200, dev.channels = 2, dev.type = SampleType::Int16, dev.container_bits = 16, dev.valid_bits = 16;
+    Settings s;
+    s.filter.taps = 512;
+    auto chain = [&] {
+        auto c = std::make_unique<DspChain>();
+        std::string e;
+        REQUIRE(c->build(playback::chain_settings(s), src, dev, playback::kChunk, &e));
+        return c;
+    };
+    playback::History h;
+    h.reset(2);
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<double> u(-0.5, 0.5);
+    std::vector<double> x(2 * 30000);
+    for (auto& v : x) v = u(rng);
+    h.store(x.data(), 30000, 0);
+    const int ratio = 2, cur_delay = 300;
+    const int64_t fade = 4410;
+    // the playing chain plays on between the rounds
+    const int64_t abs_first = 2 * 12000, abs_last = 2 * 29000;
+
+    playback::Crossfader one;
+    one.set_channels(2);
+    one.begin(chain(), h, 30000, abs_last, cur_delay, ratio, fade);
+
+    playback::Crossfader rounds;
+    rounds.set_channels(2);
+    std::vector<double> in;
+    auto w = playback::Crossfader::prepare(chain(), h, 12500, abs_first, cur_delay, ratio, 2, &in);
+    w.feed(in.data(), 12500 - w.in_done, 2);
+    REQUIRE(playback::copy_history(h, w.in_done, 21000, &in));
+    w.feed(in.data(), 21000 - w.in_done, 2);
+    REQUIRE(playback::copy_history(h, w.in_done, 30000, &in));
+    w.feed(in.data(), 30000 - w.in_done, 2);
+    rounds.begin(std::move(w), abs_last, cur_delay, fade);
+
+    CHECK(rounds.drop_next == one.drop_next);
+    CHECK(rounds.delay_shift == one.delay_shift);
+    REQUIRE(rounds.fn.frames() == one.fn.frames());
+    CHECK(std::equal(one.fn.data(), one.fn.data() + 2 * one.fn.frames(), rounds.fn.data()));
+    // the history has moved past what a round still needs
+    CHECK_FALSE(playback::copy_history(h, 0, h.cap + 1, &in));
+
+    // a cancelled round stops at once (a seek, a restart or the end does not wait for it)
+    std::atomic<bool> stop{true};
+    auto wc = playback::Crossfader::prepare(chain(), h, 30000, abs_last, cur_delay, ratio, 2, &in);
+    const int64_t at = wc.in_done;
+    wc.cancel = &stop;
+    wc.feed(in.data(), 30000 - wc.in_done, 2);
+    CHECK(wc.in_done == at);
+}
+
+TEST_CASE("PoolThreadScope: a std::async task leaves its thread as it found it", "[player]") {
+    // MSVC runs std::async tasks on a thread pool and reuses the threads: a priority or FTZ set by one task
+    // would reach the next (a filter design)
+    const uint64_t fp0 = std::async(std::launch::async, [] { return platform::fp_control(); }).get();
+    for (int i = 0; i < 5; ++i) {
+        std::async(std::launch::async, [] {
+            playback::PoolThreadScope pool;
+            platform::set_thread_priority(platform::Priority::BelowNormal);
+            platform::set_fp_control(platform::with_flush_to_zero(platform::fp_control()));
+        }).get();
+        const auto [prio, fp] = std::async(std::launch::async, [] { return std::make_pair(platform::thread_priority(), platform::fp_control()); }).get();
+        CHECK(prio == platform::Priority::Normal);
+        CHECK(fp == fp0);
+    }
+}
+
+TEST_CASE("Player: gapless to another rate keeps the next track in time with a long filter", "[player]") {
+    // the old chain's tail (about twice its delay) is longer than the first chunk through the new chain:
+    // the new chain's output has to cover all of it, or the next track starts again after the tail
+    Rig r;
+    use_float_device(*r.dev);
+    r.dev->speed = 4.0;
+    const int secs = 10;   // long enough for the 8192-tap chain to be built ahead on a slow machine (CI)
+    r.sources["a"] = sine(44100, 1000.0, secs);
+    r.sources["b"] = sine(88200, 1000.0, 1.0);   // the same 1 kHz, its phase continuing from a's end
+    Settings s;
+    s.output.rate = "176400";
+    s.filter.taps = 8192;
+    REQUIRE(r.start("a", s));
+    r.player->set_next(platform::path_from_utf8("b"));
+    r.finish();
+    REQUIRE(r.tracks == 1);
+    const auto y = r.dev->samples_f32();
+    const size_t join = static_cast<size_t>(secs) * 176400;
+    REQUIRE(y.size() / 2 > join + 100000);
+    // the phase of the 1 kHz sine before and after the join (the filter delay is the same on both sides)
+    auto phase = [&](size_t from, size_t to) {
+        double c = 0, sn = 0;
+        for (size_t i = from; i < to; ++i) {
+            const double w = 2 * kPi * 1000.0 * static_cast<double>(i) / 176400.0;
+            c += y[2 * i] * std::cos(w), sn += y[2 * i] * std::sin(w);
+        }
+        return std::atan2(c, sn);
+    };
+    const double d = std::remainder(phase(join + 60000, join + 100000) - phase(join - 60000, join - 20000), 2 * kPi);
+    CHECK(std::abs(d) < 0.1);   // 12491 frames late before the fix: 1.13 rad
+    CHECK(longest_quiet(y, 2, join - 50000, join + 50000) < 10);
+}
+
+TEST_CASE("Throughput: the factor per 2 s window, one warning per slow stretch", "[player][throughput]") {
+    using playback::Throughput;
+    using namespace std::chrono_literals;
+    Throughput t;
+    CHECK(t.factor() == 0.0);
+    t.add(100ms, 1.0);
+    CHECK(t.factor() == 0.0);   // the window is not full yet
+    t.add(100ms, 1.0);
+    CHECK(t.factor() == Catch::Approx(10.0));
+    CHECK_FALSE(t.warn());
+    // slow: one window below 1.2x is not enough, two are
+    t.add(2000ms, 2.0);
+    CHECK(t.factor() == Catch::Approx(1.0));
+    CHECK_FALSE(t.warn());
+    t.add(2500ms, 2.0);
+    CHECK(t.warn());
+    CHECK_FALSE(t.warn());   // once
+    t.add(2500ms, 2.0);
+    t.add(2500ms, 2.0);
+    CHECK_FALSE(t.warn());   // still the same stretch
+    // recovered above 1.5x, then slow again: warned again
+    t.add(1000ms, 2.0);
+    t.add(2500ms, 2.0);
+    t.add(2500ms, 2.0);
+    CHECK(t.warn());
+}
+
+TEST_CASE("Player: the report says how fast the chain runs", "[player][throughput]") {
+    Rig r;
+    use_float_device(*r.dev);
+    r.sources["sine"] = sine(44100, 1000.0, 3.0);
+    Settings s;
+    s.output.rate = "2x";
+    s.filter.taps = 256;
+    REQUIRE(r.start("sine", s));
+    const auto rep = r.finish();
+    CHECK(rep.realtime_factor > 1.5);   // a short filter: far faster than real time on any machine
+    CHECK_FALSE(r.saw("real time (it needs"));
 }

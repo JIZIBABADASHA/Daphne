@@ -68,7 +68,9 @@ DC_API void dc_stop(dc_player* p);
 /* State snapshot as JSON:
  *   {"state": "idle|playing|paused|ended|failed", "position": s, "duration": s, "track": n, "design": 0..1,
  *    "error": "...", "report": {"source": {...}, "device": {...}, "device_name": "...", "bit_perfect": b,
- *    "reason": "...", "filter": "...", "chain": [...], "latency_ms": x, "underruns": n}}
+ *    "reason": "...", "filter": "...", "chain": [...], "latency_ms": x, "underruns": n, "clipped": n, "realtime": x}}
+ * "realtime": the processing speed against real time while playing (audio seconds per second of work over the last
+ * 2 s; 0 before the first measurement and for DSD files sent directly); below about 1.2 the device plays gaps.
  * "track" counts gapless transitions since dc_load; "asio_rates": PCM rates the open ASIO driver accepts (hosts use
  * them instead of opening the driver a second time); "debug": internal state for logs.
  * Returns the length, or DC_ERR_BUFFER. */

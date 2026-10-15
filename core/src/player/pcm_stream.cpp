@@ -55,6 +55,8 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
         xf.fading = false;
         xf.next.reset();
         xf.clear();
+        take_warm();   // a crossfade warming up: the chain is built anew for the settings below
+        cross_join.clear();
         io.dev = open_output({out, s.output.buffer_ms, rates[attempt].rate, src.channels, rates[attempt].native}, &e);
         if (!io.dev) {
             if (fail_attempt()) return false;
@@ -140,6 +142,7 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
             continue;
         }
         ratio = std::max(1, crate / src.rate);
+        throughput.reset();   // a new chain, a new speed
         tl.h_base = 0;
         dch = rep.device.channels;
         io.block = rep.device.block_align();
@@ -187,6 +190,7 @@ void Player::Impl::finish_fade() {
     tl.abs_out += xf.delay_shift;
     rep.clipped += cur->take_clips();   // its last mixed block
     cur = xf.finish();
+    throughput.reset();
     rep.chain = cur->stages();
     rep.filter = report.filter(s, dsdenc.get());
     report.bit_perfect(tl.heard_chain(cur.get()));
@@ -195,8 +199,49 @@ void Player::Impl::finish_fade() {
 }
 
 void Player::Impl::begin_crossfade(std::unique_ptr<DspChain> nx) {
-    xf.begin(std::move(nx), hist, in_total, tl.abs_out, cur->content_delay(), ratio,
-             std::max<int64_t>(1, static_cast<int64_t>(crate * kFadeSeconds)));
+    std::vector<double> in;
+    Warm w = Crossfader::prepare(std::move(nx), hist, in_total, tl.abs_out, cur->content_delay(), ratio, dch, &in);
+    warm_rounds = 0;   // (poll_warm counts the rounds)
+    launch_warm(std::move(w), std::move(in));
+}
+
+// Up to 3 s of input through a long filter can take longer than the ring holds: the warm-up runs on a
+// background thread while the current chain plays on (N4).
+void Player::Impl::launch_warm(Warm w, std::vector<double> in) {
+    ++warm_rounds;
+    warm_last = static_cast<int64_t>(in.size() / static_cast<size_t>(ch));
+    warm_cancel = std::make_shared<std::atomic<bool>>(false);
+    warming = std::async(std::launch::async, [w = std::move(w), in = std::move(in), ch = ch, flag = warm_cancel]() mutable {
+        PoolThreadScope pool;   // what this task sets on its thread is undone when it ends (common.h)
+        platform::set_thread_priority(platform::Priority::BelowNormal);
+        platform::set_fp_control(platform::with_flush_to_zero(platform::fp_control()));   // as on the processing thread
+        w.cancel = flag.get();
+        w.feed(in.data(), static_cast<int64_t>(in.size() / static_cast<size_t>(ch)), ch);
+        w.cancel = nullptr;   // the flag lives with this task; a later round sets its own
+        return std::move(w);
+    });
+}
+
+void Player::Impl::poll_warm() {
+    constexpr int kRounds = 4;
+    if (!warming.valid() || warming.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    Warm w = warming.get();
+    const int64_t fade = std::max<int64_t>(1, static_cast<int64_t>(crate * kFadeSeconds));
+    std::vector<double> in;
+    const int64_t left = in_total - w.in_done;   // decoded during the round
+    if (!copy_history(hist, w.in_done, in_total, &in)) {
+        // the history no longer holds it (a slow round at a high source rate): from the start, here
+        w.chain->reset();
+        xf.begin(std::move(w.chain), hist, in_total, tl.abs_out, cur->content_delay(), ratio, fade);
+    } else if (left > kChunk && left < warm_last && warm_rounds < kRounds) {
+        // another round while they get shorter (the background runs faster than the input comes)
+        launch_warm(std::move(w), std::move(in));
+        return;
+    } else {
+        // the rest here: at most a chunk, or (a chain slower than the input) at most what the last round had
+        w.feed(in.data(), left, ch);
+        xf.begin(std::move(w), tl.abs_out, cur->content_delay(), fade);
+    }
     tmp_n.assign(static_cast<size_t>(xf.next->max_output_frames()) * dch, 0.0);
     tmp_c.assign(static_cast<size_t>(cur->max_output_frames()) * dch, 0.0);
     const size_t need = std::max(tmp_n.size(), tmp_c.size());
@@ -206,17 +251,35 @@ void Player::Impl::begin_crossfade(std::unique_ptr<DspChain> nx) {
     }
 }
 
+std::unique_ptr<DspChain> Player::Impl::take_warm() {
+    if (!warming.valid()) return nullptr;
+    if (warm_cancel) *warm_cancel = true;   // the round stops at its next chunk instead of running to the end
+    return warming.get().chain;
+}
+
 bool Player::Impl::produce() {
     if (io.pend_off < io.pend) return true;
+    // the chain's work on this chunk (Throughput): not the decoder, a gapless switch or the carried output
+    Throughput::Clock::duration work{};
+    bool carried = false;
     int n = 0;
     while (n == 0) {
         if (!xf.fading && xf.carry.frames() > 0) {
             n = std::min(xf.carry.frames(), static_cast<int>(dsp.size() / dch));
             std::copy(xf.carry.data(), xf.carry.data() + static_cast<size_t>(n) * dch, dsp.begin());
             xf.carry.pop(n);
+            carried = true;
             break;
         }
+        if (cross_join.active()) {
+            // both chains' work (Throughput; it also reads the next track, a small overcount)
+            const auto tj = Throughput::Clock::now();
+            n = join_produce();
+            work += Throughput::Clock::now() - tj;
+            continue;   // (0: the join is over, its last frames are in the carry)
+        }
         const int got = dec->read(pcm.data(), read_frames);
+        const auto t0 = Throughput::Clock::now();
         if (got > 0) {
             hist.store(pcm.data(), got, in_total);
             in_total += got;
@@ -230,16 +293,20 @@ bool Player::Impl::produce() {
                 n = xf.mix(dsp.data(), static_cast<int>(dsp.size() / dch), fq, rep.device, dsdenc != nullptr);
                 if (xf.pos >= xf.len) finish_fade();
             }
+            work += Throughput::Clock::now() - t0;
         } else {
             if (!flushed && try_gapless()) continue;   // the next track follows without a gap
             if (xf.fading) finish_fade();
             if (xf.carry.frames() > 0) continue;
             if (flushed) return false;
             flushed = true;
+            const auto t1 = Throughput::Clock::now();
             n = cur->flush(dsp.data());
+            work += Throughput::Clock::now() - t1;
             if (n == 0) return false;
         }
     }
+    const auto t2 = Throughput::Clock::now();
     if (ramp_in_left > 0) {
         for (int i = 0; i < n && ramp_in_left > 0; ++i, --ramp_in_left) {
             const double g = static_cast<double>(ramp_in_len - ramp_in_left) / static_cast<double>(ramp_in_len);
@@ -266,6 +333,10 @@ bool Player::Impl::produce() {
         rep.clipped += cur->take_clips() + (xf.next ? xf.next->take_clips() : 0);   // clamped by the final quantizer
         io.pend = static_cast<size_t>(n) * io.block;
     }
+    work += Throughput::Clock::now() - t2;
+    throughput.add(work, carried || crate <= 0 ? 0.0 : static_cast<double>(n) / crate);
+    rep.realtime_factor = throughput.factor();
+    rt_factor.store(rep.realtime_factor, std::memory_order_relaxed);
     io.pend_off = 0;
     tl.abs_out += n;
     rep.frames_played += n;

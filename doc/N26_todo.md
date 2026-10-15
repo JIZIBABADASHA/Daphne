@@ -4,21 +4,18 @@
 
 ## 跨平台收尾（N25）
 
-- **CI：用系統 FFmpeg 建置**。目前 CI 不裝 FFmpeg，`decoder_ffmpeg.cpp` 在 Windows 以外從未由 CI 編譯（`sscanf_s` 就是在 Mac 實機上才發現）。Ubuntu 加一個 job：`apt install libavformat-dev libavcodec-dev libavutil-dev libswresample-dev`。
-- **CI：GCC / Clang 的警告**。CMake 只對 MSVC 開警告（`/W4`）；GCC / Clang 沒有加 `-Wall -Wextra`，CI 的「沒有警告」在那兩個平台沒有意義。目前手動確認過 GCC 15.3 `-Wall -Wextra` 為 0 個警告。
-- **`cross-platform-plan` 合併回 `main`**，之後讓 MIKU 的 `Extensions/Daphne` 指向新的版本（MIKU 端另發 PR）。
+- **`cross-platform-plan` 合併回 `main`**：等下面「已知問題」的處理速度偵測、即時輸入延遲、預熱移出處理執行緒，以及拆分步驟 5–7 都完成後一次合併；之後讓 MIKU 的 `Extensions/Daphne` 指向新的版本（MIKU 端另發 PR）。
 
 ## 尚未驗證
 
 - **MSVC ARM64 建置**（Windows on ARM）：程式已避開 x86 專屬的 cpuid、FPCR 改用 `_ReadStatusReg` / `_WriteStatusReg`，但沒有 ARM64 工具組，尚未實際編譯。
 - **Linux 即時排程**：處理執行緒拿到 `SCHED_FIFO` 時，由它建立的執行緒（濾波器設計、`parallel_for`、無縫換軌預備）會先回到 `SCHED_OTHER`。需要有即時權限（`RLIMIT_RTPRIO` / `CAP_SYS_NICE`）的 Linux 實際確認。
 - **macOS universal 建置的 arm64 部分**：在 Intel Mac 上建置成功（x86_64 有 AVX2 核心、arm64 沒有），但 arm64 只由 CI（macOS 14 原生）執行過，沒有執行過 universal 二進位檔的 arm64 部分。
-- **較舊的 FFmpeg**：pkg-config 建置只用 FFmpeg 8.0、8.1 驗證過；Debian 12 套件庫的 FFmpeg 5.1 等舊版本未測試。
+- **較舊的 FFmpeg**：pkg-config 建置驗證過 FFmpeg 6.1（Ubuntu 24.04，CI）、8.0、8.1；Debian 12 套件庫的 FFmpeg 5.1 未測試。
 - **Windows 上的小項目**：
   - 本分支與 `main` 的效能比較（`parallel_for` 的 worker 優先權在 Windows 改成三級，原本照抄建立者的確切值），用最重的設定比較 underrun 數與設計時間。
   - `decode-test --md5`（內建 MD5，取代 BCrypt）與 `main` 的結果逐檔比對。
   - 含中文、emoji、超過 260 字元的實際檔名播放（孤立 surrogate 已有單元測試）。
-  - UTF-8 版 C API（`dc_load_utf8` 等）目前沒有測試。
 
 ## 拆分計畫的後續步驟（N25）
 
@@ -33,11 +30,10 @@
 
 ## 已知問題（暫不處理）
 
-- **處理速度低於即時時沒有偵測或警告**：double-double 加長濾波器在較慢的 CPU 上會持續 underrun。
-- **不同取樣率的無縫換軌與交叉淡化的預熱在處理執行緒上同步執行**：長濾波器時可能超過環的 0.5 s。
+- **Linux 上 double-double 的 worker 優先權**：處理執行緒拿到 `SCHED_FIFO` 時，每個 block 都要等的 `WorkerPool` worker 只是 `SCHED_OTHER`（「高於一般」的 nice −5 沒有權限時失敗），可能拖慢處理執行緒。Windows 的 worker 也不是 MMCSS（`THREAD_PRIORITY_ABOVE_NORMAL`）。做 ALSA 輸出時一起檢查。
 - **處理執行緒的 sleep 輪詢**（環滿時 2 ms、排空時 5 ms、等待裝置的迴圈）：之後改成事件等待。
 
-## MIKU 擴充（`src/Daphne.Extension`）
+## MIKU 擴充（`src/Daphne.Extension`，暫緩）
 
 - **裝置失效（0x88890004，AUDCLNT_E_DEVICE_INVALIDATED）**：設定中的裝置不在（例如 DAC 關機）時，MIKU 自己的核心會退回預設裝置，Daphne 只回報錯誤。改成退回預設裝置，或顯示看得懂的訊息。
 - **播放路徑卡片**：
