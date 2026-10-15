@@ -39,13 +39,16 @@ void Player::Impl::cross_switch(std::unique_ptr<Decoder> nd, std::unique_ptr<Dsp
     }
     put(tail, cur->flush(dsp.data()));
 
-    // B through the new chain until its first sample (new-chain frame dn) is out
+    // B through the new chain until its first sample (new-chain frame dn) is out and its output reaches
+    // the end of A's tail: what the new chain makes next follows the carry, so it has to land there
     const int dn = nc->content_delay();
+    const int64_t off = (a_end - start) - dn;   // new-chain frame j lands on tail frame j + off
+    const int64_t tail_frames = static_cast<int64_t>(tail.size()) / dch;
     in_total = 0;
     hist.valid_from = 0;
     std::vector<double> head;
     int64_t produced = 0;
-    while (produced <= dn) {
+    while (produced <= dn || produced + off < tail_frames) {
         const int got = nd->read(pcm.data(), kChunk);
         if (got <= 0) break;
         hist.store(pcm.data(), got, in_total);
@@ -54,8 +57,7 @@ void Player::Impl::cross_switch(std::unique_ptr<Decoder> nd, std::unique_ptr<Dsp
         put(head, o);
         produced += o;
     }
-    // new-chain frame j lands on tail frame j + off; frames before what has been played already are dropped
-    const int64_t off = (a_end - start) - dn;
+    // frames before what has been played already are dropped
     for (int64_t j = std::max<int64_t>(0, -off); j < produced; ++j) {
         const int64_t t = j + off;
         if (t >= static_cast<int64_t>(tail.size()) / dch) tail.resize(static_cast<size_t>(t + 1) * dch, 0.0);
