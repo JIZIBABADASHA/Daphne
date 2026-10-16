@@ -23,6 +23,7 @@ public:
     PlayReport rep;
     PlayCallbacks cb;
     std::atomic<double> design_prog{0.0};   // the filter design's progress sink (dsp::ProgressScope)
+    bool shared_mix = false;                 // the open output is a system mixer (OutputCaps): never bit-perfect
 
     void event(const std::string& e) const {
         if (cb.on_event) cb.on_event(e);

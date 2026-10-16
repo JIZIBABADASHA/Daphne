@@ -1,6 +1,7 @@
 // Core Audio output (coreaudio_output.h).
 #include "daphne/engine/coreaudio_output.h"
 
+#include <AudioToolbox/AudioConverter.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -100,6 +101,19 @@ int choose_rate(const std::vector<int>& offered, int want) {
     return best ? best : offered.back();
 }
 
+// Interleaved 32-bit float, the converter's format on both sides.
+AudioStreamBasicDescription float_pcm(double rate, int channels) {
+    AudioStreamBasicDescription f{};
+    f.mSampleRate = rate;
+    f.mFormatID = kAudioFormatLinearPCM;
+    f.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagsNativeEndian;
+    f.mFramesPerPacket = 1;
+    f.mChannelsPerFrame = static_cast<UInt32>(channels);
+    f.mBitsPerChannel = 32;
+    f.mBytesPerFrame = f.mBytesPerPacket = 4 * static_cast<UInt32>(channels);
+    return f;
+}
+
 }  // namespace
 
 struct CoreAudioOutput::Impl {
@@ -124,6 +138,13 @@ struct CoreAudioOutput::Impl {
     int channels = 0;
     std::vector<int32_t> tmp;  // one callback's frames from the ring (int24-in-32)
     int tmp_frames = 0;
+    std::vector<float> f32;    // one callback's frames as float32, at the device rate
+
+    // Shared mode at a rate the device does not run at and Daphne's chain cannot reach by a whole factor (48 kHz on a
+    // 44.1 kHz device): Core Audio's converter resamples in the callback, as Windows does for WASAPI shared
+    // (AUTOCONVERTPCM). The player sees the rate it asked for.
+    AudioConverterRef conv = nullptr;
+    std::vector<float> conv_in;   // what the converter last took, float32 at the stream rate
 
     std::atomic<bool> armed{false};
     std::atomic<int> in_render{0};   // stop() waits for a callback still reading the ring
@@ -149,6 +170,27 @@ struct CoreAudioOutput::Impl {
         return noErr;
     }
 
+    // frames from the ring into tmp (int24-in-32)
+    void pull(int frames) {
+        if (owner->feeder_.fill(reinterpret_cast<uint8_t*>(tmp.data()), frames, ring, eof->load(std::memory_order_acquire), owner->stats_))
+            owner->drained_ = true;
+    }
+
+    // The converter asks for input (from inside render): up to tmp_frames from the ring, as float32.
+    static OSStatus conv_input(AudioConverterRef, UInt32* packets, AudioBufferList* io, AudioStreamPacketDescription**, void* ctx) {
+        auto* m = static_cast<Impl*>(ctx);
+        const int frames = std::min(static_cast<int>(*packets), m->tmp_frames);
+        m->pull(frames);
+        constexpr float k = 1.0f / 2147483648.0f;
+        const size_t n = static_cast<size_t>(frames) * static_cast<size_t>(m->channels);
+        for (size_t i = 0; i < n; ++i) m->conv_in[i] = static_cast<float>(m->tmp[i]) * k;
+        io->mBuffers[0].mData = m->conv_in.data();
+        io->mBuffers[0].mDataByteSize = static_cast<UInt32>(n * 4);
+        io->mBuffers[0].mNumberChannels = static_cast<UInt32>(m->channels);
+        *packets = static_cast<UInt32>(frames);
+        return noErr;
+    }
+
     // The HAL's IO thread: no lock, no allocation, no system call beyond the clock.
     void render(AudioBufferList* out) {
         OutputStats& st = owner->stats_;
@@ -169,17 +211,26 @@ struct CoreAudioOutput::Impl {
         if (armed.load() && !slots.empty() && slots[0].buffer < out->mNumberBuffers) {
             int frames = static_cast<int>(out->mBuffers[slots[0].buffer].mDataByteSize / slots[0].stride);
             frames = std::min(frames, tmp_frames);
-            if (owner->feeder_.fill(reinterpret_cast<uint8_t*>(tmp.data()), frames, ring, eof->load(std::memory_order_acquire), st))
-                owner->drained_ = true;
-            // int24-in-32 → float32: every 24-bit value exactly (x / 2^31)
-            constexpr float k = 1.0f / 2147483648.0f;
+            if (conv) {
+                AudioBufferList abl;
+                abl.mNumberBuffers = 1;
+                abl.mBuffers[0].mNumberChannels = static_cast<UInt32>(channels);
+                abl.mBuffers[0].mDataByteSize = static_cast<UInt32>(static_cast<size_t>(frames) * static_cast<size_t>(channels) * 4);
+                abl.mBuffers[0].mData = f32.data();
+                UInt32 n = static_cast<UInt32>(frames);
+                if (AudioConverterFillComplexBuffer(conv, &Impl::conv_input, this, &n, &abl, nullptr) != noErr) n = 0;
+                frames = static_cast<int>(n);
+            } else {
+                pull(frames);
+                // int24-in-32 → float32: every 24-bit value exactly (x / 2^31)
+                constexpr float k = 1.0f / 2147483648.0f;
+                const size_t n = static_cast<size_t>(frames) * static_cast<size_t>(channels);
+                for (size_t i = 0; i < n; ++i) f32[i] = static_cast<float>(tmp[i]) * k;
+            }
             auto put = [&](const Slot& s, int c) {
                 if (s.buffer >= out->mNumberBuffers || !out->mBuffers[s.buffer].mData) return;
                 auto* base = static_cast<uint8_t*>(out->mBuffers[s.buffer].mData) + s.offset;
-                for (int i = 0; i < frames; ++i) {
-                    const float v = static_cast<float>(tmp[static_cast<size_t>(i) * channels + c]) * k;
-                    std::memcpy(base + static_cast<size_t>(i) * s.stride, &v, 4);
-                }
+                for (int i = 0; i < frames; ++i) std::memcpy(base + static_cast<size_t>(i) * s.stride, &f32[static_cast<size_t>(i) * channels + c], 4);
             };
             for (int c = 0; c < channels; ++c) put(slots[static_cast<size_t>(c)], c);
             if (mono) put(mono_right, 0);
@@ -422,6 +473,17 @@ bool CoreAudioOutput::open(const CoreAudioOptions& opt, int rate, int channels, 
     m.tmp_frames = std::max<int>({static_cast<int>(bf), static_cast<int>(range.mMaximum), 4096});
     m.tmp_frames = std::min(m.tmp_frames, 65536);
     m.tmp.assign(static_cast<size_t>(m.tmp_frames) * static_cast<size_t>(channels), 0);
+    m.f32.assign(m.tmp.size(), 0.0f);
+    // shared at a rate the chain cannot reach by a whole factor: the system converts (Impl::conv)
+    const int dev_rate = static_cast<int>(m.rate + 0.5);
+    if (!m.exclusive && !ca::same_rate(m.rate, rate) && (dev_rate < rate || dev_rate % rate != 0)) {
+        const auto in = float_pcm(rate, channels), outf = float_pcm(m.rate, channels);
+        if (AudioConverterNew(&in, &outf, &m.conv) != noErr || !m.conv) return fail("could not create a sample rate converter for " + name_);
+        const UInt32 q = kAudioConverterQuality_Max;
+        AudioConverterSetProperty(m.conv, kAudioConverterSampleRateConverterQuality, sizeof q, &q);
+        m.conv_in.assign(m.tmp.size(), 0.0f);
+        m.note("shared mode: Core Audio converts " + khz(rate) + " to the device's " + khz(m.rate));
+    }
     m.period_ns = bf ? static_cast<int64_t>(1e9 * bf / m.rate) : 0;
 
     UInt32 lat = 0, safety = 0, slat = 0;
@@ -431,12 +493,12 @@ bool CoreAudioOutput::open(const CoreAudioOptions& opt, int rate, int channels, 
     latency_ms_ = 1000.0 * (lat + safety + slat + bf) / m.rate;
 
     fmt_ = {};
-    fmt_.rate = static_cast<int>(m.rate + 0.5);
+    fmt_.rate = m.conv ? rate : dev_rate;
     fmt_.channels = channels;
     fmt_.type = SampleType::Int24In32;
     fmt_.container_bits = 32;
     fmt_.valid_bits = 24;
-    matched_ = ca::same_rate(m.rate, rate);
+    matched_ = m.conv || ca::same_rate(m.rate, rate);
     m.listen(true);
     return true;
 }
@@ -482,6 +544,7 @@ void CoreAudioOutput::close() {
     }
     if (m.io_running) AudioDeviceStop(m.dev, m.proc);
     if (m.proc) AudioDeviceDestroyIOProcID(m.dev, m.proc);
+    if (m.conv) AudioConverterDispose(m.conv);
     if (m.own_hog && ca::hog_owner(m.dev) == getpid()) {
         const pid_t none = -1;
         ca::set(m.dev, kAudioDevicePropertyHogMode, none);

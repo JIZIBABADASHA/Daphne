@@ -59,7 +59,7 @@
 | 模式 | 做法 |
 |---|---|
 | 獨佔 | hog mode（只有這個程序能在裝置上播放，也沒有其他聲音混進來）；裝置取樣率設成要求值（裝置有提供時；否則同家族、不超過要求的最高取樣率，再否則裝置的最高取樣率，`matches_request()` 為假）；DAC 實體格式調成該取樣率下位元數最多的整數格式（至少 24 bit，已足夠就不動，不重新鎖定） |
-| 共享 | 系統混音器：裝置維持自己的取樣率（與 WASAPI 共享相同，播放器依 `shared_mix` 轉到這個取樣率），不改實體格式、不拿 hog |
+| 共享 | 系統混音器：裝置維持自己的取樣率，不改實體格式、不拿 hog。裝置取樣率是要求值的整數倍時，輸出回報裝置取樣率，由播放器的鏈升頻（44.1 k → 88.2 kHz）；不是整數倍時（48 k 在 44.1 kHz 的裝置上、96 k 在 44.1 kHz 上），輸出回報要求的取樣率，在 IO 回呼裡用 Core Audio 的 `AudioConverter`（最高品質）轉成裝置取樣率，與 WASAPI 共享的 `AUTOCONVERTPCM` 相同（播放器的鏈只會整數倍升頻） |
 
 - 樣本格式：環裡是 24-bit 整數靠左放在 32 bit（`int24-in-32`），IO 回呼寫進串流的 virtual format（32-bit 浮點，目前的 macOS 驅動都是）時除以 2^31。32-bit 浮點能精確表示每個 24-bit 整數，獨佔模式下 HAL 把浮點轉成 DAC 的整數格式也是精確的，所以 24 bit 以內的 PCM 與 DoP 都一個位元不差地送到 DAC（與 MIKU 自己的 Core Audio 輸出、Audirvana、Roon 在 macOS 上的作法相同）。播放器看到的裝置格式就是 `int24-in-32`：DoP 的標記照常寫在最高位元組（`dop_capable`），bit-perfect 的判斷也照 24 bit 計算。
 - hog mode 的裝置只在 IO 運轉中改設定：停止的 hog 裝置改了取樣率之後再放掉 hog，這個程序之後就無法在它上面開始 IO（`AudioDeviceStart` 卡住數秒，MIKU 的 Core Audio 輸出遇過）。所以 `open()` 先拿 hog、建立 IO procedure 並**先啟動 IO**（送靜音），再改取樣率與實體格式；`close()` 在 IO 還在跑時先還原實體格式與取樣率、等 IO 在原取樣率又跑了兩次回呼，才停止 IO、放掉 hog。
@@ -91,4 +91,9 @@
 | Core Audio（macOS 11.7、Intel、內建輸出：44.1 / 48 / 88.2 / 96 kHz、24-bit 整數） | `daphne_tests "[.coreaudio]"`（隱藏測試，CI 不跑）3 個全過：獨佔把 44.1 kHz 換成 96 kHz、hog 由本程序持有、實體格式 24 bit，播完 `drained()`，關閉後取樣率回到 44.1 kHz、hog 放開；共享維持 44.1 kHz、不拿 hog；播放器以 96 kHz `int24-in-32` 播到結尾，之後裝置還原 |
 | Core Audio，CLI | 44.1 k → 96 k 連續兩首：都是 bit-perfect、underrun 0，第二首換取樣率，結束後回到 44.1 kHz；44.1 k 以 `2x` 升到 88.2 kHz、`buffer_ms` 50（延遲 52 ms）：underrun 0；兩個程序：第一個獨佔播放中，第二個（獨佔或共享）立即回報「Built-in Output is in exclusive use by another application (pid N)」，第一個照常播完 |
 | Core Audio，播放中重啟裝置（2x 升頻打開：44.1 k → 88.2 k） | 修正前約 5 次 2 次留在 44.1 kHz（見上「系統輸出」）；修正後 8 次都換到 88.2 kHz；隱藏測試「關閉後立刻以另一個取樣率重開」通過 |
-| Core Audio，尚未驗證 | 外接 DAC：錄音比對 bit-perfect、DoP（內建輸出最高 96 kHz，DSD64 的 DoP 需要 176.4 kHz，播放器改成轉 PCM）、拔除 DAC、其他程式改取樣率 |
+| Core Audio，外接 USB DAC（44.1–384 kHz，實體格式只有 32-bit 整數，DSD 最高 DSD128） | 隱藏測試 `[.coreaudio]` 4 個全過；CLI 獨佔連播 44.1 / 96 / 192 / 352.8 / 384 kHz：每首換取樣率、都是 bit-perfect（播放器的判斷）、underrun 0、延遲約 4–15 ms，結束後回到 44.1 kHz；`auto` 升頻 44.1 k → 352.8 kHz（4096 taps）underrun 0。換取樣率的那一首「最長事件間隔」約 135 ms（開裝置時 DAC 重新鎖定的靜音期間，第一首約 14 ms） |
+| Core Audio，DoP（同一台 DAC） | dsd 核心 DSD64（176.4 kHz）、DSD128（352.8 kHz）：DAC 面板依序顯示「176 → D64 → 44.1」、「352 → D128 → 44.1」（開頭先送無標記的靜音，DAC 先當成 PCM），underrun 0；Intel i5 兩核心處理速度 DSD64 5.9 倍、DSD128 3.9 倍即時 |
+| Core Audio，外殼（同一台 DAC） | `verify/miku_shell.js` 獨佔、共享、`verify/helper.py` 全過。獨佔時 macOS 把系統輸出移到內建輸出，放掉後約 1–3 秒才移回；播放（含 2x 升頻重啟到 88.2 kHz）都在 DAC 上，內建輸出的取樣率沒變過。停止後立刻 probe「系統輸出」會讀到內建輸出（只影響顯示） |
+| Core Audio，共享的取樣率轉換（同一台 DAC，44.1 kHz） | 修正前 48 k 檔在共享模式直接失敗（「the device locked 44100 Hz, not an integer multiple of the source rate 48000 Hz」）；修正後 96 k / 192 k / 48 k / 44.1 k 連播都播到結尾、underrun 0，前三首記錄「Core Audio converts … to the device's 44.1 kHz」；共享模式回報「bit-perfect: no (shared mode (system mixer))」。隱藏測試加上「共享轉換非整數倍的取樣率」，5 個全過 |
+| Core Audio，其他程式改取樣率（同一台 DAC） | 共享：播放中由另一個程序改成 88.2 kHz → 「the device rate was changed to 88.2 kHz by another application: reopening」，在原位置以 88.2 kHz 重開（鏈升頻），播到結尾、underrun 0、最長事件間隔 6 ms；獨佔：另一個程序的變更被 macOS 拒絕（`'!hog'`，kAudioDevicePermissionsError），裝置維持 44.1 kHz，bit-perfect 播完 |
+| Core Audio，尚未驗證 | 錄音比對 bit-perfect（需要 loopback 裝置，例如 BlackHole，安裝要管理員權限）、播放中拔除 DAC（要有人在機器旁） |

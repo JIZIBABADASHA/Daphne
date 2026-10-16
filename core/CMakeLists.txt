@@ -44,7 +44,7 @@ elseif(APPLE)
         src/output_mac.cpp
         src/coreaudio_output.cpp
         src/devices_coreaudio.cpp)
-    target_link_libraries(daphne_engine PRIVATE "-framework CoreAudio" "-framework CoreFoundation")
+    target_link_libraries(daphne_engine PRIVATE "-framework AudioToolbox" "-framework CoreAudio" "-framework CoreFoundation")
 else()
     target_sources(daphne_engine PRIVATE src/output_none.cpp)
 endif()
