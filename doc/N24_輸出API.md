@@ -99,4 +99,4 @@
 | Core Audio，其他程式改取樣率（同一台 DAC） | 共享：播放中由另一個程序改成 88.2 kHz → 「the device rate was changed to 88.2 kHz by another application: reopening」，在原位置以 88.2 kHz 重開（鏈升頻），播到結尾、underrun 0、最長事件間隔 6 ms；獨佔：另一個程序的變更被 macOS 拒絕（`'!hog'`，kAudioDevicePermissionsError），裝置維持 44.1 kHz，bit-perfect 播完 |
 | Core Audio，保留裝置（同一台 DAC，helper） | 44.1 k → 96 k → 44.1 k 三首：hog 全程同一個程序，取樣率直接切換（每次一次重新鎖定，log「the device was kept from the last track」），`stop` 帶 `hold` 保留、不帶就還原到 44.1 kHz 並放掉 hog。96 k 接 96 k：換曲 30 ms、取樣率不動；不保留時（CLI）是 96 k → 44.1 k → 放掉 hog → 再拿 → 96 k，約 1.7 s。隱藏測試「a kept device is taken over …」、`miku_shell.js`（獨佔：stop 後 `holdsDevice` 與 `kept` 為真，`release()` 後沒有裝置被 hog）、`helper.py` 全過 |
 | Core Audio，loopback 錄音（BlackHole 2ch，獨佔） | 隱藏測試 `[.blackhole]`：PCM 44.1 / 96 / 192 / 384 kHz 的 int24 雜訊錄回來逐個樣本相同；DoP DSD64 / DSD128 錄回來 0x05 / 0xFA 標記完整（2026-10-16 全過）。BlackHole 內部存 float32，所以這只驗證 Daphne 送出的樣本沒被改動，不涵蓋真 DAC 上 float → 整數的轉換 |
-| Core Audio，尚未驗證 | 播放中拔除 DAC（要有人在機器旁） |
+| Core Audio，播放中拔除 DAC（MIKU，獨佔） | MIKU 顯示「the output device was removed」並停止，沒有卡住（2026-10-16） |
