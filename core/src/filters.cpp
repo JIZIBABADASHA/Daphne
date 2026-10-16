@@ -1,6 +1,6 @@
 #include "daphne/engine/filters.h"
 
-#include <windows.h>
+#include "daphne/platform/platform.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -25,11 +25,11 @@ uint64_t fnv1a(const std::string& s) {
 }
 
 std::filesystem::path cache_file(const std::string& key) {
-    const std::wstring dir = filter_cache_dir();
+    const std::filesystem::path dir = filter_cache_dir();
     if (dir.empty()) return {};
     char name[32];
     std::snprintf(name, sizeof name, "%016llx.flt", static_cast<unsigned long long>(fnv1a(key)));
-    return std::filesystem::path(dir) / name;
+    return dir / name;
 }
 
 // marks a cache file as used now (prune_filter_cache deletes the least recently used first)
@@ -53,16 +53,16 @@ std::string filter_cache_key(const FilterSettings& s, int fs_in, int fs_out) {
     return k.str();
 }
 
-std::wstring filter_cache_dir() {
-    wchar_t buf[MAX_PATH];
-    const DWORD n = GetEnvironmentVariableW(L"DAPHNE_FILTER_CACHE", buf, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        if (_wcsicmp(buf, L"off") == 0) return {};
-        return buf;
+std::filesystem::path filter_cache_dir() {
+    if (const auto v = platform::get_env("DAPHNE_FILTER_CACHE"); v && !v->empty()) {
+        std::string l = *v;
+        for (auto& c : l) c = c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+        if (l == "off") return {};
+        return platform::path_from_utf8(*v);
     }
-    const DWORD m = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
-    if (m == 0 || m >= MAX_PATH) return {};
-    return (std::filesystem::path(buf) / L"daphne" / L"filters").wstring();
+    const std::filesystem::path root = platform::user_cache_dir();
+    if (root.empty()) return {};
+    return root / "daphne" / "filters";
 }
 
 bool load_cached_filter(const std::string& key, std::vector<double>& h) {
@@ -112,7 +112,7 @@ void store_cached_filter(const std::string& key, const std::vector<double>& h) {
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
     auto tmp = path;
-    tmp += L"." + std::to_wstring(GetCurrentThreadId()) + L".tmp";
+    tmp += "." + std::to_string(platform::thread_tag()) + ".tmp";
     {
         std::ofstream f(tmp, std::ios::binary);
         if (!f) return;
@@ -175,7 +175,7 @@ std::vector<std::string> filter_cache_keys_in_use(const Settings& s) {
 
 CachePruneResult prune_filter_cache(uint64_t limit_bytes, const std::vector<std::string>& keep) {
     CachePruneResult r;
-    const std::wstring dir = filter_cache_dir();
+    const std::filesystem::path dir = filter_cache_dir();
     if (dir.empty()) return r;
     std::vector<std::filesystem::path> kept;
     for (const auto& k : keep) kept.push_back(cache_file(k).filename());
@@ -187,7 +187,7 @@ CachePruneResult prune_filter_cache(uint64_t limit_bytes, const std::vector<std:
     std::vector<Entry> files;
     std::error_code ec;
     for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
-        if (!e.is_regular_file(ec) || e.path().extension() != L".flt") continue;
+        if (!e.is_regular_file(ec) || e.path().extension() != ".flt") continue;
         const uint64_t size = e.file_size(ec);
         if (ec) continue;
         r.files++, r.bytes += size;

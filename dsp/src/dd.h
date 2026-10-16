@@ -3,11 +3,13 @@
 // convolution: a value is the unevaluated sum hi + lo with |lo| <= ulp(hi) / 2.
 //
 // Addition is the IEEE-accurate two-sum form; the product uses an FMA for the exact hi * hi
-// part. The product is not commutative in its last bits (a.lo * b.hi goes through the FMA while
+// part (fma_exact: the CPU's instruction, or the same bits emulated where it has none, fma.h). The product is not commutative in its last bits (a.lo * b.hi goes through the FMA while
 // a.hi * b.lo is rounded first); dd_ops.h repeats the same operation order for the vector paths,
 // so scalar and AVX2 code give the same bits.
 
 #include <cmath>
+
+#include "daphne/dsp/fma.h"
 
 namespace daphne::dsp::dd {
 
@@ -45,8 +47,8 @@ inline DD operator-(const DD& a, const DD& b) { return a + (-b); }
 // e = (t + e) + a.lo*b.lo; quick two-sum.
 inline DD operator*(const DD& a, const DD& b) {
     const double p = a.hi * b.hi;
-    double e = std::fma(b.hi, a.hi, -p);
-    const double t = std::fma(a.lo, b.hi, a.hi * b.lo);
+    double e = fma_exact(b.hi, a.hi, -p);
+    const double t = fma_exact(a.lo, b.hi, a.hi * b.lo);
     e = (t + e) + a.lo * b.lo;
     const double h = p + e;
     return {h, e - (h - p)};

@@ -106,7 +106,7 @@ public sealed partial class DaphneEngine
         PathRow decode = t.IsLive
             ? Row("解碼", "瀏覽器解碼 · 32-bit 浮點", true,
                   "YouTube Music 網頁的聲音由瀏覽器（WebView2）解碼，經共用記憶體送進 Daphne",
-                  "時鐘校正：瀏覽器與 DAC 的時鐘不同，讀取速率微調（最多 ±0.5%）讓緩衝維持約 0.3 秒，以 4 點 Hermite 內插",
+                  "時鐘校正：瀏覽器與 DAC 的時鐘不同，讀取速率微調（最多 ±0.5%）讓緩衝維持約 0.15 秒（網頁送得不穩、出現斷流時自動加大，最多 0.3 秒，穩定後再降回；學到的值這次執行期間都記得），以 4 點 Hermite 內插",
                   "不丟也不重複樣本，所以沒有爆音")
               with { pin = new[] { To(Pcm(F64, pcmRate)), new PathPin("解碼器", "瀏覽器（WebView2）") } }
             : isDsd
@@ -221,7 +221,9 @@ public sealed partial class DaphneEngine
             string word = DeviceWord(type, dev.GetProperty("bits").GetInt32(), container);
             // without a quantizer: an integer device gets bit-perfect samples (the core leaves the quantizer out only
             // then); a float device never has one, and float32 rounds unless the samples are a source's integers
-            bool bitPerfect = _report.TryGetProperty("bit_perfect", out var bp) && bp.ValueKind == JsonValueKind.True;
+            // (shared mode is never bit-perfect, but what Daphne hands the mixer is the same)
+            bool bitPerfect = _report.TryGetProperty("bit_perfect", out var bp) && bp.ValueKind == JsonValueKind.True
+                || _report.TryGetProperty("reason", out var why) && why.GetString() == "shared mode (system mixer)";
             string conv = chain.Contains("quantizer") ? null
                 : !type.StartsWith("float") ? "64-bit 浮點轉回裝置的整數格式，數值不變"
                 : container >= 64 || bitPerfect ? "64-bit 浮點轉成裝置的浮點格式，數值不變"

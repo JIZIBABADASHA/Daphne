@@ -6,6 +6,7 @@
 // bit-perfect when nothing processes the samples.
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -27,7 +28,7 @@ struct AudioInfo {
 class Decoder {
 public:
     virtual ~Decoder() = default;
-    virtual bool open(const std::wstring& path, std::string* error) = 0;
+    virtual bool open(const std::filesystem::path& path, std::string* error) = 0;
     virtual void close() = 0;
     // Interleaved float64, ±1.0 full scale. Returns frames read; 0 = end of stream.
     virtual int read(double* out, int frames) = 0;
@@ -49,7 +50,9 @@ protected:
 //   anything else                        -> FFmpeg, which probes the content
 // When a dedicated decoder cannot open the file (an unusual WAV codec, a wrong extension), FFmpeg
 // gets one more try.
-std::unique_ptr<Decoder> open_decoder(const std::wstring& path, std::string* error);
+std::unique_ptr<Decoder> open_decoder(const std::filesystem::path& path, std::string* error);
+// The file name's extension after the last '.', lower case ASCII ("" without one).
+std::string file_extension(const std::filesystem::path& path);
 
 std::unique_ptr<Decoder> make_flac_decoder();
 std::unique_ptr<Decoder> make_wav_decoder();

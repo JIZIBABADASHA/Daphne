@@ -17,9 +17,13 @@ class FlacDecoder final : public Decoder {
 public:
     ~FlacDecoder() override { close(); }
 
-    bool open(const std::wstring& path, std::string* error) override {
+    bool open(const std::filesystem::path& path, std::string* error) override {
         close();
+        #ifdef _WIN32
         f_ = drflac_open_file_w(path.c_str(), nullptr);
+#else
+        f_ = drflac_open_file(path.c_str(), nullptr);
+#endif
         if (!f_) {
             if (error) *error = "dr_flac: cannot open FLAC file";
             return false;

@@ -6,6 +6,8 @@
 
 #include <cmath>
 
+#include "daphne/dsp/fma.h"
+
 namespace daphne::dsp::ddc {
 
 template <class T>
@@ -19,7 +21,7 @@ struct ScalarOps {
     static T add(T a, T b) { return a + b; }
     static T sub(T a, T b) { return a - b; }
     static T mul(T a, T b) { return a * b; }
-    static T fma(T a, T b, T c) { return std::fma(a, b, c); }
+    static T fma(T a, T b, T c) { return fma_exact(a, b, c); }   // the same bits with or without the instruction (fma.h)
     static T neg(T a) { return -a; }
 };
 

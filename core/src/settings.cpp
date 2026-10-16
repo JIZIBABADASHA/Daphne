@@ -14,7 +14,8 @@ template <class E>
 using EnumTable = std::initializer_list<std::pair<const char*, E>>;
 
 const EnumTable<OutputApi> kOutputApi = {
-    {"wasapi_exclusive", OutputApi::WasapiExclusive}, {"wasapi_shared", OutputApi::WasapiShared}, {"asio", OutputApi::Asio}};
+    {"wasapi_exclusive", OutputApi::WasapiExclusive}, {"wasapi_shared", OutputApi::WasapiShared}, {"asio", OutputApi::Asio},
+    {"coreaudio_exclusive", OutputApi::CoreAudioExclusive}, {"coreaudio_shared", OutputApi::CoreAudioShared}};
 const EnumTable<CoreMode> kCoreMode = {{"pcm", CoreMode::Pcm}, {"dsd", CoreMode::Dsd}};
 const EnumTable<DsdMode> kDsdMode = {{"auto", DsdMode::Auto}, {"native", DsdMode::Native}, {"dop", DsdMode::Dop}, {"pcm", DsdMode::Pcm}};
 const EnumTable<FilterPhase> kPhase = {{"linear", FilterPhase::Linear}, {"intermediate", FilterPhase::Intermediate},
@@ -44,7 +45,9 @@ public:
 
     // Warn about keys this version does not know (they are ignored).
     void check_keys(const json& o, const std::string& path, std::initializer_list<const char*> known) {
-        for (const auto& [k, v] : o.items()) {
+        for (const auto& item : o.items()) {
+            // a named reference, not a structured binding: lambdas capture bindings only from clang 16 (Apple clang 15, Xcode 15)
+            const std::string& k = item.key();
             if (std::none_of(known.begin(), known.end(), [&](const char* n) { return k == n; }))
                 warn(join(path, k), "unknown field (ignored)");
         }

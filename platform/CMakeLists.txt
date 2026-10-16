@@ -1,0 +1,15 @@
+# daphne_platform: the operating system services (threads, floating-point control, environment,
+# files); everything above it is portable C++20 (N25)
+add_library(daphne_platform STATIC src/platform_common.cpp)
+target_include_directories(daphne_platform PUBLIC include)
+if(WIN32)
+    target_sources(daphne_platform PRIVATE src/platform_win.cpp)
+    target_link_libraries(daphne_platform PUBLIC avrt winmm)
+else()
+    target_sources(daphne_platform PRIVATE src/platform_posix.cpp)
+    # 64-bit off_t for fseeko on 32-bit Linux (DSD files pass 2 GB); already so on 64-bit systems and macOS
+    target_compile_definitions(daphne_platform PRIVATE _FILE_OFFSET_BITS=64)
+    find_package(Threads REQUIRED)
+    target_link_libraries(daphne_platform PUBLIC Threads::Threads)
+endif()
+daphne_warnings(daphne_platform)

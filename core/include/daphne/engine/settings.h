@@ -4,7 +4,8 @@
 //
 // {
 //   "version": 1,
-//   "output":  { "api": "wasapi_exclusive" | "wasapi_shared" | "asio", "device": "",
+//   "output":  { "api": "wasapi_exclusive" | "wasapi_shared" | "asio" | "coreaudio_exclusive" | "coreaudio_shared",
+//                "device": "",
 //                "rate": "native" | "auto" | "2x" | "<Hz>", "dsd": "auto" | "native" | "dop" | "pcm",
 //                "dsd_pcm_lowpass": 24 | 30 | 50, "dsd_pcm_limiter": true, "max_dsd": 0 | 64 | ... | 512,
 //                "dsd_lead_in_ms": 0 .. 2000, "buffer_ms": 0 .. 200 },
@@ -29,7 +30,14 @@
 
 namespace daphne {
 
-enum class OutputApi { WasapiExclusive, WasapiShared, Asio };
+// Device outputs: WASAPI and ASIO on Windows, Core Audio on macOS (an API of another platform fails to open).
+enum class OutputApi { WasapiExclusive, WasapiShared, Asio, CoreAudioExclusive, CoreAudioShared };
+// This platform's exclusive (bit-perfect) output, the default.
+#if defined(__APPLE__)
+inline constexpr OutputApi kDefaultOutputApi = OutputApi::CoreAudioExclusive;
+#else
+inline constexpr OutputApi kDefaultOutputApi = OutputApi::WasapiExclusive;
+#endif
 // pcm: decoded PCM through the filter / resampler to the device; dsd: PCM converted to DSD by the
 // modulator (DSD files are sent directly in both modes when the device takes DSD).
 enum class CoreMode { Pcm, Dsd };
@@ -44,7 +52,7 @@ enum class EqType { PK, LS, HS, HP, HP24, LP, LP24, NOTCH, AP, BP };
 enum class VolumeMode { Digital, Fixed };
 
 struct OutputSettings {
-    OutputApi api = OutputApi::WasapiExclusive;
+    OutputApi api = kDefaultOutputApi;
     std::string device;          // empty = system default
     // PCM output rate: "native" (the source rate), "auto" (cap 705600 for 44.1 kHz-family sources,
     // else 768000), "2x" (twice the source rate, for every track) or "<Hz>" (cap); with a cap the

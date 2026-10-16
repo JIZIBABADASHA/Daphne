@@ -1,6 +1,7 @@
 #include <catch_amalgamated.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -12,6 +13,7 @@
 #include "daphne/engine/audio_output.h"
 #include "daphne/engine/ring_buffer.h"
 #include "daphne/engine/ring_feeder.h"
+#include "daphne/platform/platform.h"
 
 using namespace daphne;
 
@@ -109,15 +111,21 @@ struct Params {
 TEST_CASE("Mailbox: the audio thread never frees, and the last post is always taken", "[mailbox]") {
     for (int run = 0; run < 20; ++run) {
         auto box = std::make_unique<daphne::dsp::Mailbox<Params>>();
-        std::atomic<bool> stop{false};
+        std::atomic<bool> stop{false}, started{false};
         std::atomic<int> taken{0};
         std::thread audio([&] {
             g_audio_thread = std::this_thread::get_id();
+            started = true;
             while (!stop)
                 if (box->take()) ++taken;
         });
+        // the audio thread runs before the posts start, and has taken one before it stops: otherwise a slow
+        // scheduler (a CI VM) may leave it idle while all 20000 posts go by, and taken stays 0
+        while (!started) std::this_thread::yield();
         constexpr int kPosts = 20000;
         for (int i = 1; i <= kPosts; ++i) box->post(std::make_unique<Params>(i));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (taken == 0 && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
         stop = true;
         audio.join();
         // with the control side done, at most two more calls reach the newest object
@@ -130,4 +138,16 @@ TEST_CASE("Mailbox: the audio thread never frees, and the last post is always ta
         box.reset();
     }
     CHECK(g_freed_on_audio == 0);
+}
+
+TEST_CASE("RealtimeScope: in_realtime_scope follows the scope on its own thread only", "[realtime]") {
+    CHECK_FALSE(platform::in_realtime_scope());
+    {
+        platform::RealtimeScope rt;
+        CHECK(platform::in_realtime_scope());
+        bool other = true;
+        std::thread([&] { other = platform::in_realtime_scope(); }).join();
+        CHECK_FALSE(other);
+    }
+    CHECK_FALSE(platform::in_realtime_scope());
 }

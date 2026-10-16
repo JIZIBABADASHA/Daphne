@@ -10,9 +10,7 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
+#include "daphne/platform/platform.h"
 
 namespace daphne::dsp {
 
@@ -44,18 +42,13 @@ void parallel_for(int64_t n, const F& f, int64_t min_chunk = 1 << 12) {
         f(int64_t{0}, n);
         return;
     }
-#ifdef _WIN32
-    const int prio = GetThreadPriority(GetCurrentThread());
-#endif
+    const platform::Priority prio = platform::thread_priority();
     const bool background = detail::t_design_background;
     std::vector<std::thread> th;
     th.reserve(static_cast<size_t>(parts - 1));
     for (int64_t t = 1; t < parts; ++t) {
         th.emplace_back([&, t] {
-#ifdef _WIN32
-            if (background) SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
-            else SetThreadPriority(GetCurrentThread(), prio);
-#endif
+            platform::set_thread_priority(background ? platform::Priority::Background : prio);
             f(n * t / parts, n * (t + 1) / parts);
         });
     }

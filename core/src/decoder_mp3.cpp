@@ -17,9 +17,14 @@ class Mp3Decoder final : public Decoder {
 public:
     ~Mp3Decoder() override { close(); }
 
-    bool open(const std::wstring& path, std::string* error) override {
+    bool open(const std::filesystem::path& path, std::string* error) override {
         close();
-        if (mp3dec_ex_open_w(&d_, path.c_str(), MP3D_SEEK_TO_SAMPLE) != 0 || d_.info.channels <= 0) {
+        #ifdef _WIN32
+        const int r = mp3dec_ex_open_w(&d_, path.c_str(), MP3D_SEEK_TO_SAMPLE);
+#else
+        const int r = mp3dec_ex_open(&d_, path.c_str(), MP3D_SEEK_TO_SAMPLE);
+#endif
+        if (r != 0 || d_.info.channels <= 0) {
             if (error) *error = "minimp3: cannot open MP3 file";
             return false;
         }

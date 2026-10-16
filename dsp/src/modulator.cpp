@@ -3,13 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-#ifdef _WIN32
-#include <windows.h>
-#include <avrt.h>
-#endif
-#if defined(_M_X64) || defined(__x86_64__)
-#include <xmmintrin.h>
-#endif
+#include "daphne/platform/platform.h"
 
 namespace daphne::dsp {
 
@@ -205,28 +199,20 @@ void DsdModulator::run(Ch& h, const double* in, int frames, int channels, int c,
 }
 
 void DsdModulator::worker_loop() {
-#ifdef _WIN32
-    // the caller is the player's processing thread (MMCSS "Audio"): the right channel runs in the same class
-    DWORD task = 0;
-    HANDLE mm = AvSetMmThreadCharacteristicsW(L"Audio", &task);
-#endif
+    // the caller is the player's processing thread (realtime): the right channel runs in the same class
+    platform::RealtimeHelperScope rt;
     std::unique_lock<std::mutex> l(m_);
     for (;;) {
         cv_.wait(l, [this] { return quit_ || job_; });
         if (quit_) break;
         l.unlock();
-#if defined(_M_X64) || defined(__x86_64__)
-        _mm_setcsr(job_csr_);   // the caller's FTZ / DAZ (denormals flushed as in its thread)
-#endif
+        platform::set_fp_control(job_fp_);   // the caller's FTZ / DAZ (denormals flushed as in its thread)
         run(ch_[1], job_in_, job_frames_, job_channels_, 1, bytes_[1]);
         l.lock();
         job_ = false;
         done_ = true;
         cv_.notify_all();
     }
-#ifdef _WIN32
-    if (mm) AvRevertMmThreadCharacteristics(mm);
-#endif
 }
 
 void DsdModulator::process(const double* in, int frames, int channels, std::vector<uint8_t>& out) {
@@ -243,9 +229,7 @@ void DsdModulator::process(const double* in, int frames, int channels, std::vect
         {
             std::lock_guard<std::mutex> l(m_);
             job_in_ = in, job_frames_ = frames, job_channels_ = channels;
-#if defined(_M_X64) || defined(__x86_64__)
-            job_csr_ = _mm_getcsr();
-#endif
+            job_fp_ = platform::fp_control();
             done_ = false;
             job_ = true;
         }

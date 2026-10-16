@@ -8,3 +8,5 @@ build-miku/
 src/*/bin/
 src/*/obj/
 icon/
+third_party/ffmpeg-src/
+build-mac-*/

@@ -43,7 +43,7 @@ whenever nothing in the chain needs to change a sample. It ships as a static lib
 
 ## Signal chain
 
-Every stage below is documented, with its measurements, in [`doc/`](doc) (N0–N24, in Chinese); the standards, papers and books each design rests on are listed in [`doc/參考文獻.md`](doc/參考文獻.md).
+Every stage below is documented, with its measurements, in [`doc/`](doc) (N0–N25, in Chinese; open work in N26; what each platform does in edge cases in N27); the standards, papers and books each design rests on are listed in [`doc/參考文獻.md`](doc/參考文獻.md).
 
 ```mermaid
 flowchart TD
@@ -94,6 +94,14 @@ scripts\build.cmd                            :: Release build + unit tests
 The output lands in `build\bin\Release\`: `daphne.exe`, `daphne_core.dll`, `daphne_tests.exe` and the
 FFmpeg DLLs. The code builds without warnings at `/W4`.
 
+The engine, the player and the tests also build on macOS and Linux (no device output there yet; the
+player is tested on a fake device, [N25](doc/N25_跨平台.md)):
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
 ## Usage
 
 **Command line**
@@ -132,6 +140,7 @@ dc_destroy(p);
 
 | Path | Contents |
 |---|---|
+| `platform/` | `daphne_platform`: the operating system services (threads, floating-point control, files) |
 | `dsp/` | `daphne_dsp`: processing blocks, filter design, double-double arithmetic |
 | `core/` | `daphne_engine`: decoders, the processing chain, device outputs, the player |
 | `capi/` | `daphne_core.dll`, the C API (`dc_*`) |
@@ -139,7 +148,8 @@ dc_destroy(p);
 | `tests/` | Catch2 unit tests |
 | `verify/` | end-to-end measurements in Python (numpy, soundfile; live tests through a virtual cable) |
 | `tools/` | `sdm_design.py`, the modulator coefficient design |
-| `src/Daphne.Extension/` | the MIKU player extension module |
+| `src/Daphne.Extension/` | the MIKU player extension module (Windows) |
+| `miku/` | the same module for MIKU on macOS (a shell over `daphne-helper`); `miku/pack-mac.sh` packs it for MIKU's Mac installer |
 | `doc/` | the design and verification notes, one per stage |
 
 ## Third-party software
@@ -150,7 +160,7 @@ dc_destroy(p);
 | [minimp3](https://github.com/lieff/minimp3) | CC0 | in `third_party/` |
 | [nlohmann/json](https://github.com/nlohmann/json) | MIT | in `third_party/` |
 | [Catch2](https://github.com/catchorg/Catch2) | BSL-1.0 | in `third_party/` (tests only) |
-| [FFmpeg](https://ffmpeg.org) | LGPL-2.1+ | downloaded by `fetch_ffmpeg.ps1`, linked dynamically |
+| [FFmpeg](https://ffmpeg.org) | LGPL-2.1+ | downloaded by `fetch_ffmpeg.ps1` (Windows) or built from its source by `miku/pack-mac.sh` (macOS), linked dynamically |
 | [ASIO SDK](https://www.steinberg.net/developers/) | Steinberg licence | downloaded by `fetch_asiosdk.ps1`, not redistributed |
 | [GFS Didot](https://fonts.google.com/specimen/GFS+Didot) | SIL OFL 1.1 | in `src/Daphne.Extension/web/fonts/` (the wordmark) |
 

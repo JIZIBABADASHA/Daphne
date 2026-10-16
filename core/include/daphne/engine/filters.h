@@ -2,7 +2,8 @@
 // The resampling filter from the settings, with the disk cache.
 //
 // Every design is keyed by all of its inputs plus a design-algorithm version and kept in
-// %LOCALAPPDATA%\daphne\filters (DAPHNE_FILTER_CACHE=<dir> moves it, =off disables it). A filter is
+// <user cache>/daphne/filters (platform::user_cache_dir: %LOCALAPPDATA% on Windows, ~/Library/Caches on
+// macOS, $XDG_CACHE_HOME on Linux; DAPHNE_FILTER_CACHE=<dir> moves it, =off disables it). A filter is
 // designed only when playback needs it: a later track at another rate designs its own.
 //
 // The cache is kept under design.cache_limit_mb: every load or store marks the file as used now,
@@ -11,6 +12,7 @@
 // starts and after a settings change.
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -36,7 +38,7 @@ std::unique_ptr<dsp::Resampler> make_resampler(const FilterSettings& s, int fs_i
 
 std::string filter_cache_key(const FilterSettings& s, int fs_in, int fs_out);
 // Cache directory, or empty when the cache is disabled.
-std::wstring filter_cache_dir();
+std::filesystem::path filter_cache_dir();
 bool load_cached_filter(const std::string& key, std::vector<double>& h);
 // Whether design_filter / make_resampler will find the filter in the cache (with its low parts for
 // double-double; a ratio-1 filter without apodizing is a unit impulse, never designed). Reads the headers only.

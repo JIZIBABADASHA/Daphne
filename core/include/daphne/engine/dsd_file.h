@@ -34,7 +34,7 @@ public:
     DsdFile(const DsdFile&) = delete;
     DsdFile& operator=(const DsdFile&) = delete;
 
-    bool open(const std::wstring& path, std::string* error);
+    bool open(const std::filesystem::path& path, std::string* error);
     const DsdInfo& info() const { return info_; }
     // Interleaved bytes, one per channel and frame; returns frames read (0 = end).
     int read(uint8_t* out, int frames);
@@ -57,7 +57,7 @@ private:
 };
 
 // The extension says DSD (.dsf / .dff).
-bool is_dsd_path(const std::wstring& path);
+bool is_dsd_path(const std::filesystem::path& path);
 
 // DSD -> PCM, for devices that take neither DoP nor native DSD, and for rendering: two linear-phase
 // Kaiser low-passes (120 dB), decimated to out_rate (0 = 176.4 / 192 kHz by the DSD rate family; it
