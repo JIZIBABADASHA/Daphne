@@ -54,7 +54,7 @@ class DaphneEngine extends EventEmitter {
    *  release, the end of the last track) until release(): as MIKU's own Core Audio output (native-audio.js). */
   get holdsDevice() { return this.held || ((this.loaded || this.loading) && SM.exclusive(this.s)); }
 
-  log(m) { try { this.host.log && this.host.log('[daphne] ' + m); } catch { } }
+  log(m) { try { this.host.log && this.host.log(m); } catch { } }
 
   // ───────────── the helper process ─────────────
   start() {

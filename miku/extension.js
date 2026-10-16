@@ -19,7 +19,7 @@ async function withHelper(fn) {
   if (engine && engine.client && engine.client.running) return fn(engine.client);
   const exe = helperPath(__dirname);
   if (!exe) return null;
-  const c = new HelperClient(exe, m => host && host.log('[daphne] ' + m));
+  const c = new HelperClient(exe, m => host && host.log(m));
   c.on('hello', m => { version = m.version; });
   c.start();
   try { return await fn(c); } finally { await c.stop(); }
@@ -50,14 +50,14 @@ async function cacheInfo() {
       }
     } catch { }
     return { dir, files, bytes };
-  } catch (e) { host && host.log('[daphne] cache info: ' + e.message); return null; }
+  } catch (e) { host && host.log('cache info: ' + e.message); return null; }
 }
 
 /** Everything but the filters the current settings use, down to limitMb. */
 async function prune(limitMb) {
   const s = settings ? SM.build(host, settings, opts, null) : {};
   const r = await withHelper(c => c.request('cache_prune', { settings: s, limit_mb: limitMb }, 60000));
-  if (r && r.ok && r.bytes < 0) host && host.log('[daphne] cache prune: settings did not parse');
+  if (r && r.ok && r.bytes < 0) host && host.log('cache prune: settings did not parse');
 }
 
 async function state() {
