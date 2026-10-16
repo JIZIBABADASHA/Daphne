@@ -33,6 +33,7 @@ struct FakeDevice {
     int container_bits = 32, valid_bits = 32;
     int buffer_frames = 512;
     double speed = 0;                                // 0: as fast as the player fills; else x real time
+    int lock_rate = 0;                               // nonzero: every PCM open locks this rate, with a note why
     std::atomic<bool> request_reset{false};          // the "driver" asks to be reopened
 
     size_t frames() {
@@ -67,6 +68,10 @@ public:
             fmt_.type = daphne::SampleType::Dsd8Msb, fmt_.container_bits = fmt_.valid_bits = 8;
         } else {
             fmt_.type = d_->type, fmt_.container_bits = d_->container_bits, fmt_.valid_bits = d_->valid_bits;
+            if (d_->lock_rate > 0 && d_->lock_rate != r.rate) {
+                fmt_.rate = d_->lock_rate;
+                notes_.push_back("fake: stays at " + std::to_string(d_->lock_rate) + " Hz");
+            }
         }
         std::lock_guard<std::mutex> l(d_->m);
         d_->fmt = fmt_;
@@ -98,6 +103,7 @@ public:
     }
     const daphne::OutputStats& stats() const override { return stats_; }
     bool reset_requested() const override { return d_->request_reset; }
+    std::vector<std::string> take_notes() override { return std::exchange(notes_, {}); }
 
 private:
     void loop() {
@@ -137,6 +143,7 @@ private:
     std::atomic<bool> drained_{false}, stop_{false};
     std::thread th_;
     daphne::OutputStats stats_;
+    std::vector<std::string> notes_;
 };
 
 inline daphne::OutputOpener fake_opener(std::shared_ptr<FakeDevice> d) {

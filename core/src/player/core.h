@@ -105,6 +105,7 @@ struct Player::Impl {
     std::unique_ptr<DsdFile> dsdf;     // DSD file played directly (no chain)
     std::vector<uint8_t> dsd_in;
     int dsd_pcm_rate = 0;              // DSD -> PCM fallback at this rate (0 = 176.4 / 192 kHz)
+    int dop_locked = 0;                // the PCM rate the device locked instead of the DoP rate (0: none)
     double start_sec = 0.0;            // Player::start position
     // transport requests (under m) and state
     std::atomic<bool> want_pause{false}, ended_flag{false};

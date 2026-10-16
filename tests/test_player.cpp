@@ -698,6 +698,28 @@ TEST_CASE("Player: a DSF file is sent to a DoP device untouched", "[player][dsd]
     r.dump("dsf_dop");
 }
 
+TEST_CASE("Player: a DSF file on a device that stays below the DoP rate is converted to the rate it locked", "[player][dsd]") {
+    // as seen on a USB DAC just plugged back in: asked for 176.4 kHz (DoP DSD64), it locked 88.2 kHz. The usual
+    // 176.4 kHz PCM could not play on it (the chain only goes up)
+    Rig r;
+    r.dev->lock_rate = 88200;
+    const int64_t bytes = 2822400 / 8 / 2;   // 0.5 s per channel
+    const auto path = write_dsf("daphne_player_locked.dsf", bytes);
+    Settings s;
+    s.output.dsd_lead_in_ms = 20;
+    REQUIRE(r.start(platform::path_to_utf8(path), s));
+    const auto rep = r.finish();
+    CHECK(r.ended);
+    CHECK(rep.device.rate == 88200);
+    CHECK(r.saw("fake: stays at 88200 Hz"));   // the device's own reason reaches the log
+    CHECK(r.saw("converting at 88200 Hz, the rate the device locked"));
+    CHECK(r.dev->frames() >= 88200 / 2 - 1024);
+    r.player.reset();
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    r.dump("dsf_locked");
+}
+
 TEST_CASE("Player: the dsd core sends PCM as DoP", "[player][dsd]") {
     Rig r;
     r.sources["sine"] = sine(44100, 1000.0, 0.5);
