@@ -10,14 +10,17 @@
 //   hello                                  -> version, abi
 //   load     path, settings, seek, play    -> code, error   (blocks until playing or failed: run in order)
 //   apply    settings                      -> code, error
-//   pause    paused                        stop            (the device is released: rate, DAC format, hog mode)
+//   pause    paused                        stop     hold   (the device is released: rate, DAC format, hog mode;
+//                                                                  hold: kept for the next load, as MIKU does)
 //   seek     seconds                       next     path, gain (dB or null)
-//   state                                  -> state (dc_state's object)
+//   state                                  -> state (dc_state's object), kept (a device is kept, nothing loaded)
 //   meter                                  -> l, r
 //   devices                                -> devices (dc_devices' object)
 //   cache_dir                              -> dir      cache_prune  settings, limit_mb -> bytes
 //   quit                                   stops playback and exits (also on end of input)
 //
+// macOS exclusive mode: a device is kept between loads (dc_keep_device): the next load takes it over, a stop without
+// hold, quit and the end of input put it back.
 // Commands run in order on one thread (load can take minutes while a long filter is designed); state, meter,
 // devices and cache_dir are answered at once from the reader, so the host's timer never waits for a load.
 // Diagnostics go to stderr.
@@ -84,7 +87,7 @@ std::string settings_of(const json& j) {
 
 class Helper {
 public:
-    Helper() : p_(dc_create()) {}
+    Helper() : p_(dc_create()) { dc_keep_device(1); }
     ~Helper() { dc_destroy(p_); }
 
     void run() {
@@ -119,6 +122,7 @@ public:
         dc_stop(p_);
         worker.join();
         dc_stop(p_);   // what the last command may have started
+        dc_release_device();
         pump_stop_ = true;
         pump.join();
         if (!quit_req.is_null()) emit(reply(quit_req, true));
@@ -131,6 +135,7 @@ private:
         if (cmd == "state") {
             json r = reply(req, true);
             r["state"] = fetch([&](char* b, int n) { return dc_state(p_, b, n); });
+            r["kept"] = dc_device_kept() != 0;
             emit(r);
         } else if (cmd == "meter") {
             double l = 0, rr = 0;
@@ -200,6 +205,7 @@ private:
             emit(reply(req, true));
         } else if (cmd == "stop") {
             dc_stop(p_);
+            if (!flag(req, "hold", false)) dc_release_device();
             emit(reply(req, true));
         } else if (cmd == "cache_prune") {
             const std::string settings = settings_of(req);

@@ -28,6 +28,10 @@ std::vector<CoreAudioDevice> list_coreaudio_devices(std::string* error) {
     return {};
 }
 
+void keep_output_devices(bool) {}
+bool release_kept_output_device() { return false; }
+bool output_device_kept() { return false; }
+
 OutputCapsQuery platform_output_caps() {
     return [](const OutputChoice& o) {
         OutputCaps c;

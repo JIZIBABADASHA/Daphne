@@ -8,8 +8,9 @@
 //   • output mode / device → Daphne's output (coreaudio_exclusive / coreaudio_shared); DSD 播放方式 → output.dsd (DoP
 //     in exclusive mode, else PCM); DAC 最高 DSD → output.max_dsd; 緩衝大小 → output.buffer_ms
 //   • digital volume, EQ, crossfeed → Daphne (changes glide in place); ReplayGain → Daphne's gain stage
-//   • YouTube Music: played by its page through the system output (supportsLive false); stop() lets go of the
-//     device (the core puts the rate and DAC format back and releases hog mode)
+//   • YouTube Music: played by its page through the system output (supportsLive false); stop({ release: true }) /
+//     release() let go of the device (the core puts the rate and DAC format back and releases hog mode). A plain
+//     stop() and the end of the last track keep it in exclusive mode, as MIKU's own output does
 //   • not available on this core: balance, invert, the logo's sound in exclusive mode
 const { EventEmitter } = require('events');
 const { HelperClient, helperPath } = require('./helper-client');
@@ -34,6 +35,7 @@ class DaphneEngine extends EventEmitter {
     this.client = null; this.timer = null; this.disposed = false;
     this.track = null; this.next = null; this.pausedAt = null;
     this.loaded = false; this.playing = false; this.loading = false; this.loadFailed = false; this.lastFailureWasDevice = false;
+    this.held = false;   // exclusive: the device kept with nothing loaded (stop without release, the end of the last track)
     this.pos = 0; this.duration = 0; this.report = null; this.signal = null;
     this.st = { rate: 0, playing: false, pos: 0, underruns: 0, clips: 0 };
     this.levels = { l: 0, r: 0 };
@@ -48,8 +50,9 @@ class DaphneEngine extends EventEmitter {
   get isPlaying() { return this.loaded && this.playing; }
   get isLoaded() { return this.loaded; }
   get position() { return this.loaded ? this.pos : (this.pausedAt || 0); }
-  /** The device is held (exclusive) while a track is loaded, playing or paused; stop() releases it. */
-  get holdsDevice() { return (this.loaded || this.loading) && SM.exclusive(this.s); }
+  /** The device is held (exclusive) while a track is loaded, playing or paused, and kept after it (stop() without
+   *  release, the end of the last track) until release(): as MIKU's own Core Audio output (native-audio.js). */
+  get holdsDevice() { return this.held || ((this.loaded || this.loading) && SM.exclusive(this.s)); }
 
   log(m) { try { this.host.log && this.host.log('[daphne] ' + m); } catch { } }
 
@@ -79,6 +82,7 @@ class DaphneEngine extends EventEmitter {
       return;
     }
     this.restarts.push(now);
+    this.held = false;   // the system released hog mode with the process
     this.client.start();
     if (t && wasLoaded) this.load(t, pos, play);
     else this.emit('changed');
@@ -135,6 +139,7 @@ class DaphneEngine extends EventEmitter {
       }
       case 'ended':
         this.loaded = false; this.playing = false; this.pausedAt = 0;
+        this.held = SM.exclusive(this.s);   // the core keeps the device once the buffer has played out (a moment later)
         this.emit('ended');
         this.emit('changed');
         break;
@@ -142,6 +147,7 @@ class DaphneEngine extends EventEmitter {
         const m = e.error || 'playback failed';
         this.log(m);
         this.loaded = false; this.playing = false;
+        this.syncHeld();
         this.emit('failed', 'Daphne 內核：' + m);
         this.emit('changed');
         break;
@@ -197,8 +203,18 @@ class DaphneEngine extends EventEmitter {
     this.emit('changed');
   }
 
+  /** Whether the core keeps a device now (the end of the last track keeps it in exclusive mode, a failure may not). */
+  syncHeld() {
+    if (!this.client || !this.client.running) { this.held = false; return; }
+    this.client.request('state', {}, 2000).then(r => {
+      const kept = !!(r && r.ok && r.kept);
+      if (kept !== this.held && !this.loaded && !this.loading) { this.held = kept; this.emit('changed'); }
+    });
+  }
+
   fail(code, err) {
     this.lastFailureWasDevice = code === DC_ERR_DEVICE;
+    this.syncHeld();
     this.loadFailed = true; this.loading = false; this.signal = null;
     this.log(`load failed (${code}): ${err}`);
     this.emit('failed', code === DC_ERR_DEVICE ? 'Daphne 內核無法開啟輸出裝置：' + err : 'Daphne 內核無法播放：' + err);
@@ -236,18 +252,31 @@ class DaphneEngine extends EventEmitter {
     this.emit('changed');
   }
 
-  /** Stops playback and releases the device (Daphne closes its output: rate and DAC format put back, hog mode released). */
-  stop() {
+  /**
+   * Stops playback. In exclusive mode the DAC stays Daphne's (hog mode, rate, DAC format) unless `release` is asked
+   * for: the next track starts on the same device (a new rate is set on it directly), and macOS does not move the
+   * system output away and back in between. MIKU asks for the release when the listener leaves it with nothing
+   * playing, plays YouTube, or quits (audio.js); else Daphne closes its output (rate and DAC format put back, hog
+   * mode released).
+   */
+  stop({ release = false } = {}) {
     this.pausedAt = this.loaded ? this.position : null;
     ++this.loadEpoch;
-    if (this.client) this.client.request('stop');
+    const hold = !release && SM.exclusive(this.s) && (this.loaded || this.loading || this.held);
+    if (this.client) this.client.request('stop', { hold });
+    this.held = hold && !!this.client;
     this.loaded = false; this.playing = false; this.loading = false;
     this.track = null; this.next = null; this.signal = null;
     this.emit('changed');
   }
 
-  /** A device kept with nothing loaded: Daphne keeps none (stop() already released it). */
-  release() { if (this.client && !this.loaded) this.client.request('stop'); }
+  /** Lets go of a device kept with nothing loaded. */
+  release() {
+    if (!this.client || this.loaded || this.loading) return;
+    this.held = false;
+    this.client.request('stop');
+    this.emit('changed');
+  }
 
   invalidateNext() { this.queueNext(); }
 
