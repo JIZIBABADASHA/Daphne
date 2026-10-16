@@ -118,6 +118,10 @@ struct Player::Impl {
     int run_osr = 0;                   // dsd core: the DSD multiple the device runs
     std::vector<uint8_t> dsd_bytes;
     bool flushed = false;
+    // Only the music is played, not the filter's delay around it: at the start (open, seek) the chain's first
+    // content-delay frames are dropped (counted in abs_out as if heard), at the end the zeros bring out the last
+    // input frame and no more (its ringing after that is cut).
+    int64_t skip_out = 0;              // chain output frames still to drop at the start
     int64_t tail_zeros = -1;           // input frames of zeros still to run through the chain at the end (-1: not begun)
     Crossfader xf;                     // a rebuilt chain fading in; the chain output carried over
     Join cross_join;                   // a gapless join through a new chain being made (cross_switch)
@@ -174,6 +178,8 @@ struct Player::Impl {
     void check_switch();
     // Chain frame being heard (the device's queue counted back from abs_out).
     int64_t heard_out() const;
+    // Drops what is left of skip_out from the front of the n frames in dsp; the frames that remain.
+    int drop_start(int n);
     // The device's upkeep (OutputSession::upkeep); a driver that asks to be opened again gets reopened,
     // resuming where it was.
     bool service_device();

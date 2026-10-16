@@ -241,9 +241,10 @@ TEST_CASE("Player: upsampling keeps the speed and the pitch", "[player]") {
     }
 }
 
-TEST_CASE("Player: the last track plays out the filter's tail", "[player]") {
-    // a click 10 frames before the end: the filter holds it back by its delay (half the taps, linear phase), so
-    // it reaches the device only when the chain's tail is played out after the last input frame
+TEST_CASE("Player: only the music is played, not the filter's delay around it", "[player]") {
+    // clicks in the middle and 10 frames before the end. The filter holds the signal back by its delay (half the
+    // taps, linear phase): the start drops it, so the middle click is heard right at its own time, and the end runs
+    // zeros through the filter until the last click is out, and no further (its ringing after that is cut)
     for (const auto phase : {FilterPhase::Linear, FilterPhase::Minimum}) {
         DYNAMIC_SECTION("phase " << (phase == FilterPhase::Linear ? "linear" : "minimum")) {
             Rig r;
@@ -251,7 +252,7 @@ TEST_CASE("Player: the last track plays out the filter's tail", "[player]") {
             auto a = std::make_shared<Signal>();
             a->info.rate = 44100, a->info.channels = 2, a->info.frames = 44100, a->info.codec = "TEST";
             a->x.assign(2 * 44100, 0.0);
-            a->x[2 * (44100 - 10)] = a->x[2 * (44100 - 10) + 1] = 0.5;
+            for (const int at : {22050, 44100 - 10}) a->x[2 * at] = a->x[2 * at + 1] = 0.5;
             r.sources["click"] = a;
             Settings s;
             s.output.rate = "2x";
@@ -261,10 +262,20 @@ TEST_CASE("Player: the last track plays out the filter's tail", "[player]") {
             r.finish();
             CHECK(r.ended);
             const auto y = r.dev->samples_f32();
-            double peak = 0.0;
-            for (size_t i = 0; i < y.size(); i += 2) peak = std::max(peak, static_cast<double>(std::abs(y[i])));
-            CHECK(peak > 0.2);
-            CHECK(r.player->position() == 44100);   // the end of the track, not short by the delay
+            const size_t frames = y.size() / 2;
+            auto peak_in = [&](size_t from, size_t to) {
+                size_t at = from;
+                for (size_t i = from; i < std::min(to, frames); ++i)
+                    if (std::abs(y[2 * i]) > std::abs(y[2 * at])) at = i;
+                return at;
+            };
+            const size_t mid = peak_in(0, 66150), end = peak_in(66150, frames);
+            CHECK(mid == 44100);   // 22050 x 2: no delay before the music
+            CHECK(end == 88180);   // (44100 - 10) x 2: the last click is played
+            CHECK(std::abs(y[2 * end]) > 0.2);
+            CHECK(frames >= 88200u);
+            CHECK(frames <= static_cast<size_t>(88200 + 2 + 2 * r.dev->buffer_frames));   // no ringing tail on top
+            CHECK(r.player->position() == 44100);   // the end of the track
         }
     }
 }

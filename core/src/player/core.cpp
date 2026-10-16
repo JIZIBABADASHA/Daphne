@@ -158,6 +158,7 @@ void Player::Impl::do_seek(double sec) {
         }
         cur->reset();
         tl.abs_out = from * ratio;
+        skip_out = cur->content_delay();
     }
     tl.h_base = 0;
     tl.track_origin_in = 0;
