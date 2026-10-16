@@ -59,6 +59,8 @@ bool Player::Impl::open_dsd(int64_t from, std::string* error) {
         const Attempt& a = at[i];
         // a failure before the last goes to the log, so the host sees why the next was tried
         auto next = [&]() {
+            if (io.dev)
+                for (const auto& n : io.dev->take_notes()) event(n);   // why the device did not take it (its rate change)
             io.dev.reset();
             if (i + 1 < at.size()) event("the output at " + what(a) + " failed (" + e + "): trying " + what(at[i + 1]));
         };
@@ -68,6 +70,7 @@ bool Player::Impl::open_dsd(int64_t from, std::string* error) {
             continue;
         }
         if (io.dev->format().rate != a.rate || io.dev->format().channels != di.channels) {
+            if (!a.native && io.dev->format().rate < a.rate) dop_locked = io.dev->format().rate;
             e = "the device locked " + describe(io.dev->format()) + " instead of " + std::to_string(a.rate) + " Hz, " +
                 std::to_string(di.channels) + " ch";
             next();

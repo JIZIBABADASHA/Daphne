@@ -256,6 +256,14 @@ void Player::Impl::run() {
                     const int mix = probe->format().rate;
                     if (mix > 0 && dsdf->info().dsd_rate % (mix * 8) == 0) dsd_pcm_rate = mix;
                 }
+            } else if (dop_locked > 0) {
+                // exclusive, the device stayed below the DoP rate: below the usual 176.4 / 192 kHz, convert to the rate it
+                // locked (the chain only goes up, so PCM above it could not play)
+                const int dsd = dsdf->info().dsd_rate, usual = (dsd % 44100 == 0 ? 44100 : 48000) * 4;
+                if (dop_locked < usual && dsd % (dop_locked * 8) == 0) {
+                    dsd_pcm_rate = dop_locked;
+                    event("converting at " + std::to_string(dop_locked) + " Hz, the rate the device locked");
+                }
             }
             dsdf.reset();
             dsdenc.reset();
