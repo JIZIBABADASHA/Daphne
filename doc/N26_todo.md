@@ -56,7 +56,8 @@
 - [x] 外接 DAC 驗證（USB DAC，44.1–384 kHz、DSD128）：隱藏測試 4 個、CLI 44.1–384 kHz 連播 bit-perfect、`auto` 升頻到 352.8 kHz、DoP DSD64 / DSD128（DAC 顯示 D64 / D128）、`miku_shell.js` 獨佔 / 共享、`helper.py`，全部通過（N24「驗證」）。
 - [x] 其他程式改取樣率：共享時在原位置以新的取樣率重開；獨佔時 macOS 拒絕其他程序的變更（`'!hog'`），照常播完（N24「驗證」）。
 - [x] 共享模式的取樣率轉換（分支 `coreaudio-shared-src`）：裝置取樣率不是要求值的整數倍時（48 k 在 44.1 kHz 的裝置上），原本直接失敗；改成輸出在 IO 回呼裡用 `AudioConverter` 轉換，與 WASAPI 共享的 `AUTOCONVERTPCM` 相同。順便修正共享模式回報 bit-perfect 的問題（Windows 的 WASAPI 共享也一樣）：改回報「shared mode (system mixer)」。
-- [ ] 外接 DAC 剩下的驗證：bit-perfect 錄音比對（需要 loopback 裝置，例如 BlackHole；安裝要管理員權限，等使用者安裝）、播放中拔除 DAC（要有人在機器旁拔線，之後再做）。
+- [x] bit-perfect 錄音比對：BlackHole 2ch 當 loopback，隱藏測試 `daphne_tests "[.blackhole]"`（PCM 44.1–384 kHz int24 逐樣本相同、DoP DSD64 / DSD128 標記完整，2026-10-16 全過）。錄音要麥克風權限：沒有權限只會錄到全零、不報錯；使用者在桌面上給「終端機」權限後，從 ssh 執行的同一個測試程式也錄得到。BlackHole 存 float32，不涵蓋真 DAC 上 float → 整數的轉換。
+- [ ] 播放中拔除 DAC（要有人在機器旁拔線）。
 - [ ] 外殼 `probeDevice(null)` 在停止後的頭 1–3 秒會讀到內建輸出（獨佔時 macOS 把系統輸出移走，放掉後才移回）：可改成沿用最後一次播放的裝置，或在外殼裡也套用 core 的「剛放掉的系統輸出」規則。只影響顯示：core 開裝置時已套用該規則，停止後馬上播下一首仍送到 DAC。只有 macOS 有這個現象（Windows 的 WASAPI 獨佔不會更改預設輸出，ASIO 與預設裝置無關）。暫緩：等 MIKU 介面內的整合測試（7d）時，真的看到顯示閃一下再處理。`verify/miku_shell.js` 偶爾在停止後讀到 88.2 kHz 也是同一件事（查過，不是 bug）：外殼的 `stop()` 送出就不等回覆，0.5 s 後的 probe 讀到的是還沒關完的裝置。helper 的 `stop` 平常 0.84 s（USB DAC 在 IO 運轉中改回取樣率約 0.83 s，內建輸出約 0.33 s）。如果剛送了要換取樣率的 `apply` 就馬上 stop，stop 要 1.7 s：從時間看，是 stop 等那次重開先把排隊的聲音放完、淡出（`restart()` 的 drain，約 0.7 s），再加上還原取樣率的 0.84 s。最後取樣率都正確還原、hog 也放掉（每 10 ms 監看確認）。
 - [x] 只播放音樂，不播濾波器延遲（分支 `fix-track-end-tail`）：濾波器把整段訊號延後一個延遲（linear phase 約 taps 的一半：8192 taps 約 0.09 s，1048576 taps、intermediate 約 8 s）。原本開頭先播一段延遲（無聲），結尾只 `flush()` 剩下的輸入，最後一首（或不接續的下一首）少了一個延遲長度的音樂；1M taps 播 6 s 的檔，整首音樂都沒播出來（CLI「last position 0 s」）。所有平台都有。改成開頭丟掉延遲（開始、跳轉、重開），結尾送零到最後一個輸入樣本出來為止（它之後的餘振不播），輸出長度等於原曲 × 倍率。
 - [x] 開裝置時中間失敗的嘗試寫進 log（同一分支）：PCM 的取樣率逐級下降、DSD 的原生 → DoP → 較低倍率，非最後一次失敗時送事件「the output at … failed (原因): trying …」，原本只有最後一次的錯誤。
@@ -76,7 +77,7 @@
 
 - [x] `miku/extension.js`（MIKU 從 `Extensions/<名稱>/miku/` 載入，提供 `core.createEngine`），外殼回報 `supportsLive = false`。不需要改 MIKU。移植自 Windows 擴充（`DaphneExtension.cs`、`DaphneEngine.cs`、`DaphneOptions.cs`、`DaphnePath.cs`），底下是 helper；頁面檔案共用（`miku/web` symlink）。helper 掛掉時重新啟動並從原位置繼續（一分鐘最多 3 次）。
 - [x] 驗證：Intel Mac（macOS 11）上用模擬 MIKU 的腳本測 helper、讓出 / 取回裝置。（`verify/miku_shell.js`，獨佔與共享都全部通過）
-- [ ] MIKU 介面內的整合測試：MIKU 的 Mac 版用 Electron 44，需要 macOS 12 以上，介面內的整合測試要等有新的 Mac（或試舊版 Electron 的開發模式）。
+- [ ] MIKU 介面內的整合測試：MIKU 的 Mac 版用 Electron 44，需要 macOS 12 以上，介面內的整合測試要等有新的 Mac（或試舊版 Electron 的開發模式）。→ 改用 Electron 37（支援 macOS 11 的最後一版；38 起需要 macOS 12）以開發模式在測試機上跑，只為測試，不改 MIKU：`~/daphne-test/miku`（MIKU 的 `mac/app`、`Extensions/Daphne` 連到 `~/daphne-test/Daphne`、FFmpeg 6.0、原生程式 `audio.mm` 以 macOS 11 SDK 編譯，只要把 `kAudioObjectPropertyElementMain` 換成同值的 0；它的 `--self-test` 在 macOS 11 全過），雙擊 `Run MIKU (Electron 37).command` 啟動。從 ssh 啟動時主程式載入沒有錯誤，但沒有人登入桌面時不會開視窗；等有人登入 Mac 的桌面再做介面內的測試。
 
 ### 6. Linux ALSA 輸出（暫緩）
 
