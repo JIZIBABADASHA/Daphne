@@ -79,6 +79,7 @@
 - [x] `miku/extension.js`（MIKU 從 `Extensions/<名稱>/miku/` 載入，提供 `core.createEngine`），外殼回報 `supportsLive = false`。不需要改 MIKU。移植自 Windows 擴充（`DaphneExtension.cs`、`DaphneEngine.cs`、`DaphneOptions.cs`、`DaphnePath.cs`），底下是 helper；頁面檔案共用（`miku/web` symlink）。helper 掛掉時重新啟動並從原位置繼續（一分鐘最多 3 次）。
 - [x] 驗證：Intel Mac（macOS 11）上用模擬 MIKU 的腳本測 helper、讓出 / 取回裝置。（`verify/miku_shell.js`，獨佔與共享都全部通過）
 - [x] MIKU 介面內的整合測試：MIKU 的 Mac 版用 Electron 44，需要 macOS 12 以上，介面內的整合測試要等有新的 Mac（或試舊版 Electron 的開發模式）。→ 改用 Electron 37（支援 macOS 11 的最後一版；38 起需要 macOS 12）以開發模式在測試機上跑，只為測試，不改 MIKU：`~/daphne-test/miku`（MIKU 的 `mac/app`、`Extensions/Daphne` 連到 `~/daphne-test/Daphne`、FFmpeg 6.0、原生程式 `audio.mm` 以 macOS 11 SDK 編譯，只要把 `kAudioObjectPropertyElementMain` 換成同值的 0；它的 `--self-test` 在 macOS 11 全過），雙擊 `Run MIKU (Electron 37).command` 啟動。從 ssh 啟動時主程式載入沒有錯誤，但沒有人登入桌面時不會開視窗；等有人登入 Mac 的桌面再做介面內的測試。 → 2026-10-16 使用者登入桌面後在 MIKU 1.4.5（Electron 37）裡實際操作，全部正常：Daphne 擴充載入；44.1 k 升頻到 352.8 k，換 taps 時在背景建好再切換；DSD（DoP）播放；換曲時保留裝置（log「the device was kept from the last track」）；MIKU 不在前景且沒在播時放掉裝置。另外看到 MIKU 掃描音樂庫時 ffprobe 的時間上限是 20 秒（`ffmpeg.js` 的 `run()`），NAS 上 420 MB 的 DSF 要讀 29.7 秒，所以記錄「ffprobe failed」（之後 MIKU 自己讀 DSF 檔頭補資料）；這是 MIKU 的行為，與 Daphne 無關，不改。
+- [x] MIKU Mac 安裝包帶入 Daphne（分支 `miku-mac-pack`）：Windows 與 macOS 用同一份 `Extensions/Daphne`。Windows 由 MIKU 掃描 `Extensions/*/src/*/*.Extension.csproj` 編譯；macOS 的 MIKU 打包腳本原本寫死另一個資料夾，改成同樣的規則：掃描 `Extensions/*/miku/pack-mac.sh`，由模組自己打包（MIKU 那邊的修改在 MIKU 的分支上）。`miku/pack-mac.sh <out>` 輸出 `<out>/<arm64|x64>/daphne/`：`miku/*.js`、`web/`（symlink 展開成檔案）、`LICENSE`、`bin/` 裡的 `daphne-helper`、`libdaphne_core.dylib`（與 Windows 的 `daphne_core.dll` 同一份核心）和 FFmpeg 的 dylib。Intel Mac 上兩種架構共 502 s（FFmpeg 只在第一次編）。
 
 ### 6. Linux ALSA 輸出（暫緩）
 
@@ -142,7 +143,7 @@
 - 第 5 項是真的問題（2x 升頻打開後裝置留在 44.1 kHz，約 5 次 2 次）：播放器重啟裝置時先關舊的、再開新的；舊的放掉 hog 之後 macOS 還沒把系統輸出移回來，新的找不到「系統輸出」（「no system output device」），播放器的 88.2 kHz 嘗試失敗，退回清單裡的 44.1 kHz，而且失敗的嘗試訊息被丟掉。修正見 N24「系統輸出」（記住剛放掉的那一台 3 秒、最多等 1 秒）。播放器把非最後一次的嘗試失敗也記錄下來會比較好查，列為之後的改進。
 - 同一個空窗期也讓 `probeDevice` 在 stop 之後一瞬間找不到系統輸出：改成退回剛才播放的那一台，再退回清單第一台。
 - stop 之後 0.5 秒查詢時偶爾看到 88.2 kHz（最後的 `bitPerfect` 重啟與 stop 幾乎同時）；2 秒後三次都回到 44.1 kHz，裝置最後都還原。
-- 頁面檔案：MIKU 的載入器只讀模組資料夾下的 `web/`，而且只允許那個資料夾裡的檔案；`miku/web` 是 git 的 symlink（mode 120000），macOS / Linux checkout 時是真的 symlink，Windows（`core.symlinks=false`）是一個內容為路徑的文字檔，Windows 擴充不用它。MIKU 的 Mac 安裝包要把它展開成實際的檔案（之後打包時處理）。
+- 頁面檔案：MIKU 的載入器只讀模組資料夾下的 `web/`，而且只允許那個資料夾裡的檔案；`miku/web` 是 git 的 symlink（mode 120000），macOS / Linux checkout 時是真的 symlink，Windows（`core.symlinks=false`）是一個內容為路徑的文字檔，Windows 擴充不用它。MIKU 的 Mac 安裝包裡展開成實際的檔案（`miku/pack-mac.sh` 用 `cp -RL`）。
 - Mac 上用免安裝的 Node 20（`~/daphne-test/tools`）跑測試；MIKU 本身（Electron 44）需要 macOS 12，介面內的整合測試仍待新的 Mac。
 
 **DAC 驗證後的修正（`coreaudio-shared-src`）**
@@ -169,3 +170,11 @@
 - 打開與否是整個程序的設定（C API `dc_keep_device`）：helper 打開，CLI 與 Windows 擴充不打開，行為不變。
 - 播放器送出 `ended` 之後還要等裝置緩衝播完（約 30–50 ms）才關閉輸出，所以那一刻問 `kept` 還是假；外殼在獨佔模式收到 `ended` 就當作保留著（`failed` 是在輸出關閉之後才送，問 helper 即可）。
 - 量測（同一台 DAC，`ratewatch` 每 10 ms 看 hog 與取樣率）：hog 從第一首到 `release()` 都是同一個程序；44.1 k → 96 k → 44.1 k 每次一次重新鎖定；96 k 接 96 k 換曲 30 ms。CLI（不保留）連播 96 k 兩首：還原 44.1 kHz、放掉 hog、再拿、設 96 kHz，約 1.7 s。
+
+**MIKU Mac 安裝包（`miku/pack-mac.sh`）**
+
+- helper 與核心分開（`daphne-helper` 連 `libdaphne_core.dylib`），和 Windows 一樣是「同一份核心函式庫 + 平台的外殼」：Windows 的 C# 擴充用 `DllImport` 在 MIKU 的程序裡載入 `daphne_core.dll`；Electron 的主程序不能直接載入原生函式庫，所以 Mac 由 JS 外殼啟動 helper，helper 再載入 dylib。helper 的 rpath 是 `@loader_path`（`helper/CMakeLists.txt`），打包時兩者放在同一個 `bin/`。
+- FFmpeg：與 Windows 同版本（8.1.3，LGPL、動態連結），從原始碼編（ffmpeg.org 的 tarball，SHA-256 寫在腳本裡；ffmpeg.org 沒有公布 SHA-256，這個值是寫腳本時下載的檔案的），只開引擎需要的 demuxer / decoder（沒有專屬解碼器的格式：M4A / ALAC / AAC、Ogg、Opus、APE、WavPack、WMA、TTA…）。`--install-name-dir=@rpath`，所以核心連到的是 `@rpath/libavcodec.62.dylib` 等，打包時照這些名字複製。沒有 FFmpeg 時這些格式在 Mac 上不能播（測試機的音樂庫有 46 首 ALAC）。
+- CMake：macOS / Linux 的 FFmpeg 原本只用 pkg-config 找（測試機的 ssh 環境找不到 pkg-config），改成也可以指定資料夾（`DAPHNE_FFMPEG_DIR`，含 `include/` 和 `lib/`）；Windows 的路徑不變。
+- 每個 arch 分開編（`build-mac-arm64/`、`build-mac-x86_64/`，最低 macOS 11.0），因為 MIKU 的安裝包也是每個 arch 一份。打包後刪掉所有絕對路徑的 rpath，檢查 `otool -L` 只剩 `@rpath/` 和系統的函式庫，ad-hoc 簽章（`install_name_tool` 會讓簽章失效；MIKU 的安裝包會再簽一次），在本機 arch 上啟動 helper 確認 hello。
+- 結果（Intel Mac）：每個 arch 約 4 MB；arm64 版全是 arm64、x64 版全是 x86_64；x64 的 helper 回報 `{"abi":3,"e":"hello","version":"daphne 0.1.0"}`。arm64 版要在 Apple Silicon 的 Mac 上試。

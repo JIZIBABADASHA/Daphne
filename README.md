@@ -148,7 +148,8 @@ dc_destroy(p);
 | `tests/` | Catch2 unit tests |
 | `verify/` | end-to-end measurements in Python (numpy, soundfile; live tests through a virtual cable) |
 | `tools/` | `sdm_design.py`, the modulator coefficient design |
-| `src/Daphne.Extension/` | the MIKU player extension module |
+| `src/Daphne.Extension/` | the MIKU player extension module (Windows) |
+| `miku/` | the same module for MIKU on macOS (a shell over `daphne-helper`); `miku/pack-mac.sh` packs it for MIKU's Mac installer |
 | `doc/` | the design and verification notes, one per stage |
 
 ## Third-party software
@@ -159,7 +160,7 @@ dc_destroy(p);
 | [minimp3](https://github.com/lieff/minimp3) | CC0 | in `third_party/` |
 | [nlohmann/json](https://github.com/nlohmann/json) | MIT | in `third_party/` |
 | [Catch2](https://github.com/catchorg/Catch2) | BSL-1.0 | in `third_party/` (tests only) |
-| [FFmpeg](https://ffmpeg.org) | LGPL-2.1+ | downloaded by `fetch_ffmpeg.ps1`, linked dynamically |
+| [FFmpeg](https://ffmpeg.org) | LGPL-2.1+ | downloaded by `fetch_ffmpeg.ps1` (Windows) or built from its source by `miku/pack-mac.sh` (macOS), linked dynamically |
 | [ASIO SDK](https://www.steinberg.net/developers/) | Steinberg licence | downloaded by `fetch_asiosdk.ps1`, not redistributed |
 | [GFS Didot](https://fonts.google.com/specimen/GFS+Didot) | SIL OFL 1.1 | in `src/Daphne.Extension/web/fonts/` (the wordmark) |
 
