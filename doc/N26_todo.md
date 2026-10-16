@@ -77,7 +77,7 @@
 
 - [x] `miku/extension.js`（MIKU 從 `Extensions/<名稱>/miku/` 載入，提供 `core.createEngine`），外殼回報 `supportsLive = false`。不需要改 MIKU。移植自 Windows 擴充（`DaphneExtension.cs`、`DaphneEngine.cs`、`DaphneOptions.cs`、`DaphnePath.cs`），底下是 helper；頁面檔案共用（`miku/web` symlink）。helper 掛掉時重新啟動並從原位置繼續（一分鐘最多 3 次）。
 - [x] 驗證：Intel Mac（macOS 11）上用模擬 MIKU 的腳本測 helper、讓出 / 取回裝置。（`verify/miku_shell.js`，獨佔與共享都全部通過）
-- [ ] MIKU 介面內的整合測試：MIKU 的 Mac 版用 Electron 44，需要 macOS 12 以上，介面內的整合測試要等有新的 Mac（或試舊版 Electron 的開發模式）。→ 改用 Electron 37（支援 macOS 11 的最後一版；38 起需要 macOS 12）以開發模式在測試機上跑，只為測試，不改 MIKU：`~/daphne-test/miku`（MIKU 的 `mac/app`、`Extensions/Daphne` 連到 `~/daphne-test/Daphne`、FFmpeg 6.0、原生程式 `audio.mm` 以 macOS 11 SDK 編譯，只要把 `kAudioObjectPropertyElementMain` 換成同值的 0；它的 `--self-test` 在 macOS 11 全過），雙擊 `Run MIKU (Electron 37).command` 啟動。從 ssh 啟動時主程式載入沒有錯誤，但沒有人登入桌面時不會開視窗；等有人登入 Mac 的桌面再做介面內的測試。
+- [x] MIKU 介面內的整合測試：MIKU 的 Mac 版用 Electron 44，需要 macOS 12 以上，介面內的整合測試要等有新的 Mac（或試舊版 Electron 的開發模式）。→ 改用 Electron 37（支援 macOS 11 的最後一版；38 起需要 macOS 12）以開發模式在測試機上跑，只為測試，不改 MIKU：`~/daphne-test/miku`（MIKU 的 `mac/app`、`Extensions/Daphne` 連到 `~/daphne-test/Daphne`、FFmpeg 6.0、原生程式 `audio.mm` 以 macOS 11 SDK 編譯，只要把 `kAudioObjectPropertyElementMain` 換成同值的 0；它的 `--self-test` 在 macOS 11 全過），雙擊 `Run MIKU (Electron 37).command` 啟動。從 ssh 啟動時主程式載入沒有錯誤，但沒有人登入桌面時不會開視窗；等有人登入 Mac 的桌面再做介面內的測試。 → 2026-10-16 使用者登入桌面後在 MIKU 1.4.5（Electron 37）裡實際操作，全部正常：Daphne 擴充載入；44.1 k 升頻到 352.8 k，換 taps 時在背景建好再切換；DSD（DoP）播放；換曲時保留裝置（log「the device was kept from the last track」）；MIKU 不在前景且沒在播時放掉裝置。另外看到 MIKU 掃描音樂庫時 ffprobe 的時間上限是 20 秒（`ffmpeg.js` 的 `run()`），NAS 上 420 MB 的 DSF 要讀 29.7 秒，所以記錄「ffprobe failed」（之後 MIKU 自己讀 DSF 檔頭補資料）；這是 MIKU 的行為，與 Daphne 無關，不改。
 
 ### 6. Linux ALSA 輸出（暫緩）
 
