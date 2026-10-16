@@ -5,7 +5,10 @@
 #   web/                                       the page parts, shared with the Windows extension (miku/web is a
 #                                              symlink in git, copied here as files)
 #   bin/daphne-helper, bin/libdaphne_core.dylib, bin/libav*.dylib, bin/libswresample.*.dylib
-#                                              the engine (the same core as daphne_core.dll on Windows) and FFmpeg
+#                                              the engine (the same core as daphne_core.dll on Windows) and FFmpeg;
+#                                              only code in bin/ (MIKU's installer signs every file in it)
+#   LICENSE, FFmpeg-COPYING.LGPLv2.1, FFmpeg-SOURCE.txt
+#                                              Daphne's license, FFmpeg's license and where its source is
 # MIKU's mac/build/build.sh runs Extensions/<Name>/miku/pack-mac.sh for every module that has one; the same
 # Extensions/Daphne checkout gives MIKU on Windows its extension (src/Daphne.Extension, scripts/build_for_miku.ps1).
 #
@@ -88,9 +91,9 @@ for arch in "${ARCHS[@]}"; do
       [ -f "$D/bin/$dep" ] || cp -L "$FF/lib/$dep" "$D/bin/$dep"
     done
   done
-  cp "$SRC/ffmpeg-$FF_VER/COPYING.LGPLv2.1" "$D/bin/FFmpeg-COPYING.LGPLv2.1"
-  printf 'FFmpeg %s (LGPL 2.1, shared libraries), unmodified source: https://ffmpeg.org/releases/ffmpeg-%s.tar.xz\nBuilt by miku/pack-mac.sh (https://github.com/cychang-ykc/Daphne), which has the configure options.\n' \
-    "$FF_VER" "$FF_VER" >"$D/bin/FFmpeg-SOURCE.txt"
+  cp "$SRC/ffmpeg-$FF_VER/COPYING.LGPLv2.1" "$D/FFmpeg-COPYING.LGPLv2.1"
+  printf 'FFmpeg %s (LGPL 2.1, shared libraries in bin/), unmodified source: https://ffmpeg.org/releases/ffmpeg-%s.tar.xz\nBuilt by miku/pack-mac.sh (https://github.com/cychang-ykc/Daphne), which has the configure options.\n' \
+    "$FF_VER" "$FF_VER" >"$D/FFmpeg-SOURCE.txt"
   # only relative search paths (@loader_path: bin/) stay in what ships; none of this machine's folders
   for f in "$D"/bin/daphne-helper "$D"/bin/*.dylib; do
     for rp in $(otool -l "$f" | awk '/cmd LC_RPATH/ { getline; getline; print $2 }'); do
