@@ -33,7 +33,7 @@ extern "C" {
 
 typedef struct dc_player dc_player;
 
-/* 1: the first version; 2: the UTF-8 path functions (*_utf8). */
+/* 1: the first version; 2: the UTF-8 path functions (*_utf8); 3: dc_keep_device, dc_release_device, dc_device_kept. */
 DC_API int dc_abi_version(void);
 DC_API const char* dc_version(void);
 
@@ -64,6 +64,16 @@ DC_API void dc_set_next_gain(dc_player* p, const wchar_t* path, double headroom_
 DC_API void dc_set_next_gain_utf8(dc_player* p, const char* path, double headroom_db);
 /* Stops playback (DSD: the DAC is returned to PCM first) and waits for it. */
 DC_API void dc_stop(dc_player* p);
+
+/* macOS, exclusive mode: keep the device between tracks (MIKU's way; process-wide). On: a Core Audio output closed in
+ * exclusive mode (dc_stop, the next dc_load, the end of the last track) stays open: hog mode, rate and DAC format, the
+ * IO running silent. The next dc_load on the same device takes it over and sets a new rate on it directly (one DAC
+ * relock), and macOS does not move the system output away and back in between. Another device or shared mode puts it
+ * back first. dc_release_device() puts it back (rate, DAC format) and releases hog mode, 1 when one was kept; off
+ * releases it too. dc_device_kept(): 1 while a device is kept with nothing playing on it. No effect elsewhere. */
+DC_API void dc_keep_device(int on);
+DC_API int dc_release_device(void);
+DC_API int dc_device_kept(void);
 
 /* State snapshot as JSON:
  *   {"state": "idle|playing|paused|ended|failed", "position": s, "duration": s, "track": n, "design": 0..1,

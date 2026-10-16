@@ -9,8 +9,10 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <utility>
 
 #include "coreaudio_util.h"
+#include "daphne/engine/devices.h"
 
 namespace daphne {
 
@@ -38,6 +40,13 @@ void note_released_default(const std::string& uid) {
     g_took_uid = uid;
     g_took_at = Clock::now();
 }
+
+// The device kept in exclusive mode between tracks (keep_output_devices, devices.h): hog mode, rate and DAC format
+// stay and the IO runs, silent; the next open of the same device takes it over. Not destroyed at exit (no HAL calls
+// then: the system releases hog mode with the process).
+std::mutex g_kept_m;
+bool g_keep = false;
+CoreAudioOutput::Impl* g_kept = nullptr;
 
 // *taken_default: the device was resolved as "the system output".
 AudioDeviceID resolve(const std::string& want, std::string* error, bool* taken_default) {
@@ -117,7 +126,7 @@ AudioStreamBasicDescription float_pcm(double rate, int channels) {
 }  // namespace
 
 struct CoreAudioOutput::Impl {
-    CoreAudioOutput* owner = nullptr;
+    std::atomic<CoreAudioOutput*> owner{nullptr};   // none while the device is kept with nothing playing, or opening
     AudioDeviceID dev = kAudioObjectUnknown;
     AudioDeviceIOProcID proc = nullptr;
     bool exclusive = false, own_hog = false, io_running = false;
@@ -172,8 +181,9 @@ struct CoreAudioOutput::Impl {
 
     // frames from the ring into tmp (int24-in-32)
     void pull(int frames) {
-        if (owner->feeder_.fill(reinterpret_cast<uint8_t*>(tmp.data()), frames, ring, eof->load(std::memory_order_acquire), owner->stats_))
-            owner->drained_ = true;
+        CoreAudioOutput* o = owner.load(std::memory_order_relaxed);   // set while armed
+        if (o->feeder_.fill(reinterpret_cast<uint8_t*>(tmp.data()), frames, ring, eof->load(std::memory_order_acquire), o->stats_))
+            o->drained_ = true;
     }
 
     // The converter asks for input (from inside render): up to tmp_frames from the ring, as float32.
@@ -193,7 +203,16 @@ struct CoreAudioOutput::Impl {
 
     // The HAL's IO thread: no lock, no allocation, no system call beyond the clock.
     void render(AudioBufferList* out) {
-        OutputStats& st = owner->stats_;
+        for (UInt32 b = 0; b < out->mNumberBuffers; ++b)
+            if (out->mBuffers[b].mData) std::memset(out->mBuffers[b].mData, 0, out->mBuffers[b].mDataByteSize);
+        calls.fetch_add(1, std::memory_order_relaxed);
+        in_render.fetch_add(1);
+        CoreAudioOutput* o = owner.load(std::memory_order_acquire);
+        if (!o) {   // kept with nothing playing, or still opening: silence
+            in_render.fetch_sub(1, std::memory_order_release);
+            return;
+        }
+        OutputStats& st = o->stats_;
         const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
         const int64_t prev = last_ns.exchange(now, std::memory_order_relaxed);
         if (prev) {
@@ -203,11 +222,6 @@ struct CoreAudioOutput::Impl {
             if (period_ns > 0 && (now - prev) * 2 > period_ns * 3) st.late_callbacks.fetch_add(1, std::memory_order_relaxed);
         }
         st.callbacks.fetch_add(1, std::memory_order_relaxed);
-        calls.fetch_add(1, std::memory_order_relaxed);
-        for (UInt32 b = 0; b < out->mNumberBuffers; ++b)
-            if (out->mBuffers[b].mData) std::memset(out->mBuffers[b].mData, 0, out->mBuffers[b].mDataByteSize);
-
-        in_render.fetch_add(1);
         if (armed.load() && !slots.empty() && slots[0].buffer < out->mNumberBuffers) {
             int frames = static_cast<int>(out->mBuffers[slots[0].buffer].mDataByteSize / slots[0].stride);
             frames = std::min(frames, tmp_frames);
@@ -247,13 +261,13 @@ struct CoreAudioOutput::Impl {
                 ca::get(m->dev, kAudioDevicePropertyDeviceIsAlive, alive);
                 if (!alive) {
                     m->removed = true;
-                    m->owner->failed_ = true;
+                    if (CoreAudioOutput* o = m->owner.load()) o->failed_ = true;
                 }
             } else if (a[i].mSelector == kAudioDevicePropertyNominalSampleRate) {
                 const double r = ca::nominal_rate(m->dev);
                 if (!ca::same_rate(r, m->rate)) {
                     m->note("the device rate was changed to " + khz(r) + " by another application: reopening");
-                    m->owner->reset_ = true;
+                    if (CoreAudioOutput* o = m->owner.load()) o->reset_ = true;
                 }
             }
         }
@@ -349,7 +363,66 @@ struct CoreAudioOutput::Impl {
         const uint64_t c0 = calls.load();
         for (int i = 0; i < 50 && calls.load() < c0 + 2; ++i) sleep_ms(10);
     }
+
+    // Puts back what open() changed while the IO still runs, then stops it and releases hog mode (header).
+    void shut() {
+        listen(false);
+        if (io_running && exclusive) {
+            for (const auto& [s, f] : physical_restore) {
+                if (ca::set(s, kAudioStreamPropertyPhysicalFormat, f) != noErr) continue;
+                for (int k = 0; k < 100; ++k) {
+                    AudioStreamBasicDescription now{};
+                    if (ca::get(s, kAudioStreamPropertyPhysicalFormat, now) && now.mBitsPerChannel == f.mBitsPerChannel) break;
+                    sleep_ms(10);
+                }
+            }
+            if (rate_touched && original_rate > 0 && !ca::same_rate(ca::nominal_rate(dev), original_rate)) {
+                change_rate(original_rate);
+                wait_io();
+            }
+        }
+        if (io_running) AudioDeviceStop(dev, proc);
+        if (proc) AudioDeviceDestroyIOProcID(dev, proc);
+        if (conv) AudioConverterDispose(conv);
+        if (own_hog && ca::hog_owner(dev) == getpid()) {
+            const pid_t none = -1;
+            ca::set(dev, kAudioDevicePropertyHogMode, none);
+            if (taken_default) note_released_default(ca::string_prop(dev, kAudioDevicePropertyDeviceUID));
+        }
+        io_running = own_hog = false;
+        proc = nullptr;
+        conv = nullptr;
+    }
 };
+
+namespace {
+
+std::unique_ptr<CoreAudioOutput::Impl> take_kept() {
+    std::lock_guard<std::mutex> l(g_kept_m);
+    return std::unique_ptr<CoreAudioOutput::Impl>(std::exchange(g_kept, nullptr));
+}
+
+}  // namespace
+
+void keep_output_devices(bool on) {
+    {
+        std::lock_guard<std::mutex> l(g_kept_m);
+        g_keep = on;
+    }
+    if (!on) release_kept_output_device();
+}
+
+bool release_kept_output_device() {
+    auto k = take_kept();
+    if (!k) return false;
+    k->shut();
+    return true;
+}
+
+bool output_device_kept() {
+    std::lock_guard<std::mutex> l(g_kept_m);
+    return g_kept != nullptr;
+}
 
 CoreAudioOutput::CoreAudioOutput() = default;
 
@@ -357,23 +430,42 @@ CoreAudioOutput::~CoreAudioOutput() { close(); }
 
 bool CoreAudioOutput::open(const CoreAudioOptions& opt, int rate, int channels, std::string* error) {
     close();
-    impl_ = std::make_unique<Impl>();
-    Impl& m = *impl_;
-    m.owner = this;
     auto fail = [&](const std::string& msg) {
         if (error) *error = msg;
-        close();
+        if (impl_) {   // put back, not kept
+            stop();
+            impl_->shut();
+            impl_.reset();
+        }
         return false;
     };
     if (channels <= 0 || rate <= 0) return fail("Core Audio: invalid request");
     std::string e;
-    m.dev = resolve(opt.device, &e, &m.taken_default);
-    if (m.dev == kAudioObjectUnknown) return fail(e);
+    bool taken_default = false;
+    const AudioDeviceID dev = resolve(opt.device, &e, &taken_default);
+    // the device kept from the last track: taken over when it is the one asked for in exclusive mode, else put back
+    std::unique_ptr<Impl> kept = take_kept();
+    if (kept) {
+        UInt32 alive = 1;
+        ca::get(kept->dev, kAudioDevicePropertyDeviceIsAlive, alive);
+        if (!opt.exclusive || kept->dev != dev || !alive || kept->removed) {
+            kept->shut();
+            kept.reset();
+        }
+    }
+    const bool reuse = kept != nullptr;
+    impl_ = reuse ? std::move(kept) : std::make_unique<Impl>();
+    Impl& m = *impl_;
+    if (dev == kAudioObjectUnknown) return fail(e);
+    m.dev = dev;
+    m.taken_default = m.taken_default || taken_default;
+    m.slots.clear();
+    m.mono = false;
     name_ = ca::string_prop(m.dev, kAudioObjectPropertyName);
     if (ca::output_streams(m.dev).empty()) return fail(name_ + " has no output streams");
     m.exclusive = opt.exclusive;
     rates_ = ca::offered_rates(m.dev);
-    m.original_rate = ca::nominal_rate(m.dev);
+    if (!reuse) m.original_rate = ca::nominal_rate(m.dev);   // put back by close() (kept: still the first open's)
 
     // exclusive: hog mode first (nothing else can play on the device, and nothing mixes into it)
     if (m.exclusive) {
@@ -401,26 +493,30 @@ bool CoreAudioOutput::open(const CoreAudioOptions& opt, int rate, int channels, 
         ca::set(m.dev, kAudioDevicePropertyBufferFrameSize, static_cast<UInt32>(want + 0.5));
     }
 
-    // the IO runs (silent) from here on: a device in hog mode is only changed while it runs (header)
-    if (AudioDeviceCreateIOProcID(m.dev, &Impl::io, &m, &m.proc) != noErr || !m.proc) return fail("could not create the IO procedure for " + name_);
-    if (AudioDeviceStart(m.dev, m.proc) != noErr) return fail("could not start " + name_);
-    m.io_running = true;
+    // the IO runs (silent) from here on: a device in hog mode is only changed while it runs (header). A kept
+    // device runs already: a new rate is set on it directly (one relock, nothing put back in between)
+    if (!reuse) {
+        if (AudioDeviceCreateIOProcID(m.dev, &Impl::io, &m, &m.proc) != noErr || !m.proc) return fail("could not create the IO procedure for " + name_);
+        if (AudioDeviceStart(m.dev, m.proc) != noErr) return fail("could not start " + name_);
+        m.io_running = true;
+    } else {
+        m.note("the device was kept from the last track");
+    }
 
-    if (m.exclusive && target > 0 && !ca::same_rate(m.original_rate, target)) {
-        if (m.change_rate(target)) {
-            m.rate_touched = true;
-            m.note("device rate " + khz(m.original_rate) + " -> " + khz(target));
-        } else {
-            m.rate_touched = !ca::same_rate(ca::nominal_rate(m.dev), m.original_rate);
-            m.note("the device did not take " + khz(target) + ": it runs at " + khz(ca::nominal_rate(m.dev)));
-        }
+    const double was = ca::nominal_rate(m.dev);
+    bool changed = false;
+    if (m.exclusive && target > 0 && !ca::same_rate(was, target)) {
+        if (m.change_rate(target)) m.note("device rate " + khz(was) + " -> " + khz(target));
+        else m.note("the device did not take " + khz(target) + ": it runs at " + khz(ca::nominal_rate(m.dev)));
+        changed = true;
         m.wait_io();
     } else if (m.exclusive && target > 0 && target != rate) {
         m.note(khz(rate) + " is not offered by " + name_);
     }
+    if (m.exclusive) m.rate_touched = !ca::same_rate(ca::nominal_rate(m.dev), m.original_rate);
     m.rate = ca::nominal_rate(m.dev);
     if (m.rate <= 0) return fail(name_ + " reports no sample rate");
-    m.settle(m.rate_touched);
+    m.settle(changed);
 
     // the channel layout of the IO buffer list (one buffer per interleaved stream, or per channel)
     struct Ch {
@@ -499,6 +595,8 @@ bool CoreAudioOutput::open(const CoreAudioOptions& opt, int rate, int channels, 
     fmt_.container_bits = 32;
     fmt_.valid_bits = 24;
     matched_ = m.conv || ca::same_rate(m.rate, rate);
+    m.last_ns.store(0, std::memory_order_relaxed);   // (kept: not the gap since the last track's callbacks)
+    m.owner.store(this, std::memory_order_release);
     m.listen(true);
     return true;
 }
@@ -527,29 +625,26 @@ void CoreAudioOutput::close() {
     stop();
     Impl& m = *impl_;
     m.listen(false);
-    // put back what open() changed while the IO still runs, then stop it and release hog mode (header)
-    if (m.io_running && m.exclusive) {
-        for (const auto& [s, f] : m.physical_restore) {
-            if (ca::set(s, kAudioStreamPropertyPhysicalFormat, f) != noErr) continue;
-            for (int k = 0; k < 100; ++k) {
-                AudioStreamBasicDescription now{};
-                if (ca::get(s, kAudioStreamPropertyPhysicalFormat, now) && now.mBitsPerChannel == f.mBitsPerChannel) break;
-                sleep_ms(10);
-            }
-        }
-        if (m.rate_touched && m.original_rate > 0 && !ca::same_rate(ca::nominal_rate(m.dev), m.original_rate)) {
-            m.change_rate(m.original_rate);
-            m.wait_io();
-        }
+    bool keep = false;
+    {
+        std::lock_guard<std::mutex> l(g_kept_m);
+        keep = g_keep && m.exclusive && m.io_running && m.own_hog && !m.removed;
     }
-    if (m.io_running) AudioDeviceStop(m.dev, m.proc);
-    if (m.proc) AudioDeviceDestroyIOProcID(m.dev, m.proc);
-    if (m.conv) AudioConverterDispose(m.conv);
-    if (m.own_hog && ca::hog_owner(m.dev) == getpid()) {
-        const pid_t none = -1;
-        ca::set(m.dev, kAudioDevicePropertyHogMode, none);
-        if (m.taken_default) note_released_default(ca::string_prop(m.dev, kAudioDevicePropertyDeviceUID));
+    if (keep) {
+        // kept for the next track: the IO goes on, silent once no callback holds this output any more
+        m.owner.store(nullptr, std::memory_order_release);
+        while (m.in_render.load(std::memory_order_acquire) != 0) std::this_thread::yield();
+        m.ring = nullptr;
+        m.eof = nullptr;
+        std::unique_ptr<Impl> other;
+        {
+            std::lock_guard<std::mutex> l(g_kept_m);
+            other.reset(std::exchange(g_kept, impl_.release()));
+        }
+        if (other) other->shut();   // (one device is kept at a time)
+        return;
     }
+    m.shut();
     impl_.reset();
 }
 

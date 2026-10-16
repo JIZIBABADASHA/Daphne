@@ -66,6 +66,7 @@
 - 取樣率變更：設定後每 10 ms 讀回，最多 1.5 s；裝置沒有接受時以它實際的取樣率繼續（`matches_request()` 為假，播放器會重新設計或重試），並記錄一則訊息。格式變更後等 HAL 回報的 virtual format 都是新的取樣率、且連續兩次讀到相同（最多約 1 s）才開始。
 - 「系統輸出」（`device` 空白或 `default`）：裝置被 hog 時 macOS 會把系統輸出移到別的裝置（只有一個裝置時就沒有系統輸出），放掉 hog 之後過一會兒才移回來。所以依序是：本程序 hog 住的裝置；本程序以系統輸出身分拿到、放掉不到 3 秒的那一台（播放器重啟裝置時先關再開，中間的空窗期裡系統輸出不存在，或暫時是另一台裝置：之前偶爾因此找不到裝置而退回原取樣率，有兩台裝置時還會開到另一台）；系統輸出（不存在時最多等 1 秒）。系統輸出不存在而有裝置被其他程序 hog 時，回報「… is in exclusive use by another application (pid N)」，而不是「沒有系統輸出」。
 - Windows 的輸出工廠收到 `coreaudio_*` 時回報「Core Audio is macOS only」（原本會當成 WASAPI 獨占開啟）。
+- 保留裝置（`keep_output_devices`，`devices.h`；C API `dc_keep_device`，helper 預設打開）：與 MIKU 自己的 Core Audio 輸出相同，獨佔模式的 `close()` 不還原，裝置保留著（hog、取樣率、DAC 格式，IO 繼續跑、送靜音；IO 回呼這時沒有 owner，只寫零），下一次 `open()` 同一台裝置時直接接手，新的取樣率在運轉中直接設定（DAC 只重新鎖定一次，同取樣率則完全不動），macOS 也不會在中間把系統輸出移走再移回。要求共享模式、另一台裝置、或保留的裝置已被拔除時，先把它還原再開。`release_kept_output_device()` 還原（取樣率回到第一次開啟前的值、DAC 格式）並放掉 hog。程序結束時不呼叫 HAL：helper 在 `quit` 時放開；程序掛掉時系統放掉 hog，但取樣率停在最後的值（與 MIKU 相同）。
 - 被其他程序 hog 住的裝置：獨佔與共享都開不了，回報同樣的訊息（不會卡住）。
 - 聲道：立體聲用裝置偏好的立體聲聲道（`kAudioDevicePropertyPreferredChannelsForStereo`）；單聲道寫到那兩個聲道；多聲道從第 1 個聲道依序對應（裝置聲道不夠時開啟失敗）。每次回呼先把整個 buffer list 清成 0，再寫入用到的聲道。
 - IO 緩衝：`output.buffer_ms` 換算成 HAL 的 buffer frame size，限制在裝置的範圍內；0 用裝置預設（內建輸出 512 frames）。
@@ -96,4 +97,5 @@
 | Core Audio，外殼（同一台 DAC） | `verify/miku_shell.js` 獨佔、共享、`verify/helper.py` 全過。獨佔時 macOS 把系統輸出移到內建輸出，放掉後約 1–3 秒才移回；播放（含 2x 升頻重啟到 88.2 kHz）都在 DAC 上，內建輸出的取樣率沒變過。停止後立刻 probe「系統輸出」會讀到內建輸出（只影響顯示） |
 | Core Audio，共享的取樣率轉換（同一台 DAC，44.1 kHz） | 修正前 48 k 檔在共享模式直接失敗（「the device locked 44100 Hz, not an integer multiple of the source rate 48000 Hz」）；修正後 96 k / 192 k / 48 k / 44.1 k 連播都播到結尾、underrun 0，前三首記錄「Core Audio converts … to the device's 44.1 kHz」；共享模式回報「bit-perfect: no (shared mode (system mixer))」。隱藏測試加上「共享轉換非整數倍的取樣率」，5 個全過 |
 | Core Audio，其他程式改取樣率（同一台 DAC） | 共享：播放中由另一個程序改成 88.2 kHz → 「the device rate was changed to 88.2 kHz by another application: reopening」，在原位置以 88.2 kHz 重開（鏈升頻），播到結尾、underrun 0、最長事件間隔 6 ms；獨佔：另一個程序的變更被 macOS 拒絕（`'!hog'`，kAudioDevicePermissionsError），裝置維持 44.1 kHz，bit-perfect 播完 |
+| Core Audio，保留裝置（同一台 DAC，helper） | 44.1 k → 96 k → 44.1 k 三首：hog 全程同一個程序，取樣率直接切換（每次一次重新鎖定，log「the device was kept from the last track」），`stop` 帶 `hold` 保留、不帶就還原到 44.1 kHz 並放掉 hog。96 k 接 96 k：換曲 30 ms、取樣率不動；不保留時（CLI）是 96 k → 44.1 k → 放掉 hog → 再拿 → 96 k，約 1.7 s。隱藏測試「a kept device is taken over …」、`miku_shell.js`（獨佔：stop 後 `holdsDevice` 與 `kept` 為真，`release()` 後沒有裝置被 hog）、`helper.py` 全過 |
 | Core Audio，尚未驗證 | 錄音比對 bit-perfect（需要 loopback 裝置，例如 BlackHole，安裝要管理員權限）、播放中拔除 DAC（要有人在機器旁） |

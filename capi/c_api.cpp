@@ -108,7 +108,8 @@ std::optional<double> headroom(double db) { return std::isnan(db) ? std::nullopt
 extern "C" {
 
 // 2: the UTF-8 path functions (dc_load_utf8, dc_set_next_utf8, dc_set_next_gain_utf8, dc_filter_cache_dir_utf8)
-DC_API int dc_abi_version(void) { return 2; }
+// 3: dc_keep_device, dc_release_device, dc_device_kept
+DC_API int dc_abi_version(void) { return 3; }
 DC_API const char* dc_version(void) { return "daphne 0.1.0"; }
 
 DC_API dc_player* dc_create(void) {
@@ -374,6 +375,23 @@ DC_API long long dc_filter_cache_prune(const char* settings, int limit_mb) {
         return -1;
     }
 }
+
+DC_API void dc_keep_device(int on) {
+    try {
+        daphne::keep_output_devices(on != 0);
+    } catch (...) {
+    }
+}
+
+DC_API int dc_release_device(void) {
+    try {
+        return daphne::release_kept_output_device() ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+DC_API int dc_device_kept(void) { return daphne::output_device_kept() ? 1 : 0; }
 
 DC_API int dc_devices(char* out, int len) {
     try {

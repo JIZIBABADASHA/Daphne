@@ -5,7 +5,8 @@
 //
 // Two quiet (-60 dBFS) 1 s tracks and an 8 s one: loaded paused, the second as the gapless next track, played (trackStarted before
 // ended); pause / resume / seek; stop releases the device; MIKU's EQ shows in the path card; Daphne's 2x upsampler
-// (RPC set) doubles the device rate in exclusive mode and bitPerfect turns it off; the device list; dispose.
+// (RPC set) doubles the device rate in exclusive mode and bitPerfect turns it off; exclusive: stop keeps the device and
+// release() lets it go (no device in hog mode after it); the device list; dispose.
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -109,7 +110,17 @@ const until = async (f, ms) => { const end = Date.now() + ms; while (!f() && Dat
 
   e.stop();
   await sleep(500);
-  check(!e.isLoaded && !e.holdsDevice, 'stopped: nothing held');
+  if (mode === 'coreaudio-exclusive') {
+    const k = await e.client.request('state', {}, 2000);
+    check(!e.isLoaded && e.holdsDevice && k.kept === true, `stopped: the device kept (holdsDevice ${e.holdsDevice}, kept ${k.kept})`);
+    e.release();
+    await sleep(2500);   // the rate put back (one relock), hog mode released
+    const k2 = await e.client.request('state', {}, 2000);
+    const hogged = (await e.coreAudioDevices()).filter(d => d.hog_pid >= 0).map(d => d.name);
+    check(!e.holdsDevice && k2.kept === false && !hogged.length, `released: nothing held${hogged.length ? ' (' + hogged.join(', ') + ' in hog mode)' : ''}`);
+  } else {
+    check(!e.isLoaded && !e.holdsDevice, 'stopped: nothing held');
+  }
   const list = await e.listDevices();
   check(list.length > 0, 'devices: ' + list.map(d => d.name + (d.isDefault ? ' (default)' : '')).join(', '));
   const probe = await e.probeDevice(null);

@@ -15,6 +15,9 @@
 // hangs for seconds; seen by MIKU's own Core Audio output). So open() starts the IO (silent) before it
 // changes the rate or the physical format, and close() puts both back while the IO still runs, then
 // stops it and releases hog mode.
+//
+// keep_output_devices (devices.h): close() in exclusive mode then keeps the device running, silent, in hog mode,
+// and the next open() of the same device takes it over (the IO callback has no owner meanwhile).
 
 #include <atomic>
 #include <cstdint>
@@ -61,7 +64,8 @@ public:
     bool reset_requested() const override { return reset_.load(); }
     // Stops reading the ring (the device plays silence); close() releases the device.
     void stop() override;
-    // Puts back what open() changed (rate, DAC format), stops the IO, releases hog mode.
+    // Puts back what open() changed (rate, DAC format), stops the IO, releases hog mode; or keeps the device
+    // (keep_output_devices, exclusive mode).
     void close();
 
     std::vector<std::string> take_notes() override;

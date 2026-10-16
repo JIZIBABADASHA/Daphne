@@ -217,3 +217,51 @@ TEST_CASE("Core Audio: reopened at another rate right after closing (a player re
     CHECK(find(before.uid).rate == before.rate);
     CHECK(find(before.uid).hog_pid == -1);
 }
+
+TEST_CASE("Core Audio: a kept device is taken over by the next open, and put back on release", "[.coreaudio]") {
+    const auto before = find("");
+    REQUIRE_FALSE(before.uid.empty());
+    REQUIRE(before.hog_pid == -1);
+    const int want = other_rate(before);
+    if (!want) SKIP("the system output offers one rate only");
+    keep_output_devices(true);
+    std::string e;
+    {
+        CoreAudioOutput a;
+        REQUIRE(a.open({before.uid, true, 0}, want, 2, &e));
+        ByteRing ring(static_cast<size_t>(want) * 8);
+        fill_ring(ring, want);
+        std::atomic<bool> eof{true};
+        REQUIRE(a.start(&ring, &eof, &e));
+        CHECK(wait_for([&] { return a.drained(); }, 3.0));
+    }   // closed: kept, as at the end of a track
+    CHECK(output_device_kept());
+    CHECK(find(before.uid).hog_pid == getpid());   // hog mode and the rate stay
+    CHECK(find(before.uid).rate == want);
+    {
+        // the same device at the device's first rate: taken over, the rate set on it directly
+        CoreAudioOutput b;
+        REQUIRE(b.open({before.uid, true, 0}, before.rate, 2, &e));
+        bool kept_note = false;
+        for (const auto& n : b.take_notes()) {
+            UNSCOPED_INFO(n);
+            kept_note = kept_note || n.find("kept") != std::string::npos;
+        }
+        CHECK(kept_note);
+        CHECK_FALSE(output_device_kept());
+        CHECK(b.format().rate == before.rate);
+        CHECK(find(before.uid).rate == before.rate);
+        ByteRing ring(static_cast<size_t>(before.rate) * 8);
+        fill_ring(ring, before.rate);
+        std::atomic<bool> eof{true};
+        REQUIRE(b.start(&ring, &eof, &e));
+        CHECK(wait_for([&] { return b.drained(); }, 3.0));
+        CHECK(b.stats().callbacks > 0);
+    }
+    CHECK(output_device_kept());
+    CHECK(release_kept_output_device());
+    CHECK_FALSE(output_device_kept());
+    keep_output_devices(false);
+    CHECK(find(before.uid).rate == before.rate);
+    CHECK(find(before.uid).hog_pid == -1);
+}
