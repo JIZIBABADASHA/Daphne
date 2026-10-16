@@ -146,6 +146,7 @@ void Player::Impl::do_seek(double sec) {
         in_total = from;
         hist.valid_from = from;
         flushed = false;
+        tail_zeros = -1;
         xf.clear();
         auto warmed = take_warm();
         if (xf.fading || warmed) {   // a crossfade was running or warming up: the new chain takes over

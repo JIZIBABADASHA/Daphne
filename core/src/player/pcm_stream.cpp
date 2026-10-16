@@ -39,17 +39,24 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
             for (int r = rates[0].rate / 2; r >= src.rate && r % src.rate == 0; r /= 2) rates.push_back({r, 0, false});
     }
     want = requested_rate(s, src.rate);
+    auto what = [&](size_t i) {
+        return s.core == CoreMode::Dsd ? "DSD" + std::to_string(rates[i].osr) + (rates[i].native ? " (native)" : " (DoP)")
+                                       : std::to_string(rates[i].rate) + " Hz";
+    };
     for (size_t attempt = 0; attempt < rates.size(); ++attempt) {
         const bool last = attempt + 1 == rates.size();
         std::string e;
+        // the last failure is the error; one before it goes to the log, so the host sees why the next was tried
         auto fail_attempt = [&]() {
             io.dev.reset();
             if (last && error) *error = e;
+            if (!last) event("the output at " + what(attempt) + " failed (" + e + "): trying " + what(attempt + 1));
             return last;
         };
         dec->seek(from);
         in_total = from;
         flushed = false;
+        tail_zeros = -1;
         io.eof = false;
         io.pend = io.pend_off = 0;
         xf.fading = false;
@@ -302,10 +309,22 @@ bool Player::Impl::produce() {
             }
             work += Throughput::Clock::now() - t0;
         } else {
-            if (!flushed && try_gapless()) continue;   // the next track follows without a gap
+            if (!flushed && tail_zeros < 0 && try_gapless()) continue;   // the next track follows without a gap
             if (xf.fading) finish_fade();
             if (xf.carry.frames() > 0) continue;
             if (flushed) return false;
+            // the stream ends: the chain's tail first (2 x its delay of zeros, as a gapless join plays it), or the
+            // last delay's worth of music never leaves the filter
+            if (tail_zeros < 0) tail_zeros = 2 * static_cast<int64_t>(cur->content_delay()) / std::max(1, ratio) + 1;
+            if (tail_zeros > 0) {
+                const int k = static_cast<int>(std::min<int64_t>(read_frames, tail_zeros));
+                std::fill(pcm.begin(), pcm.begin() + static_cast<std::ptrdiff_t>(k) * ch, 0.0);
+                const auto tz = Throughput::Clock::now();
+                n = cur->process(pcm.data(), k, dsp.data());
+                work += Throughput::Clock::now() - tz;
+                tail_zeros -= k;
+                continue;
+            }
             flushed = true;
             const auto t1 = Throughput::Clock::now();
             n = cur->flush(dsp.data());

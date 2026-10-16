@@ -118,6 +118,7 @@ struct Player::Impl {
     int run_osr = 0;                   // dsd core: the DSD multiple the device runs
     std::vector<uint8_t> dsd_bytes;
     bool flushed = false;
+    int64_t tail_zeros = -1;           // input frames of zeros still to run through the chain at the end (-1: not begun)
     Crossfader xf;                     // a rebuilt chain fading in; the chain output carried over
     Join cross_join;                   // a gapless join through a new chain being made (cross_switch)
     History hist;                      // recent input, for a rebuilt chain's warm-up
@@ -148,7 +149,11 @@ struct Player::Impl {
     void requantize(double* frame) { fq.requantize(frame, rep.device, dch, dsdenc != nullptr); }
     // Stream input frame being heard (Timeline::heard_input).
     int64_t heard_input() const { return tl.heard_input(heard_out(), dsdf ? 0 : cur ? cur->content_delay() : 0, ratio); }
-    int64_t heard_position() const { return std::max<int64_t>(0, heard_input() - tl.track_origin_in); }
+    // (the chain's tail at the end of the stream runs past the last frame: held there)
+    int64_t heard_position() const {
+        const int64_t p = std::max<int64_t>(0, heard_input() - tl.track_origin_in);
+        return !dsdf && rep.source.frames > 0 ? std::min(p, rep.source.frames) : p;
+    }
     // The source of the track being decoded (the last switched-to one, or the heard one).
     const AudioInfo& decoding_info() const { return tl.switches.empty() ? rep.source : tl.switches.back().info; }
     // what plays now, for the change decisions (change_plan.h)

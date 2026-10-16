@@ -241,6 +241,34 @@ TEST_CASE("Player: upsampling keeps the speed and the pitch", "[player]") {
     }
 }
 
+TEST_CASE("Player: the last track plays out the filter's tail", "[player]") {
+    // a click 10 frames before the end: the filter holds it back by its delay (half the taps, linear phase), so
+    // it reaches the device only when the chain's tail is played out after the last input frame
+    for (const auto phase : {FilterPhase::Linear, FilterPhase::Minimum}) {
+        DYNAMIC_SECTION("phase " << (phase == FilterPhase::Linear ? "linear" : "minimum")) {
+            Rig r;
+            use_float_device(*r.dev);
+            auto a = std::make_shared<Signal>();
+            a->info.rate = 44100, a->info.channels = 2, a->info.frames = 44100, a->info.codec = "TEST";
+            a->x.assign(2 * 44100, 0.0);
+            a->x[2 * (44100 - 10)] = a->x[2 * (44100 - 10) + 1] = 0.5;
+            r.sources["click"] = a;
+            Settings s;
+            s.output.rate = "2x";
+            s.filter.taps = 8192;
+            s.filter.phase = phase;
+            REQUIRE(r.start("click", s));
+            r.finish();
+            CHECK(r.ended);
+            const auto y = r.dev->samples_f32();
+            double peak = 0.0;
+            for (size_t i = 0; i < y.size(); i += 2) peak = std::max(peak, static_cast<double>(std::abs(y[i])));
+            CHECK(peak > 0.2);
+            CHECK(r.player->position() == 44100);   // the end of the track, not short by the delay
+        }
+    }
+}
+
 TEST_CASE("Player: the device rate steps down when the device refuses it", "[player]") {
     Rig r;
     use_float_device(*r.dev);
@@ -257,6 +285,9 @@ TEST_CASE("Player: the device rate steps down when the device refuses it", "[pla
     const auto rep = r.finish();
     CHECK(tried == std::vector<int>{705600, 352800, 176400});
     CHECK(rep.device.rate == 176400);
+    // the refused attempts are in the log, with the driver's reason
+    CHECK(r.saw("the output at 705600 Hz failed (fake: rate 705600 refused): trying 352800 Hz"));
+    CHECK(r.saw("the output at 352800 Hz failed (fake: rate 352800 refused): trying 176400 Hz"));
     const auto y = r.dev->samples_f32();
     REQUIRE(y.size() / 2 >= 88200u);
     CHECK(frequency(y, 2, 10000, 80000, 176400) == Catch::Approx(1000.0).margin(0.5));
@@ -860,3 +891,4 @@ TEST_CASE("Player: the report says how fast the chain runs", "[player][throughpu
     CHECK(rep.realtime_factor > 1.5);   // a short filter: far faster than real time on any machine
     CHECK_FALSE(r.saw("real time (it needs"));
 }
+

@@ -52,18 +52,30 @@ bool Player::Impl::open_dsd(int64_t from, std::string* error) {
     if (caps().native_dsd && s.output.dsd != DsdMode::Dop) at.push_back({di.dsd_rate, true});
     if (s.output.dsd != DsdMode::Native) at.push_back({di.dsd_rate / 16, false});
     std::string e = at.empty() ? "output.dsd = native needs an ASIO driver with a DSD mode" : "";
-    for (const auto& a : at) {
+    auto what = [&](const Attempt& a) {
+        return "DSD" + std::to_string(multiple) + (a.native ? " (native)" : " (DoP, " + std::to_string(a.rate) + " Hz)");
+    };
+    for (size_t i = 0; i < at.size(); ++i) {
+        const Attempt& a = at[i];
+        // a failure before the last goes to the log, so the host sees why the next was tried
+        auto next = [&]() {
+            io.dev.reset();
+            if (i + 1 < at.size()) event("the output at " + what(a) + " failed (" + e + "): trying " + what(at[i + 1]));
+        };
         io.dev = open_output({out, s.output.buffer_ms, a.rate, di.channels, a.native}, &e);
-        if (!io.dev) continue;
+        if (!io.dev) {
+            next();
+            continue;
+        }
         if (io.dev->format().rate != a.rate || io.dev->format().channels != di.channels) {
             e = "the device locked " + describe(io.dev->format()) + " instead of " + std::to_string(a.rate) + " Hz, " +
                 std::to_string(di.channels) + " ch";
-            io.dev.reset();
+            next();
             continue;
         }
         dsdenc = std::make_unique<DsdEncoder>();
         if (!dsdenc->init_direct(di.dsd_rate, io.dev->format(), a.native ? DsdTransport::Native : DsdTransport::Dop, &e)) {
-            io.dev.reset();
+            next();
             continue;
         }
         rep.device = io.dev->format();
@@ -95,7 +107,7 @@ bool Player::Impl::open_dsd(int64_t from, std::string* error) {
         io.dev->set_dop(dsdenc->dop());
         io.dev->set_paused(want_pause.load());
         if (!io.dev->start(io.ring.get(), &io.eof, &e)) {
-            io.dev.reset();
+            next();
             continue;
         }
         rep.chain.clear();
