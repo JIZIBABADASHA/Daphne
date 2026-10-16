@@ -241,6 +241,45 @@ TEST_CASE("Player: upsampling keeps the speed and the pitch", "[player]") {
     }
 }
 
+TEST_CASE("Player: only the music is played, not the filter's delay around it", "[player]") {
+    // clicks in the middle and 10 frames before the end. The filter holds the signal back by its delay (half the
+    // taps, linear phase): the start drops it, so the middle click is heard right at its own time, and the end runs
+    // zeros through the filter until the last click is out, and no further (its ringing after that is cut)
+    for (const auto phase : {FilterPhase::Linear, FilterPhase::Minimum}) {
+        DYNAMIC_SECTION("phase " << (phase == FilterPhase::Linear ? "linear" : "minimum")) {
+            Rig r;
+            use_float_device(*r.dev);
+            auto a = std::make_shared<Signal>();
+            a->info.rate = 44100, a->info.channels = 2, a->info.frames = 44100, a->info.codec = "TEST";
+            a->x.assign(2 * 44100, 0.0);
+            for (const int at : {22050, 44100 - 10}) a->x[2 * at] = a->x[2 * at + 1] = 0.5;
+            r.sources["click"] = a;
+            Settings s;
+            s.output.rate = "2x";
+            s.filter.taps = 8192;
+            s.filter.phase = phase;
+            REQUIRE(r.start("click", s));
+            r.finish();
+            CHECK(r.ended);
+            const auto y = r.dev->samples_f32();
+            const size_t frames = y.size() / 2;
+            auto peak_in = [&](size_t from, size_t to) {
+                size_t at = from;
+                for (size_t i = from; i < std::min(to, frames); ++i)
+                    if (std::abs(y[2 * i]) > std::abs(y[2 * at])) at = i;
+                return at;
+            };
+            const size_t mid = peak_in(0, 66150), end = peak_in(66150, frames);
+            CHECK(mid == 44100);   // 22050 x 2: no delay before the music
+            CHECK(end == 88180);   // (44100 - 10) x 2: the last click is played
+            CHECK(std::abs(y[2 * end]) > 0.2);
+            CHECK(frames >= 88200u);
+            CHECK(frames <= static_cast<size_t>(88200 + 2 + 2 * r.dev->buffer_frames));   // no ringing tail on top
+            CHECK(r.player->position() == 44100);   // the end of the track
+        }
+    }
+}
+
 TEST_CASE("Player: the device rate steps down when the device refuses it", "[player]") {
     Rig r;
     use_float_device(*r.dev);
@@ -257,6 +296,9 @@ TEST_CASE("Player: the device rate steps down when the device refuses it", "[pla
     const auto rep = r.finish();
     CHECK(tried == std::vector<int>{705600, 352800, 176400});
     CHECK(rep.device.rate == 176400);
+    // the refused attempts are in the log, with the driver's reason
+    CHECK(r.saw("the output at 705600 Hz failed (fake: rate 705600 refused): trying 352800 Hz"));
+    CHECK(r.saw("the output at 352800 Hz failed (fake: rate 352800 refused): trying 176400 Hz"));
     const auto y = r.dev->samples_f32();
     REQUIRE(y.size() / 2 >= 88200u);
     CHECK(frequency(y, 2, 10000, 80000, 176400) == Catch::Approx(1000.0).margin(0.5));
@@ -860,3 +902,4 @@ TEST_CASE("Player: the report says how fast the chain runs", "[player][throughpu
     CHECK(rep.realtime_factor > 1.5);   // a short filter: far faster than real time on any machine
     CHECK_FALSE(r.saw("real time (it needs"));
 }
+

@@ -57,7 +57,9 @@
 - [x] 其他程式改取樣率：共享時在原位置以新的取樣率重開；獨佔時 macOS 拒絕其他程序的變更（`'!hog'`），照常播完（N24「驗證」）。
 - [x] 共享模式的取樣率轉換（分支 `coreaudio-shared-src`）：裝置取樣率不是要求值的整數倍時（48 k 在 44.1 kHz 的裝置上），原本直接失敗；改成輸出在 IO 回呼裡用 `AudioConverter` 轉換，與 WASAPI 共享的 `AUTOCONVERTPCM` 相同。順便修正共享模式回報 bit-perfect 的問題（Windows 的 WASAPI 共享也一樣）：改回報「shared mode (system mixer)」。
 - [ ] 外接 DAC 剩下的驗證：bit-perfect 錄音比對（需要 loopback 裝置，例如 BlackHole；安裝要管理員權限，等使用者安裝）、播放中拔除 DAC（要有人在機器旁拔線，之後再做）。
-- [ ] 外殼 `probeDevice(null)` 在停止後的頭 1–3 秒會讀到內建輸出（獨佔時 macOS 把系統輸出移走，放掉後才移回）：可改成沿用最後一次播放的裝置，或在外殼裡也套用 core 的「剛放掉的系統輸出」規則。只影響顯示。
+- [ ] 外殼 `probeDevice(null)` 在停止後的頭 1–3 秒會讀到內建輸出（獨佔時 macOS 把系統輸出移走，放掉後才移回）：可改成沿用最後一次播放的裝置，或在外殼裡也套用 core 的「剛放掉的系統輸出」規則。只影響顯示：core 開裝置時已套用該規則，停止後馬上播下一首仍送到 DAC。只有 macOS 有這個現象（Windows 的 WASAPI 獨佔不會更改預設輸出，ASIO 與預設裝置無關）。暫緩：等 MIKU 介面內的整合測試（7d）時，真的看到顯示閃一下再處理。`verify/miku_shell.js` 偶爾在停止後讀到 88.2 kHz 也是同一件事（查過，不是 bug）：外殼的 `stop()` 送出就不等回覆，0.5 s 後的 probe 讀到的是還沒關完的裝置。helper 的 `stop` 平常 0.84 s（USB DAC 在 IO 運轉中改回取樣率約 0.83 s，內建輸出約 0.33 s）。如果剛送了要換取樣率的 `apply` 就馬上 stop，stop 要 1.7 s：從時間看，是 stop 等那次重開先把排隊的聲音放完、淡出（`restart()` 的 drain，約 0.7 s），再加上還原取樣率的 0.84 s。最後取樣率都正確還原、hog 也放掉（每 10 ms 監看確認）。
+- [x] 只播放音樂，不播濾波器延遲（分支 `fix-track-end-tail`）：濾波器把整段訊號延後一個延遲（linear phase 約 taps 的一半：8192 taps 約 0.09 s，1048576 taps、intermediate 約 8 s）。原本開頭先播一段延遲（無聲），結尾只 `flush()` 剩下的輸入，最後一首（或不接續的下一首）少了一個延遲長度的音樂；1M taps 播 6 s 的檔，整首音樂都沒播出來（CLI「last position 0 s」）。所有平台都有。改成開頭丟掉延遲（開始、跳轉、重開），結尾送零到最後一個輸入樣本出來為止（它之後的餘振不播），輸出長度等於原曲 × 倍率。
+- [x] 開裝置時中間失敗的嘗試寫進 log（同一分支）：PCM 的取樣率逐級下降、DSD 的原生 → DoP → 較低倍率，非最後一次失敗時送事件「the output at … failed (原因): trying …」，原本只有最後一次的錯誤。
 - [ ] 換曲時保留裝置（之後）：現在每次重開裝置都先還原再設定取樣率（跨取樣率的下一首多一次 DAC 重新鎖定，約 0.5–1 s）；MIKU 的作法是保留裝置一段時間、同一台裝置直接改取樣率。
 
 **7b. 排程（不改程式，量測結果記在實作筆記）✅**
@@ -121,7 +123,7 @@
 **步驟 7b（排程的量測）**
 
 - Intel Mac（i5-4308U，2 核 4 執行緒）、Core Audio 獨佔、48 k → 96 k、1048576 taps、double-double（無負載時 2.5 倍即時），另外開 4 個 `yes` 把 CPU 吃滿，各跑兩次：time-constraint（現在的作法）2.55 / 2.74 倍即時，QoS user-interactive 1.85 / 2.02 倍；underrun 都是 0，最長回呼間隔都在 16–26 ms。time-constraint 沒有因為超過宣告的計算時間而變慢，反而在滿載下拿到更多 CPU，所以維持不變（`WorkerPool` 的 worker 一樣）。實驗用環境變數切換，只在 Mac 上編譯，沒有進 repo。
-- 順帶看到：1048576 taps 時 CLI 結尾的「last position」是 0 s（262144 taps 時 3.8 s），應該是濾波器延遲比整首還長時位置被截成 0，與 Core Audio 無關，待查。
+- 順帶看到：1048576 taps 時 CLI 結尾的「last position」是 0 s（262144 taps 時 3.8 s）。→ 不只是顯示：最後一首的結尾少了一個濾波器延遲長度的音樂，已修正（見「只播放音樂，不播濾波器延遲」）。
 
 **步驟 7c（`mac-helper`）**
 
@@ -147,3 +149,12 @@
 - DSD 檔在共享模式轉 PCM 時，`core.cpp` 用輸出回報的取樣率決定 DSD → PCM 的取樣率：44.1 kHz 的裝置仍是 44.1 k（整數倍），48 kHz 的裝置會拿到 176.4 k，再由轉換器轉成 48 k（之前會失敗）。
 - bit-perfect 的判斷原本不看共享模式（`Report::bit_perfect`），Windows 的 WASAPI 共享也回報 yes；MIKU 的頁面自己判斷品質（共享一律是 high），所以畫面沒錯，只有 CLI 與 report 錯。Windows 擴充的 `DaphnePath.cs` 用 `bit_perfect` 判斷「64-bit 浮點轉成裝置的浮點格式，數值不變」，原因是共享模式時也視為數值不變（交給混音器的樣本本身沒變）。
 - 其他程式改取樣率的測試工具：在 Mac 上編一個小程式，用 `kAudioDevicePropertyNominalSampleRate` 改取樣率（與「音訊 MIDI 設定」相同的方式），播放中執行。
+
+**只播放音樂，不播濾波器延遲（`fix-track-end-tail`）**
+
+- 重採樣器輸入 N 個樣本只輸出 N × 倍率個（`test_resampler.cpp`），輸出第 j 個是輸入時間 (j − (L − 1) / 2) / 倍率；`flush()` 只算完還沒滿一個區塊的輸入。gapless 接續（`join_produce`）本來就先送 2 倍延遲的零（上一首的餘振與下一首疊在一起，維持不變），只有串流真正結束時漏了。
+- 測試：結尾前 10 個樣本放一個脈衝，2x、8192 taps，linear 與 minimum phase 修正前都沒有出現在輸出（峰值 1e-11 / 1e-14），位置停在 40004 / 44079（應為 44100）。
+- 第一版照 gapless 送 2 倍延遲的零：1M taps 的 6 s 檔播了約 22 s（開頭約 8 s 延遲、結尾約 8 s 餘振）。改成只播音樂，與 r8brain 的作法相同（處理器自己吃掉起始延遲）：開頭丟掉鏈輸出的前 `content_delay` 個 frame（`skip_out`，`abs_out` 照算，位置、gapless 與 crossfade 的對齊都不變），結尾送 ⌈延遲 / 倍率⌉ 個零。Mac 上 1M taps 的 6 s 檔輸出 576001 frames（96 kHz 的 6.00 s）。
+- 測試：中間的脈衝剛好在輸出 44100（22050 × 2），結尾的在 88180，總長不超過 88200 加裝置緩衝；linear 與 minimum phase。
+- 跳轉時鏈先 `reset()`，所以跳轉點之後約半個濾波器長度的輸出只用到跳轉點之後的樣本（原本也是如此，只是前面多一段延遲）。
+- 補零開始後不再接 gapless 的下一首（`tail_zeros` ≥ 0），以免同一段尾巴被送兩次。

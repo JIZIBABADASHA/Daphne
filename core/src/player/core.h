@@ -118,6 +118,11 @@ struct Player::Impl {
     int run_osr = 0;                   // dsd core: the DSD multiple the device runs
     std::vector<uint8_t> dsd_bytes;
     bool flushed = false;
+    // Only the music is played, not the filter's delay around it: at the start (open, seek) the chain's first
+    // content-delay frames are dropped (counted in abs_out as if heard), at the end the zeros bring out the last
+    // input frame and no more (its ringing after that is cut).
+    int64_t skip_out = 0;              // chain output frames still to drop at the start
+    int64_t tail_zeros = -1;           // input frames of zeros still to run through the chain at the end (-1: not begun)
     Crossfader xf;                     // a rebuilt chain fading in; the chain output carried over
     Join cross_join;                   // a gapless join through a new chain being made (cross_switch)
     History hist;                      // recent input, for a rebuilt chain's warm-up
@@ -148,7 +153,11 @@ struct Player::Impl {
     void requantize(double* frame) { fq.requantize(frame, rep.device, dch, dsdenc != nullptr); }
     // Stream input frame being heard (Timeline::heard_input).
     int64_t heard_input() const { return tl.heard_input(heard_out(), dsdf ? 0 : cur ? cur->content_delay() : 0, ratio); }
-    int64_t heard_position() const { return std::max<int64_t>(0, heard_input() - tl.track_origin_in); }
+    // (the chain's tail at the end of the stream runs past the last frame: held there)
+    int64_t heard_position() const {
+        const int64_t p = std::max<int64_t>(0, heard_input() - tl.track_origin_in);
+        return !dsdf && rep.source.frames > 0 ? std::min(p, rep.source.frames) : p;
+    }
     // The source of the track being decoded (the last switched-to one, or the heard one).
     const AudioInfo& decoding_info() const { return tl.switches.empty() ? rep.source : tl.switches.back().info; }
     // what plays now, for the change decisions (change_plan.h)
@@ -169,6 +178,8 @@ struct Player::Impl {
     void check_switch();
     // Chain frame being heard (the device's queue counted back from abs_out).
     int64_t heard_out() const;
+    // Drops what is left of skip_out from the front of the n frames in dsp; the frames that remain.
+    int drop_start(int n);
     // The device's upkeep (OutputSession::upkeep); a driver that asks to be opened again gets reopened,
     // resuming where it was.
     bool service_device();

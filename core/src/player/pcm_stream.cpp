@@ -39,17 +39,24 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
             for (int r = rates[0].rate / 2; r >= src.rate && r % src.rate == 0; r /= 2) rates.push_back({r, 0, false});
     }
     want = requested_rate(s, src.rate);
+    auto what = [&](size_t i) {
+        return s.core == CoreMode::Dsd ? "DSD" + std::to_string(rates[i].osr) + (rates[i].native ? " (native)" : " (DoP)")
+                                       : std::to_string(rates[i].rate) + " Hz";
+    };
     for (size_t attempt = 0; attempt < rates.size(); ++attempt) {
         const bool last = attempt + 1 == rates.size();
         std::string e;
+        // the last failure is the error; one before it goes to the log, so the host sees why the next was tried
         auto fail_attempt = [&]() {
             io.dev.reset();
             if (last && error) *error = e;
+            if (!last) event("the output at " + what(attempt) + " failed (" + e + "): trying " + what(attempt + 1));
             return last;
         };
         dec->seek(from);
         in_total = from;
         flushed = false;
+        tail_zeros = -1;
         io.eof = false;
         io.pend = io.pend_off = 0;
         xf.fading = false;
@@ -148,6 +155,7 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
         dch = rep.device.channels;
         io.block = rep.device.block_align();
         tl.abs_out = from * ratio;
+        skip_out = cur->content_delay();
         xf.set_channels(dch);
         io.ring = std::make_unique<ByteRing>(io.ring_bytes(rep.device.frame_rate()));
         dsp.assign(static_cast<size_t>(cur->max_output_frames()) * dch, 0.0);
@@ -270,48 +278,64 @@ bool Player::Impl::produce() {
     Throughput::Clock::duration work{};
     bool carried = false;
     int n = 0;
-    while (n == 0) {
-        if (!xf.fading && xf.carry.frames() > 0) {
-            n = std::min(xf.carry.frames(), static_cast<int>(dsp.size() / dch));
-            std::copy(xf.carry.data(), xf.carry.data() + static_cast<size_t>(n) * dch, dsp.begin());
-            xf.carry.pop(n);
-            carried = true;
-            break;
-        }
-        if (cross_join.active()) {
-            // both chains' work (Throughput; it also reads the next track, a small overcount)
-            const auto tj = Throughput::Clock::now();
-            n = join_produce();
-            work += Throughput::Clock::now() - tj;
-            continue;   // (0: the join is over, its last frames are in the carry)
-        }
-        const int got = dec->read(pcm.data(), read_frames);
-        const auto t0 = Throughput::Clock::now();
-        if (got > 0) {
-            hist.store(pcm.data(), got, in_total);
-            in_total += got;
-            if (!xf.fading) {
-                n = cur->process(pcm.data(), got, dsp.data());
-            } else {
-                const int a = cur->process(pcm.data(), got, tmp_c.data());
-                xf.fc.push(tmp_c.data(), a);
-                const int b = xf.next->process(pcm.data(), got, tmp_n.data());
-                xf.push_next(tmp_n.data(), b);
-                n = xf.mix(dsp.data(), static_cast<int>(dsp.size() / dch), fq, rep.device, dsdenc != nullptr);
-                if (xf.pos >= xf.len) finish_fade();
+    for (;;) {
+        while (n == 0) {
+            if (!xf.fading && xf.carry.frames() > 0) {
+                n = std::min(xf.carry.frames(), static_cast<int>(dsp.size() / dch));
+                std::copy(xf.carry.data(), xf.carry.data() + static_cast<size_t>(n) * dch, dsp.begin());
+                xf.carry.pop(n);
+                carried = true;
+                break;
             }
-            work += Throughput::Clock::now() - t0;
-        } else {
-            if (!flushed && try_gapless()) continue;   // the next track follows without a gap
-            if (xf.fading) finish_fade();
-            if (xf.carry.frames() > 0) continue;
-            if (flushed) return false;
-            flushed = true;
-            const auto t1 = Throughput::Clock::now();
-            n = cur->flush(dsp.data());
-            work += Throughput::Clock::now() - t1;
-            if (n == 0) return false;
+            if (cross_join.active()) {
+                // both chains' work (Throughput; it also reads the next track, a small overcount)
+                const auto tj = Throughput::Clock::now();
+                n = join_produce();
+                work += Throughput::Clock::now() - tj;
+                continue;   // (0: the join is over, its last frames are in the carry)
+            }
+            const int got = dec->read(pcm.data(), read_frames);
+            const auto t0 = Throughput::Clock::now();
+            if (got > 0) {
+                hist.store(pcm.data(), got, in_total);
+                in_total += got;
+                if (!xf.fading) {
+                    n = cur->process(pcm.data(), got, dsp.data());
+                } else {
+                    const int a = cur->process(pcm.data(), got, tmp_c.data());
+                    xf.fc.push(tmp_c.data(), a);
+                    const int b = xf.next->process(pcm.data(), got, tmp_n.data());
+                    xf.push_next(tmp_n.data(), b);
+                    n = xf.mix(dsp.data(), static_cast<int>(dsp.size() / dch), fq, rep.device, dsdenc != nullptr);
+                    if (xf.pos >= xf.len) finish_fade();
+                }
+                work += Throughput::Clock::now() - t0;
+            } else {
+                if (!flushed && tail_zeros < 0 && try_gapless()) continue;   // the next track follows without a gap
+                if (xf.fading) finish_fade();
+                if (xf.carry.frames() > 0) continue;
+                if (flushed) return false;
+                // the stream ends: zeros until the last input frame is out of the filter (its content delay), or the
+                // last delay's worth of music never leaves it
+                if (tail_zeros < 0) tail_zeros = (static_cast<int64_t>(cur->content_delay()) + ratio - 1) / std::max(1, ratio);
+                if (tail_zeros > 0) {
+                    const int k = static_cast<int>(std::min<int64_t>(read_frames, tail_zeros));
+                    std::fill(pcm.begin(), pcm.begin() + static_cast<std::ptrdiff_t>(k) * ch, 0.0);
+                    const auto tz = Throughput::Clock::now();
+                    n = cur->process(pcm.data(), k, dsp.data());
+                    work += Throughput::Clock::now() - tz;
+                    tail_zeros -= k;
+                    continue;
+                }
+                flushed = true;
+                const auto t1 = Throughput::Clock::now();
+                n = cur->flush(dsp.data());
+                work += Throughput::Clock::now() - t1;
+                if (n == 0) return false;
+            }
         }
+        n = drop_start(n);   // the filter's delay at the start
+        if (n > 0) break;
     }
     const auto t2 = Throughput::Clock::now();
     if (ramp_in_left > 0) {
@@ -348,6 +372,15 @@ bool Player::Impl::produce() {
     tl.abs_out += n;
     rep.frames_played += n;
     return true;
+}
+
+int Player::Impl::drop_start(int n) {
+    if (skip_out <= 0 || n <= 0) return n;
+    const int d = static_cast<int>(std::min<int64_t>(skip_out, n));
+    std::copy(dsp.begin() + static_cast<std::ptrdiff_t>(d) * dch, dsp.begin() + static_cast<std::ptrdiff_t>(n) * dch, dsp.begin());
+    skip_out -= d;
+    tl.abs_out += d;
+    return n - d;
 }
 
 std::unique_ptr<Decoder> Player::Impl::open_source(const std::filesystem::path& file, const Settings& st, std::string* e) {
