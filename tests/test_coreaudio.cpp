@@ -116,21 +116,46 @@ TEST_CASE("Core Audio: exclusive takes hog mode and the rate, and puts both back
     CHECK(after.hog_pid == -1);
 }
 
-TEST_CASE("Core Audio: shared keeps the device's rate and no hog mode", "[.coreaudio]") {
+TEST_CASE("Core Audio: shared keeps the device's rate and takes no hog mode", "[.coreaudio]") {
     const auto before = find("");
     REQUIRE_FALSE(before.uid.empty());
     const int want = other_rate(before);
     CoreAudioOutput o;
     std::string e;
     REQUIRE(o.open({before.uid, false, 0}, want ? want : before.rate, 2, &e));
-    CHECK(o.format().rate == before.rate);
-    CHECK(o.matches_request() == (!want || want == before.rate));
+    // the device rate when it is a whole multiple of the request (the player's chain upsamples), else the request (converted)
+    const bool multiple = !want || (before.rate >= want && before.rate % want == 0);
+    CHECK(o.format().rate == (multiple ? before.rate : want));
+    CHECK(o.matches_request() == (!want || want == before.rate || !multiple));
+    CHECK(find(before.uid).rate == before.rate);
     CHECK(find(before.uid).hog_pid == -1);
-    ByteRing ring(static_cast<size_t>(before.rate) * 8);
-    fill_ring(ring, before.rate);
+    ByteRing ring(static_cast<size_t>(o.format().rate) * 8);
+    fill_ring(ring, o.format().rate);
     std::atomic<bool> eof{true};
     REQUIRE(o.start(&ring, &eof, &e));
     CHECK(wait_for([&] { return o.drained(); }, 3.0));
+    o.close();
+    CHECK(find(before.uid).rate == before.rate);
+}
+
+TEST_CASE("Core Audio: shared converts a rate the device rate is no whole multiple of", "[.coreaudio]") {
+    const auto before = find("");
+    REQUIRE_FALSE(before.uid.empty());
+    const int want = before.rate % 44100 == 0 ? 48000 : 44100;   // the other family: never a whole multiple
+    CoreAudioOutput o;
+    std::string e;
+    REQUIRE(o.open({before.uid, false, 0}, want, 2, &e));
+    bool noted = false;
+    for (const auto& n : o.take_notes()) noted |= n.find("converts") != std::string::npos;
+    CHECK(noted);
+    CHECK(o.format().rate == want);
+    CHECK(o.matches_request());
+    ByteRing ring(static_cast<size_t>(want) * 8);
+    fill_ring(ring, want);
+    std::atomic<bool> eof{true};
+    REQUIRE(o.start(&ring, &eof, &e));
+    CHECK(wait_for([&] { return o.drained(); }, 3.0));
+    CHECK(o.stats().underruns == 0);
     o.close();
     CHECK(find(before.uid).rate == before.rate);
 }

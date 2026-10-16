@@ -76,6 +76,7 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
         }
         rep.device = io.dev->format();
         rep.device_name = io.dev->device_name();
+        report.shared_mix = caps().shared_mix;
         rep.latency_ms = io.dev->latency_ms();
         io.note_buffer_fallback(report, s.output.buffer_ms);
         if (auto rates_ok = io.dev->supported_rates(); !rates_ok.empty()) report.set_asio_rates(std::move(rates_ok));

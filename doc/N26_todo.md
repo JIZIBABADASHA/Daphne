@@ -50,10 +50,14 @@
   - hog 住的裝置只在運轉中改設定：`open()` 先啟動 IO（靜音）再改取樣率與格式，`close()` 在 IO 運轉中還原，最後才停止 IO、放掉 hog；
   - 裝置拔除（`failed()`）、外部改取樣率（`reset_requested()`）的通知。
 - [x] `output.api` 加上 `coreaudio_exclusive` / `coreaudio_shared`，預設是平台的獨佔輸出（`kDefaultOutputApi`）；CLI 的 `--shared` / `--exclusive` 跟著平台。
-- [x] DSD 只走 DoP（macOS 沒有原生 DSD 的 API）：裝置格式是 `int24-in-32`，DoP 照常寫入，回呼精確轉成 float32。（程式完成；實機驗證要外接 DAC，見下）
+- [x] DSD 只走 DoP（macOS 沒有原生 DSD 的 API）：裝置格式是 `int24-in-32`，DoP 照常寫入，回呼精確轉成 float32。（外接 DAC 上 DSD64 / DSD128 確認，DAC 顯示 D64 / D128）
 - [x] 裝置列舉：`list_coreaudio_devices()`、`daphne devices`、C API `dc_devices` 的 `coreaudio` 陣列。
 - [x] 實機驗證（Intel Mac、macOS 11.7、內建輸出）：隱藏測試 `[.coreaudio]` 3 個、CLI 跨取樣率連播、升頻、兩個程序搶裝置（N24「驗證」）。
-- [ ] 外接 DAC 驗證：bit-perfect 錄音比對（需要 loopback 裝置，例如 BlackHole）、DoP（DSD64 需要 176.4 kHz，內建輸出最高 96 kHz）、拔除 DAC、其他程式改取樣率。
+- [x] 外接 DAC 驗證（USB DAC，44.1–384 kHz、DSD128）：隱藏測試 4 個、CLI 44.1–384 kHz 連播 bit-perfect、`auto` 升頻到 352.8 kHz、DoP DSD64 / DSD128（DAC 顯示 D64 / D128）、`miku_shell.js` 獨佔 / 共享、`helper.py`，全部通過（N24「驗證」）。
+- [x] 其他程式改取樣率：共享時在原位置以新的取樣率重開；獨佔時 macOS 拒絕其他程序的變更（`'!hog'`），照常播完（N24「驗證」）。
+- [x] 共享模式的取樣率轉換（分支 `coreaudio-shared-src`）：裝置取樣率不是要求值的整數倍時（48 k 在 44.1 kHz 的裝置上），原本直接失敗；改成輸出在 IO 回呼裡用 `AudioConverter` 轉換，與 WASAPI 共享的 `AUTOCONVERTPCM` 相同。順便修正共享模式回報 bit-perfect 的問題（Windows 的 WASAPI 共享也一樣）：改回報「shared mode (system mixer)」。
+- [ ] 外接 DAC 剩下的驗證：bit-perfect 錄音比對（需要 loopback 裝置，例如 BlackHole；安裝要管理員權限，等使用者安裝）、播放中拔除 DAC（要有人在機器旁拔線，之後再做）。
+- [ ] 外殼 `probeDevice(null)` 在停止後的頭 1–3 秒會讀到內建輸出（獨佔時 macOS 把系統輸出移走，放掉後才移回）：可改成沿用最後一次播放的裝置，或在外殼裡也套用 core 的「剛放掉的系統輸出」規則。只影響顯示。
 - [ ] 換曲時保留裝置（之後）：現在每次重開裝置都先還原再設定取樣率（跨取樣率的下一首多一次 DAC 重新鎖定，約 0.5–1 s）；MIKU 的作法是保留裝置一段時間、同一台裝置直接改取樣率。
 
 **7b. 排程（不改程式，量測結果記在實作筆記）✅**
@@ -65,7 +69,7 @@
 - [x] 一個執行檔，stdin / stdout 每行一個 JSON（與 MIKU 的 `miku-audio` 相同的模式），由 JS 外殼啟動（`helper/main.cpp`，`daphne-helper`，協定見 N4）。掛掉時重啟並接回原本的位置是 JS 外殼的事（7d）。
 - [x] 讓出與取回裝置（A 方案必需）：Mac MIKU 播 YouTube Music、或 MIKU 不在前景且沒有播放時，會檢查 engine 的 `holdsDevice`，呼叫 `stop({ release: true })` 或 `releaseDevice()`；Daphne 要完全放開裝置（還原取樣率與格式、放掉 hog，7a 的 `close()` 已經做到），下一首曲庫的歌再取回。對照 MIKU 的 `native-audio.js`。→ helper 的 `stop` 就是讓出（`verify/helper.py` 在 Mac 上確認 stop 之後沒有裝置被 hog、取樣率還原），下一次 `load` 取回；`holdsDevice` 由 JS 外殼依載入 / 暫停狀態回答（7d）。
 
-**7d. MIKU 的 Mac 外殼（分支 `mac-shell`）**
+**7d. MIKU 的 Mac 外殼（分支 `mac-shell`，PR #22）✅**
 
 - [x] `miku/extension.js`（MIKU 從 `Extensions/<名稱>/miku/` 載入，提供 `core.createEngine`），外殼回報 `supportsLive = false`。不需要改 MIKU。移植自 Windows 擴充（`DaphneExtension.cs`、`DaphneEngine.cs`、`DaphneOptions.cs`、`DaphnePath.cs`），底下是 helper；頁面檔案共用（`miku/web` symlink）。helper 掛掉時重新啟動並從原位置繼續（一分鐘最多 3 次）。
 - [x] 驗證：Intel Mac（macOS 11）上用模擬 MIKU 的腳本測 helper、讓出 / 取回裝置。（`verify/miku_shell.js`，獨佔與共享都全部通過）
@@ -136,3 +140,10 @@
 - 頁面檔案：MIKU 的載入器只讀模組資料夾下的 `web/`，而且只允許那個資料夾裡的檔案；`miku/web` 是 git 的 symlink（mode 120000），macOS / Linux checkout 時是真的 symlink，Windows（`core.symlinks=false`）是一個內容為路徑的文字檔，Windows 擴充不用它。MIKU 的 Mac 安裝包要把它展開成實際的檔案（之後打包時處理）。
 - Mac 上用免安裝的 Node 20（`~/daphne-test/tools`）跑測試；MIKU 本身（Electron 44）需要 macOS 12，介面內的整合測試仍待新的 Mac。
 
+**DAC 驗證後的修正（`coreaudio-shared-src`）**
+
+- 共享模式失敗的原因：WASAPI 共享在取樣率不同時請 Windows 轉換（`AUTOCONVERTPCM`），播放器從來不會遇到非整數倍；Core Audio 的 IOProc 直接寫裝置，必須是裝置的取樣率，而播放器的鏈只會整數倍升頻（`chain.cpp`「not an integer multiple」）。之前的共享測試都用 44.1 k 的檔案，所以沒發現。
+- 只有非整數倍才交給 `AudioConverter`：整數倍仍由 Daphne 自己的升頻濾波器做（品質較好，這是 Mac 與 Windows 不同的地方：WASAPI 共享只要取樣率不同就交給 Windows）。轉換器在 IO 回呼裡向環要資料（`conv_input`，一次最多 `tmp_frames`），建立與配置都在 `open()`，回呼裡不配置記憶體。
+- DSD 檔在共享模式轉 PCM 時，`core.cpp` 用輸出回報的取樣率決定 DSD → PCM 的取樣率：44.1 kHz 的裝置仍是 44.1 k（整數倍），48 kHz 的裝置會拿到 176.4 k，再由轉換器轉成 48 k（之前會失敗）。
+- bit-perfect 的判斷原本不看共享模式（`Report::bit_perfect`），Windows 的 WASAPI 共享也回報 yes；MIKU 的頁面自己判斷品質（共享一律是 high），所以畫面沒錯，只有 CLI 與 report 錯。Windows 擴充的 `DaphnePath.cs` 用 `bit_perfect` 判斷「64-bit 浮點轉成裝置的浮點格式，數值不變」，原因是共享模式時也視為數值不變（交給混音器的樣本本身沒變）。
+- 其他程式改取樣率的測試工具：在 Mac 上編一個小程式，用 `kAudioDevicePropertyNominalSampleRate` 改取樣率（與「音訊 MIDI 設定」相同的方式），播放中執行。

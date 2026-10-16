@@ -702,6 +702,16 @@ TEST_CASE("Player: the output's caps decide the DSD path, not its API", "[player
         CHECK_FALSE(r.start("sine", s));
         CHECK(r.dev->opens.empty());
     }
+    SECTION("a shared mixer is never bit-perfect, though the samples it gets are") {
+        Rig r;
+        r.caps.shared_mix = true;
+        r.sources["a"] = int24_noise(44100, 2, 44100 / 5, 1);
+        REQUIRE(r.start("a", Settings{}));
+        const auto rep = r.finish();
+        CHECK(rep.chain.empty());
+        CHECK_FALSE(rep.bit_perfect);
+        CHECK(rep.not_bit_perfect_reason == "shared mode (system mixer)");
+    }
 }
 
 TEST_CASE("Crossfader: a warm-up in rounds starts the same crossfade as one warm-up", "[player][crossfade]") {

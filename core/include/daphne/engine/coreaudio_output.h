@@ -6,7 +6,9 @@
 //     exclusive mode the DAC's physical format is an integer one of at least 24 bits, so the HAL's
 //     float → integer conversion is exact too: PCM up to 24 bits and DoP reach the DAC unchanged
 //   - exclusive: the device rate is set to the request when the device offers it; shared: the device
-//     runs at its own rate (the system mixer's), as WASAPI shared
+//     runs at its own rate (the system mixer's), as WASAPI shared. A request the player's chain cannot
+//     reach by a whole factor from there (48 kHz on a 44.1 kHz device) is converted to the device rate
+//     in the callback by Core Audio's converter, as Windows does for WASAPI shared
 //
 // A device held in hog mode is only changed while its IO runs: a rate change on a stopped device in hog
 // mode, followed by releasing hog mode, leaves the process unable to start IO on it (AudioDeviceStart
@@ -40,7 +42,8 @@ public:
 
     // Opens the device and starts its IO (silent until start()). Exclusive: the rate requested when the
     // device offers it, else the same family's highest rate below it, else the device's highest rate
-    // (matches_request() false then). Shared: the device's current rate.
+    // (matches_request() false then). Shared: the device's current rate, or the request when the device
+    // rate is not a whole multiple of it (the output converts).
     bool open(const CoreAudioOptions& opt, int rate, int channels, std::string* error);
     const DeviceFormat& format() const override { return fmt_; }
     bool matches_request() const override { return matched_; }
