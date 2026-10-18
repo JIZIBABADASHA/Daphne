@@ -182,6 +182,9 @@ class DaphneEngine extends EventEmitter {
 
   // ───────────── transport ─────────────
   settingsFor(t) { return SM.build(this.host, this.s, this.opts, t); }
+  /** How a DSD file goes out: DoP or PCM, and MIKU's DAC 最高 DSD. */
+  dsdKey(t) { const o = this.settingsFor(t).output; return o.dsd + '|' + o.max_dsd; }
+  isDsdFile(t) { return !!(this.report && this.report.source && this.report.source.dsd_rate > 0) || /\.(dsf|dff)$/i.test(t.path || ''); }
 
   async load(t, pos, play) {
     this.loadFailed = false; this.lastFailureWasDevice = false;
@@ -196,7 +199,7 @@ class DaphneEngine extends EventEmitter {
     if (epoch !== this.loadEpoch) return;   // a newer load took its place
     this.loading = false;
     if (!r.ok) return this.fail(r.code, r.error || '');
-    this.loaded = true; this.playing = !!play; this.pos = pos || 0;
+    this.loaded = true; this.playing = !!play; this.pos = pos || 0; this.loadedDsd = this.dsdKey(t);
     await this.refreshReport();
     this.signal = this.buildSignal();
     this.queueNext();
@@ -288,6 +291,10 @@ class DaphneEngine extends EventEmitter {
 
   /** Output mode / device changed (AudioEngine.reconfigure): the core reopens the device where it was. */
   async applyOutput() {
+    // a DSD file: the core picks DoP or PCM (and the DSD limit) only when it loads the file, so a new choice loads it
+    // again where it was (an in-place apply would reopen the device on the same path)
+    const t = this.track;
+    if (this.loaded && t && this.isDsdFile(t) && this.loadedDsd !== this.dsdKey(t)) return this.load(t, this.position, this.isPlaying);
     // nothing loaded: the next load opens the new output
     if (this.loaded) { await this.apply(); await this.refreshReport(); this.signal = this.buildSignal(); }
     this.emit('changed');
