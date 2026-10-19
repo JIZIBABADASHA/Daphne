@@ -160,7 +160,7 @@ dc_destroy(p);
 | [minimp3](https://github.com/lieff/minimp3) | CC0 | in `third_party/` |
 | [nlohmann/json](https://github.com/nlohmann/json) | MIT | in `third_party/` |
 | [Catch2](https://github.com/catchorg/Catch2) | BSL-1.0 | in `third_party/` (tests only) |
-| [FFmpeg](https://ffmpeg.org) | LGPL-2.1+ | downloaded by `fetch_ffmpeg.ps1` (Windows) or built from its source by `miku/pack-mac.sh` (macOS), linked dynamically |
+| [FFmpeg](https://ffmpeg.org) | LGPL-2.1+ | downloaded by `fetch_ffmpeg.ps1` (Windows: BtbN's n8.1.3 build, kept as the release `ffmpeg-n8.1.3-win64` of this repository) or built from its source by `miku/pack-mac.sh` (macOS), linked dynamically |
 | [ASIO SDK](https://www.steinberg.net/developers/) | Steinberg licence | downloaded by `fetch_asiosdk.ps1`, not redistributed |
 | [GFS Didot](https://fonts.google.com/specimen/GFS+Didot) | SIL OFL 1.1 | in `src/Daphne.Extension/web/fonts/` (the wordmark) |
 
