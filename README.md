@@ -83,7 +83,9 @@ flowchart TD
 
 ## Building
 
-Requirements: Windows 10/11 x64, Visual Studio 2022 (C++ workload), CMake 3.25+.
+Requirements: Windows 10/11 x64, Visual Studio 2022 (C++ workload), CMake 3.25+. (The build for MIKU,
+`scripts\build_for_miku.ps1`, uses them when installed and otherwise downloads a portable MSVC, CMake and Ninja into
+`.tools`: `scripts\fetch_msvc.ps1`, `fetch_cmake.ps1`, `fetch_ninja.ps1`; no administrator rights needed.)
 
 ```bat
 powershell -File scripts\fetch_ffmpeg.ps1    :: FFmpeg LGPL shared build (optional: without it, WAV / AIFF / FLAC / MP3 / DSD only)
