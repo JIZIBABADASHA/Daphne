@@ -10,3 +10,4 @@ src/*/obj/
 icon/
 third_party/ffmpeg-src/
 build-mac-*/
+.tools/
