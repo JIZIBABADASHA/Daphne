@@ -311,10 +311,25 @@ TEST_CASE("DSF: a truncated file plays what is there", "[dsd]") {
     patch_le(bytes, 64, 1ull << 40, 8);   // sample count and 'data' size far beyond the file
     patch_le(bytes, 84, 1ull << 40, 8);
     const size_t data = 92;
-    bytes.resize(data + 4096 * 2 + 1000);   // one whole block (both channels) and part of the next
-    const Opened r = open_with_deadline(bytes, "daphne_tr2.dsf");
-    REQUIRE(r.how == 0);
-    CHECK(r.frames == (4096 * 2 + 1000) / 2);
+    // one whole block (both channels), then the next cut inside channel 0's bytes or inside channel 1's: a frame needs
+    // both channels, so the first plays the whole block only and the second 1000 frames more
+    for (const auto& [cut, frames] : {std::pair<size_t, int64_t>{4096 * 2 + 1000, 4096}, {4096 * 2 + 4096 + 1000, 4096 + 1000}}) {
+        auto t = bytes;
+        t.resize(data + cut);
+        INFO("cut after " << cut << " data bytes");
+        const Opened r = open_with_deadline(t, "daphne_tr2.dsf");
+        REQUIRE(r.how == 0);
+        CHECK(r.frames == frames);
+        // every byte read is the file's (none of the zero fill past the end)
+        daphne::DsdFile d;
+        REQUIRE(d.open(save("daphne_tr3.dsf", t), nullptr));
+        std::vector<uint8_t> out(static_cast<size_t>(frames + 16) * 2);
+        REQUIRE(d.read(out.data(), static_cast<int>(frames + 16)) == frames);
+        int64_t wrong = 0;
+        for (int64_t i = 0; i < frames; ++i)
+            for (int c = 0; c < 2; ++c) wrong += out[static_cast<size_t>(i) * 2 + c] != pattern(i, c);
+        CHECK(wrong == 0);
+    }
 }
 
 TEST_CASE("DFF: chunk sizes that point backwards or past the end end the walk", "[dsd]") {

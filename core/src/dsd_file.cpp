@@ -147,8 +147,13 @@ bool DsdFile::open_dsf(std::string* error) {
     info_.dsd_rate = static_cast<int>(rate);
     info_.channels = static_cast<int>(ch);
     info_.channel_mask = dsf_mask(ch_type);
-    // the sample count bounds playback, not the padding of the last block or the chunks after the data
-    info_.frames = static_cast<int64_t>(std::min<uint64_t>(samples / 8, data_bytes / ch));
+    // the sample count bounds playback, not the padding of the last block or the chunks after the data. A block holds
+    // its channels one after another, so in a block cut short only the bytes the last channel still has are a frame
+    // for every channel (beyond them a channel would read the zero fill: full-scale negative in DSD, a click)
+    const uint64_t span = static_cast<uint64_t>(block) * ch, rest = data_bytes % span;
+    const uint64_t per_ch = data_bytes / span * block +
+                            (rest > static_cast<uint64_t>(block) * (ch - 1) ? rest - static_cast<uint64_t>(block) * (ch - 1) : 0);
+    info_.frames = static_cast<int64_t>(std::min<uint64_t>(samples / 8, per_ch));
     blk_.assign(static_cast<size_t>(block_) * ch, 0);
     blk_index_ = -1;
     pos_ = 0;
