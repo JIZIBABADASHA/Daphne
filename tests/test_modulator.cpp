@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstdint>
 #include <vector>
 
+#include "../dsp/src/fft.h"
 #include "daphne/dsp/limiter.h"
 #include "daphne/dsp/modulator.h"
 
@@ -29,6 +31,30 @@ double tone_level(const std::vector<uint8_t>& out, int channels, int c, double f
             ++count;
         }
     return 2 * std::hypot(re, im) / count;
+}
+
+// Noise power of one channel of the DSD bytes in [f1, f2] Hz, in dB re the SACD reference (a sine at 50% modulation):
+// Hann-windowed power spectrum of n bits after skip_bits, without the bins around f0 and its harmonics (f0 = 0: none).
+double band_noise_db(const std::vector<uint8_t>& out, int channels, int dsd_rate, int64_t skip_bits, int n, double f1, double f2,
+                     double f0) {
+    std::vector<std::complex<double>> x(static_cast<size_t>(n));
+    double wsum = 0;
+    for (int t = 0; t < n; ++t) {
+        const int64_t b = skip_bits + t;
+        const uint8_t byte = out[static_cast<size_t>(b / 8) * channels];
+        const double w = 0.5 - 0.5 * std::cos(2 * kPi * t / n);
+        x[static_cast<size_t>(t)] = (byte >> (7 - b % 8) & 1 ? w : -w);
+        wsum += w * w;
+    }
+    daphne::dsp::Fft(n).run(x.data(), false);
+    const double bin = static_cast<double>(dsd_rate) / n;
+    double ms = 0;
+    for (int k = static_cast<int>(std::ceil(f1 / bin)); k <= static_cast<int>(f2 / bin); ++k) {
+        bool tone = false;
+        for (double h = f0; f0 > 0 && h <= f2 + 10 * bin; h += f0) tone = tone || std::abs(k * bin - h) <= 10 * bin;
+        if (!tone) ms += 2 * std::norm(x[static_cast<size_t>(k)]) / (static_cast<double>(n) * wsum);
+    }
+    return 10 * std::log10(ms / 0.125 + 1e-300);
 }
 
 }  // namespace
@@ -92,6 +118,30 @@ TEST_CASE("Modulator: a rate that is not a power-of-two ratio (interpolated phas
     CHECK(std::abs(static_cast<long long>(out.size()) - 176400) <= 1);
     CHECK(m.clamped_bits() == 0);
     CHECK(tone_level(out, 1, 0, 1000, m.dsd_rate(), 64 * 1024) == Catch::Approx(0.5 * DsdModulator::kGain).margin(0.01));
+}
+
+TEST_CASE("Modulator: 40 - 100 kHz below -20 dB re the SACD reference (Scarlet Book D4), a quiet audio band", "[modulator]") {
+    // DSD64 / DSD128, orders 5 and 8, silence and a sine near 1 kHz at -20 / -6 dBFS at the chain's 705.6 kHz. Order 8 at DSD64
+    // takes an optimized NTF (tools/sdm_design.py, H_OPT): synthesizeNTF's measured -18.5 dB there
+    const int fs = 705600, n = 1 << 20;
+    for (int osr : {64, 128})
+        for (int order : {5, 8})
+            for (double db : {-300.0, -20.0, -6.0}) {
+                DsdModulator m(fs, osr, order);
+                const int64_t skip = m.dsd_rate() / 2;   // the DC blocker (3.5 Hz) settles from the start of the sine
+                const int frames = static_cast<int>((skip + n) * static_cast<int64_t>(fs) / m.dsd_rate()) + 64;
+                const double a = db < -200 ? 0.0 : std::pow(10.0, db / 20);
+                const double f0 = std::round(1000.0 * n / m.dsd_rate()) * m.dsd_rate() / n;   // on a bin: no window leakage
+                std::vector<double> x(static_cast<size_t>(frames) * 2);
+                for (int i = 0; i < frames; ++i) x[2 * i] = x[2 * i + 1] = a * std::sin(2 * kPi * f0 * i / fs);
+                std::vector<uint8_t> out;
+                m.process(x.data(), frames, 2, out);
+                INFO("order " << order << " DSD" << osr << " at " << db << " dBFS");
+                CHECK(m.clamped_bits() == 0);
+                CHECK(band_noise_db(out, 2, m.dsd_rate(), skip, n, 40000, 100000, 0) < -20.0);
+                // audio band: order 8 DSD64 measured -134 dB at -20 dBFS, the others lower or at least -115
+                CHECK(band_noise_db(out, 2, m.dsd_rate(), skip, n, 20, 20000, a > 0 ? f0 : 0.0) < (order == 8 ? -128.0 : -110.0));
+            }
 }
 
 TEST_CASE("Limiter: no sample above the ceiling, bit-exact delay below it", "[limiter]") {

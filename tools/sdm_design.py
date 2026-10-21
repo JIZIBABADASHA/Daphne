@@ -1,6 +1,9 @@
 """DSD modulator coefficient design (dsp/src/sdm_tables.inc).
 
-NTF: Schreier's synthesizeNTF (optimized zeros, H_inf).
+NTF: Schreier's synthesizeNTF (optimized zeros, H_inf). Order 8 at DSD64 instead takes an NTF optimized here (H_OPT,
+optimized_ntf): synthesizeNTF's poles rise to H_inf maximally flat right above the audio band, so at 64 times 44.1 kHz an
+order 8 loop has its steepest rise in 40 - 100 kHz, where the Scarlet Book (Annex D4) wants the noise below -20 dB re the
+SACD reference; no H_inf meets that without a much noisier audio band.
 Realization: CIFF (cascade of delaying integrators, resonators g on the odd/even pairs as
 Schreier's stuffABCD, feed-forward a to the quantizer, u fed to the first integrator and
 directly to the quantizer). a is solved from the loop filter's Markov parameters.
@@ -11,10 +14,12 @@ Needs the python-deltasigma 0.2.2 sources (patched for numpy 2) on sys.path for
 synthesizeNTF: set DELTASIGMA_PATH to the folder that contains the `deltasigma` package.
 
   python sdm_design.py            -> prints the table and SNRs, writes ../dsp/src/sdm_tables.inc
+  python sdm_design.py 8:64       -> only those rows (order:osr) are designed again, the others are kept as they are
 """
 import os, sys, warnings
 import numpy as np
 from numba import njit
+from scipy.optimize import minimize
 
 warnings.filterwarnings("ignore")
 sys.path.insert(0, os.environ.get("DELTASIGMA_PATH", "."))
@@ -40,8 +45,50 @@ def topology(order, g):
     return A, Be
 
 
-def realize(order, osr, h_inf):
-    z, p, _ = ds.synthesizeNTF(order, osr, 1, h_inf, 0)
+def ntf_mag2(z, p, w):
+    """|NTF|^2 at the angular frequencies w (NTF(inf) = 1)"""
+    e = np.exp(1j * w)[:, None]
+    return np.abs(np.prod(e - z[None, :], 1) / np.prod(e - p[None, :], 1)) ** 2
+
+
+def optimized_ntf(order, osr, h_inf, us_db, b2040_db, rmax):
+    """Zeros and poles (conjugate pairs, even order) with the least noise in 20 Hz - 20 kHz under |NTF| <= h_inf, the
+    40 - 100 kHz noise us_db and the 20 - 40 kHz noise b2040_db away from synthesizeNTF's (dB, mean |NTF|^2), and every
+    pole radius <= rmax (no sharp resonance). Starts from synthesizeNTF. The noise that leaves 40 - 100 kHz goes above
+    100 kHz (the Bode integral fixes the total): bounding 20 - 40 kHz keeps it from piling up just below 40 kHz."""
+    fs = 44100.0 * osr
+    hz = lambda f: 2 * np.pi * f / fs
+    z0, p0, _ = ds.synthesizeNTF(order, osr, 1, h_inf, 0)
+    z0 = np.asarray(z0, complex); p0 = np.asarray(p0, complex)
+    w_in = np.linspace(1e-6, hz(20000), 400)
+    w_us = np.linspace(hz(40000), hz(100000), 400)
+    w_2040 = np.linspace(hz(20000), hz(40000), 300)
+    w_all = np.concatenate([np.linspace(0, hz(300000), 20000), np.linspace(hz(300000), np.pi, 5000)])
+    us0 = np.mean(ntf_mag2(z0, p0, w_us)); b0 = np.mean(ntf_mag2(z0, p0, w_2040))
+    m = order // 2
+
+    def unpack(x):
+        th = np.abs(x[:m]); r = rmax / (1 + np.exp(-x[m:2 * m])); ph = np.abs(x[2 * m:])
+        return (np.concatenate([np.exp(1j * th), np.exp(-1j * th)]),
+                np.concatenate([r * np.exp(1j * ph), r * np.exp(-1j * ph)]))
+
+    zz = sorted([x for x in z0 if x.imag > 0], key=np.angle)
+    pp = sorted([x for x in p0 if x.imag > 0], key=np.angle)
+    r = np.minimum(np.abs(pp), rmax * 0.999) / rmax
+    x0 = np.concatenate([np.angle(zz), np.log(r / (1 - r)), np.angle(pp)])
+    cons = [{"type": "ineq", "fun": lambda x: h_inf ** 2 - ntf_mag2(*unpack(x), w_all)},
+            {"type": "ineq", "fun": lambda x: us0 * 10 ** (us_db / 10) - np.mean(ntf_mag2(*unpack(x), w_us))},
+            {"type": "ineq", "fun": lambda x: b0 * 10 ** (b2040_db / 10) - np.mean(ntf_mag2(*unpack(x), w_2040))}]
+    res = minimize(lambda x: np.log10(np.mean(ntf_mag2(*unpack(x), w_in))), x0, constraints=cons, method="SLSQP",
+                   options={"maxiter": 2000, "ftol": 1e-14})
+    return unpack(res.x)
+
+
+def realize(order, osr, h_inf, opt=None):
+    if opt:
+        z, p = optimized_ntf(order, osr, h_inf, **opt)
+    else:
+        z, p, _ = ds.synthesizeNTF(order, osr, 1, h_inf, 0)
     z = np.asarray(z, complex); p = np.asarray(p, complex)
     # zeros: real first (odd order), then conjugate pairs with increasing frequency
     zr = [x for x in z if abs(x.imag) < 1e-12]
@@ -131,8 +178,8 @@ def evaluate(A, Be, a, osr, gain, clamp, levels=(-1, -20, -60), n=1 << 18):
     return out
 
 
-def design(order, osr, h_inf):
-    A, Be, a, g, p = realize(order, osr, h_inf)
+def design(order, osr, h_inf, opt=None):
+    A, Be, a, g, p = realize(order, osr, h_inf, opt)
     if np.max(np.abs(p)) >= 1:
         return None
     umax, peaks = max_stable(A, Be, a, osr)
@@ -148,20 +195,48 @@ GAIN = 0.5
 # the Scarlet Book (Annex D4) asks 40 - 100 kHz < -20 dB re the SACD reference; a 1-bit loop's ultrasonic noise there
 # changes with the signal level. Order 8 at DSD128: the scored 1.30 measured -20.1 dB (-20 dBFS input), 1.25 -20.8,
 # 1.35 -31.2 with the best SNR (umax 0.70: the limiter's ceiling is +1.5 dB re the SACD reference). Order 8 at DSD64
-# keeps the scored 1.40 (-18.3 dB with a signal): no H_inf meets D4 there without a worse loop (1.35 / 1.30: -18.9 on
-# silence and more 20 - 40 kHz noise; 1.25: 20 - 40 kHz -33 dB, SNR 108 dB).
-H_FIXED = {(8, 128): 1.35}
+# had the scored 1.40 (-18.5 dB with a signal): no H_inf meets D4 there without a worse loop (1.35 / 1.30: -19.8 / -19.1;
+# 1.25: -20.7 with 20 - 40 kHz -30 dB and 24 dB more audio-band noise). It takes an optimized NTF instead (H_OPT, measured
+# in the chain, the worst of silence, -60 / -20 / -6 / -1 dBFS 1 kHz and noise near full scale): 40 - 100 kHz -23.0 dB
+# (was -18.5), 20 - 40 kHz -56.5 (-60.8), audio band -133.0 dB at -1 dBFS (-134.8), umax 0.74 (0.70).
+H_FIXED = {(8, 128): 1.35, (8, 64): 1.4}
+# (order, osr): optimized_ntf's targets, relative to synthesizeNTF at H_FIXED
+H_OPT = {(8, 64): dict(us_db=-4.0, b2040_db=3.0, rmax=0.98)}
+
+
+def table_entry(d):
+    n = d["order"]; A = d["A"]
+    k = [d["Be"][0]] + [A[i, i - 1] for i in range(1, n)]
+    odd = n % 2
+    gg = [-A[i, i + 1] for i in range(odd, n - 1, 2)]
+    fmt = lambda v, m: "{" + ", ".join(float(x).hex() for x in list(v) + [0.0] * (m - len(v))) + "}"
+    return f"{{{n}, {d['osr']}, {d['h_inf']}, {d['umax']:.2f}, {fmt(d['a'], 15)},\n  {fmt(k, 15)},\n  {fmt(gg, 7)}}},\n"
+
+
+def read_table(path):
+    """the rows of an existing table: {(order, osr): text}, in file order"""
+    rows = {}
+    with open(path) as f:
+        lines = [l for l in f if not l.startswith("//")]
+    for i in range(0, len(lines), 3):
+        head = lines[i].lstrip("{").split(",")
+        rows[(int(head[0]), int(head[1]))] = "".join(lines[i:i + 3])
+    return rows
+
 
 if __name__ == "__main__":
+    only = {tuple(int(v) for v in a.split(":")) for a in sys.argv[1:]}
     rows = []
     # Two orders: 5 (least ultrasonic noise) and 8 (the quietest audio band). Higher orders lower an audio-band
     # noise floor that is already far below any DAC's analog noise, at the cost of more ultrasonic noise.
     for osr in (64, 128, 256, 512, 1024):
         for order in (5, 8):
+            if only and (order, osr) not in only:
+                continue
             best = None
             hs = (H_FIXED[(order, osr)],) if (order, osr) in H_FIXED else (1.5, 1.45, 1.4, 1.35, 1.3, 1.25, 1.2, 1.15, 1.1)
             for h in hs:
-                d = design(order, osr, h)
+                d = design(order, osr, h, H_OPT.get((order, osr)))
                 if d is None or d["umax"] < 0.65:   # gain 0.5 leaves >= 2.3 dB above full scale
                     continue
                 s = evaluate(d["A"], d["Be"], d["a"], osr, GAIN, KCLAMP)
@@ -178,13 +253,11 @@ if __name__ == "__main__":
             print(f"order {order} osr {osr}: best H_inf {best['h_inf']} umax {best['umax']:.2f} SNR {best['snr']}", flush=True)
             rows.append(best)
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dsp", "src", "sdm_tables.inc")
+    table = read_table(out) if only else {}
+    for d in rows:
+        table[(d["order"], d["osr"])] = table_entry(d)
     with open(out, "w") as f:
         f.write("// Generated by tools/sdm_design.py -- do not edit.\n")
         f.write("// {order, osr, h_inf, umax, a[15], k[15] (input of state i), g[7] (feedback into the pair head)}\n")
-        for d in rows:
-            n = d["order"]; A = d["A"]
-            k = [d["Be"][0]] + [A[i, i - 1] for i in range(1, n)]
-            odd = n % 2
-            gg = [-A[i, i + 1] for i in range(odd, n - 1, 2)]
-            fmt = lambda v, m: "{" + ", ".join(float(x).hex() for x in list(v) + [0.0] * (m - len(v))) + "}"
-            f.write(f"{{{n}, {d['osr']}, {d['h_inf']}, {d['umax']:.2f}, {fmt(d['a'], 15)},\n  {fmt(k, 15)},\n  {fmt(gg, 7)}}},\n")
+        for text in table.values():
+            f.write(text)
