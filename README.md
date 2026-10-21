@@ -33,7 +33,8 @@ whenever nothing in the chain needs to change a sample. It ships as a static lib
   (~106-bit) arithmetic, with linear, intermediate, minimum or custom phase, optional apodizing and
   optional double-double convolution. The PCM upsampler and the DSD modulator's pre-filter use it.
 - **PCM to DSD.** A CIFF delta-sigma modulator of order 5 or 8, for DSD64 to DSD1024, with
-  coefficients from Schreier's NTF synthesis and an input limiter that keeps the loop stable.
+  coefficients from Schreier's NTF synthesis (order 8 at DSD64: an NTF optimized to keep 40 – 100 kHz below the
+  Scarlet Book's −20 dB) and an input limiter that keeps the loop stable.
 - **DSD files, three ways.** Sent as native DSD (ASIO) or DoP, or converted to PCM through a two-stage
   linear-phase low-pass (24 / 30 / 50 kHz) at +6 dB with a limiter.
 - **Gapless**, across sample rates too. The next track is opened and its chain built ahead of time,
