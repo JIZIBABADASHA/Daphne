@@ -12,6 +12,7 @@
 
 #include "daphne/engine/decoder.h"
 #include "daphne/engine/live_source.h"
+#include "test_util.h"
 
 using namespace daphne;
 
@@ -36,7 +37,7 @@ struct Bus {
             const size_t k = (index() + static_cast<uint32_t>(i)) % static_cast<uint32_t>(cap);
             ring()[2 * k] = v, ring()[2 * k + 1] = -v;
         }
-        index() += static_cast<uint32_t>(n);
+        test::store_release(&index(), index() + static_cast<uint32_t>(n));   // published as a producer does
     }
     int cap;
     std::vector<uint8_t> mem;
@@ -336,7 +337,7 @@ TEST_CASE("Live decoder: a ring detached or replaced while it reads can be freed
         using clock = std::chrono::steady_clock;
         const auto end = clock::now() + std::chrono::milliseconds(8);
         while (clock::now() < end) {
-            index(*cur) += 48;
+            test::store_release(&index(*cur), index(*cur) + 48);
             const auto until = clock::now() + std::chrono::microseconds(10);
             while (clock::now() < until) std::this_thread::yield();
         }

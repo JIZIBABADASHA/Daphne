@@ -1,6 +1,8 @@
 #pragma once
 // Portable helpers for the tests: temporary files, environment variables, WAV files by path.
 
+#include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -11,6 +13,16 @@
 #include "daphne/platform/platform.h"
 
 namespace test {
+
+// A live-ring producer publishing its write index (release), as the host's producer does. std::atomic_ref where
+// the library has it (not Apple's libc++ yet).
+inline void store_release(uint32_t* p, uint32_t v) {
+#ifdef __cpp_lib_atomic_ref
+    std::atomic_ref<uint32_t>(*p).store(v, std::memory_order_release);
+#else
+    __atomic_store_n(p, v, __ATOMIC_RELEASE);
+#endif
+}
 
 inline std::filesystem::path temp_path(const std::string& name) { return std::filesystem::temp_directory_path() / name; }
 

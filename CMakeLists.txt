@@ -25,6 +25,19 @@ endif()
 
 option(DAPHNE_BUILD_TESTS "Build unit tests" ON)
 option(DAPHNE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors (CI)" OFF)
+# Sanitizers for every target (Clang / GCC; CI): e.g. "address,undefined" or "thread". A finding stops the
+# program (no recovery), so a test run fails on it.
+set(DAPHNE_SANITIZE "" CACHE STRING "Sanitizers for every target, e.g. address,undefined or thread")
+if(DAPHNE_SANITIZE AND NOT MSVC)
+    add_compile_options(-fsanitize=${DAPHNE_SANITIZE} -fno-omit-frame-pointer -fno-sanitize-recover=all)
+    add_link_options(-fsanitize=${DAPHNE_SANITIZE})
+endif()
+# libFuzzer targets for the file parsers (Clang; fuzz/): every library is built with the coverage the fuzzer
+# follows, the targets link libFuzzer's main.
+option(DAPHNE_BUILD_FUZZ "Build the libFuzzer targets (Clang)" OFF)
+if(DAPHNE_BUILD_FUZZ)
+    add_compile_options(-fsanitize=fuzzer-no-link)
+endif()
 
 # Warnings for the project's own targets: /W4 (MSVC, above) or -Wall -Wextra. Third-party code stays
 # quiet (catch2_main has its own options; the vendored headers are system includes).
@@ -55,4 +68,7 @@ add_subdirectory(helper)
 if(DAPHNE_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+if(DAPHNE_BUILD_FUZZ)
+    add_subdirectory(fuzz)
 endif()

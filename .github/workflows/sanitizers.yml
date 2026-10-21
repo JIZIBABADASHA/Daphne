@@ -1,0 +1,72 @@
+# Sanitizers and fuzzing on Linux (Clang), N25.
+#   asan    AddressSanitizer + UndefinedBehaviorSanitizer, every unit test
+#   tsan    ThreadSanitizer, the tests whose threads talk to each other (player, C API, live input)
+#   fuzz    libFuzzer on the file parsers (fuzz/), 60 s per target from the seeds in fuzz/corpus/
+# A finding stops the program (DAPHNE_SANITIZE builds with -fno-sanitize-recover), so the job fails on it.
+name: sanitizers
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CC: clang
+  CXX: clang++
+
+jobs:
+  sanitize:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: asan, flags: "address,undefined", tests: "" }
+          - { name: tsan, flags: "thread", tests: "[player],[capi],[live]" }
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    env:
+      ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
+      UBSAN_OPTIONS: print_stacktrace=1
+      TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+    steps:
+      - uses: actions/checkout@v4
+      # the sanitizers' shadow memory needs the address-space layout of older kernels (Ubuntu 24.04 randomizes more)
+      - name: Address-space layout for the sanitizers
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDAPHNE_SANITIZE=${{ matrix.flags }} -DDAPHNE_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build build --parallel --target daphne_tests
+      - name: Test
+        run: build/bin/daphne_tests ${{ matrix.tests }}
+
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Address-space layout for the sanitizers
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDAPHNE_BUILD_TESTS=OFF -DDAPHNE_BUILD_FUZZ=ON -DDAPHNE_SANITIZE=address,undefined
+      - name: Build
+        run: cmake --build build --parallel --target fuzz_dsd fuzz_decoder
+      - name: Fuzz
+        run: |
+          for t in dsd decoder; do
+            mkdir -p work/$t
+            # new inputs go to work/ (the seeds in the repository stay as they are); a crash leaves crash-* here
+            build/bin/fuzz_$t -max_total_time=60 -timeout=10 -rss_limit_mb=2048 -max_len=65536 -print_final_stats=1 work/$t fuzz/corpus/$t
+          done
+      - name: Keep the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+            oom-*
+          if-no-files-found: ignore

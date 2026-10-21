@@ -5,6 +5,7 @@
 #include <catch_amalgamated.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -597,7 +598,7 @@ TEST_CASE("Player: live input plays the producer's stream", "[player][live]") {
                         ring[2 * k] = v, ring[2 * k + 1] = v;
                     }
                     std::atomic_thread_fence(std::memory_order_release);
-                    *reinterpret_cast<volatile uint32_t*>(index) = static_cast<uint32_t>(t);
+                    test::store_release(index, static_cast<uint32_t>(t));
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
             });
@@ -648,7 +649,7 @@ TEST_CASE("Player: a live source resumed after a pause goes back to the writer",
         while (!stop) {
             const auto t = static_cast<uint32_t>(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 48000);
             std::atomic_thread_fence(std::memory_order_release);
-            *reinterpret_cast<volatile uint32_t*>(index) = t;
+            test::store_release(index, t);
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     });
@@ -694,7 +695,7 @@ TEST_CASE("Player: a live source starts with the target buffered, not the target
         while (!stop) {
             const auto t = static_cast<uint32_t>(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 48000);
             std::atomic_thread_fence(std::memory_order_release);
-            *reinterpret_cast<volatile uint32_t*>(index) = t;
+            test::store_release(index, t);
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     });
