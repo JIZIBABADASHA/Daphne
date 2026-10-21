@@ -2,10 +2,6 @@
 
 尚未完成的工作與已知、暫不處理的問題。完成的項目移到對應的文件（N25 等），並從這裡刪除。
 
-## 跨平台收尾（N25）
-
-- **`cross-platform-plan` 合併回 `main`**：等下面的拆分步驟 5–7 都完成後一次合併（處理速度偵測、即時輸入延遲、預熱移出處理執行緒已完成，見 N4 / N2）；之後讓 MIKU 的 `Extensions/Daphne` 指向新的版本（MIKU 端另發 PR）。
-
 ## 尚未驗證
 
 - **MSVC ARM64 建置**（Windows on ARM）：程式已避開 x86 專屬的 cpuid、FPCR 改用 `_ReadStatusReg` / `_WriteStatusReg`，但沒有 ARM64 工具組，尚未實際編譯。
@@ -19,7 +15,7 @@
 
 ## 拆分計畫的後續步驟（N25）
 
-順序：0 → 5 → 7，以 Windows 與 macOS 為主；6（Linux）暫緩。每一步一個分支、一個 PR，合進 `cross-platform-plan`。完成的項目打勾，實作時的發現記在最後的「實作筆記」。
+順序：0 → 5 → 7，以 Windows 與 macOS 為主；6（Linux）暫緩。每一步一個分支、一個 PR，直接合進 `main`。完成的項目打勾，實作時的發現記在最後的「實作筆記」。
 
 ### 0. 輸出能力（分支 `output-caps`，PR #18）✅
 
@@ -177,5 +173,6 @@
 - FFmpeg：與 Windows 同版本（8.1.3，LGPL、動態連結），從原始碼編（ffmpeg.org 的 tarball，SHA-256 寫在腳本裡；ffmpeg.org 沒有公布 SHA-256，這個值是寫腳本時下載的檔案的），只開引擎需要的 demuxer / decoder（沒有專屬解碼器的格式：M4A / ALAC / AAC、Ogg、Opus、APE、WavPack、WMA、TTA…）。`--install-name-dir=@rpath`，所以核心連到的是 `@rpath/libavcodec.62.dylib` 等，打包時照這些名字複製。沒有 FFmpeg 時這些格式在 Mac 上不能播（測試機的音樂庫有 46 首 ALAC）。
 - CMake：macOS / Linux 的 FFmpeg 原本只用 pkg-config 找（測試機的 ssh 環境找不到 pkg-config），改成也可以指定資料夾（`DAPHNE_FFMPEG_DIR`，含 `include/` 和 `lib/`）；Windows 的路徑不變。
 - 每個 arch 分開編（`build-mac-arm64/`、`build-mac-x86_64/`，最低 macOS 11.0），因為 MIKU 的安裝包也是每個 arch 一份。打包後刪掉所有絕對路徑的 rpath，檢查 `otool -L` 只剩 `@rpath/` 和系統的函式庫，ad-hoc 簽章（`install_name_tool` 會讓簽章失效；MIKU 的安裝包會再簽一次），在本機 arch 上啟動 helper 確認 hello。
-- `bin/` 只放程式（MIKU 的安裝包會簽 `bin/` 裡的每個檔案）；FFmpeg 的授權（`FFmpeg-COPYING.LGPLv2.1`）與原始碼位置（`FFmpeg-SOURCE.txt`）和 `LICENSE` 一起放在模組根目錄。`.gitattributes` 讓 `*.sh` 在每個 checkout 都是 LF：Windows（`core.autocrlf`）checkout 的 CRLF 腳本複製到 Mac 會在 `set -o pipefail` 失敗（`pipefail`）。
+- `bin/` 只放程式（MIKU 的安裝包會簽 `bin/` 裡的每個檔案）；FFmpeg 的授權（`FFmpeg-COPYING.LGPLv2.1`）與原始碼位置（`FFmpeg-SOURCE.txt`）和 `LICENSE` 一起放在模組根目錄。`.gitattributes` 讓 `*.sh` 在每個 checkout 都是 LF：Windows（`core.autocrlf`）checkout 的 CRLF 腳本複製到 Mac 會在 `set -o pipefail` 失敗（`pipefail
+`）。
 - 結果（Intel Mac）：每個 arch 約 4 MB；arm64 版全是 arm64、x64 版全是 x86_64；x64 的 helper 回報 `{"abi":3,"e":"hello","version":"daphne 0.1.0"}`。arm64 版要在 Apple Silicon 的 Mac 上試。

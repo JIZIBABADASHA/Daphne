@@ -29,6 +29,8 @@ if(APPLE)
     target_include_directories(daphne_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/src)
 endif()
 add_test(NAME daphne_tests COMMAND daphne_tests)
+# a test that hangs (a file-parsing loop, a deadlock) fails instead of holding CI until the job's own limit
+set_tests_properties(daphne_tests PROPERTIES TIMEOUT 1200)
 # Catch2 defines wmain when UNICODE is set (it is, project-wide).
 if(MSVC)
     target_link_options(daphne_tests PRIVATE /ENTRY:wmainCRTStartup)

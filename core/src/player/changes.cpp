@@ -22,6 +22,8 @@ void Player::Impl::launch_build(const Settings& ns, const OutputChoice& no) {
             if (!c->build(cs, src, devf, kChunk, &e)) return nullptr;
         } catch (const dsp::DesignCancelled&) {
             return nullptr;
+        } catch (const std::exception&) {   // e.g. memory for a long filter: the current chain stays
+            return nullptr;
         }
         return c;
     });

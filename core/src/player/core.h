@@ -166,9 +166,14 @@ struct Player::Impl {
 
     // ------------------------------------------------------------------ core.cpp: the thread
 
+    // The thread: run_playback, and an exception from it (a damaged file, an allocation) ends the playback with an error
+    // (abort_run) instead of the process.
     void run();
+    void run_playback();
+    void abort_run(const std::string& what);
     // The playback loop until the end, a stop or a fatal error, then finish_playback.
     void play(Stream& st);
+    void loop(Stream& st);
     class PcmStream;
     class DsdDirectStream;
     // One pass of the transport requests (processing thread).

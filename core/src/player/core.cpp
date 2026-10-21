@@ -214,6 +214,47 @@ void Player::Impl::service_transport() {
 }
 
 void Player::Impl::run() {
+    try {
+        run_playback();
+    } catch (const std::exception& ex) {
+        abort_run(ex.what());
+    } catch (...) {
+        abort_run("unknown exception");
+    }
+}
+
+void Player::Impl::abort_run(const std::string& what) {
+    const std::string e = "internal error: " + what;
+    try {   // the helper threads end before the state they use goes away
+        queue.join_all();
+        if (build_cancel) *build_cancel = true;
+        if (building.valid()) building.wait();
+        take_warm();
+        stop_cache_trim(true);
+        if (io.dev) io.dev->stop();
+    } catch (...) {
+    }
+    bool starting = false;
+    {
+        std::lock_guard<std::mutex> l(m);
+        if (!start_done) {   // start() is waiting: it returns the error
+            start_done = true;
+            start_ok = false;
+            start_err = e;
+            starting = true;
+        }
+    }
+    if (starting) {
+        cv.notify_all();
+    } else {
+        ok = false;
+        err = e;
+        if (!cancel && cb.on_failed) cb.on_failed(err);
+    }
+    done = true;
+}
+
+void Player::Impl::run_playback() {
     platform::RealtimeScope rt;
     dsp::set_design_threads(s.design.threads);
     std::string e;
@@ -308,6 +349,20 @@ void Player::Impl::run() {
 void Player::Impl::play(Stream& st) {
     stream = &st;
     ok = true;
+    try {
+        loop(st);
+    } catch (const std::exception& ex) {   // the device is stopped and the host told, as for any other failure
+        ok = false;
+        err = std::string("internal error: ") + ex.what();
+    } catch (...) {
+        ok = false;
+        err = "internal error: unknown exception";
+    }
+    finish_playback();
+    stream = nullptr;
+}
+
+void Player::Impl::loop(Stream& st) {
     while (!cancel) {
         std::optional<std::pair<Settings, OutputChoice>> p;
         {
@@ -343,8 +398,6 @@ void Player::Impl::play(Stream& st) {
             break;
         }
     }
-    finish_playback();
-    stream = nullptr;
 }
 
 bool Player::Impl::service_device() {

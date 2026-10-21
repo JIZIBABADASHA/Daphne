@@ -1,10 +1,16 @@
 #include <catch_amalgamated.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <functional>
+#include <iterator>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "daphne/engine/dsd_file.h"
@@ -211,4 +217,146 @@ TEST_CASE("DSD to PCM: seek gives the same samples as reading through", "[dsd]")
     double diff = 0;
     for (size_t i = 0; i < part.size(); ++i) diff = std::max(diff, std::abs(part[i] - all[12345 * 2 + i]));
     CHECK(diff < 1e-12);
+}
+
+namespace {
+
+std::vector<uint8_t> load(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), {});
+}
+void patch_le(std::vector<uint8_t>& v, size_t at, uint64_t x, int n) {
+    for (int k = 0; k < n; ++k) v[at + k] = static_cast<uint8_t>(x >> (8 * k));
+}
+void patch_be(std::vector<uint8_t>& v, size_t at, uint64_t x, int n) {
+    for (int k = 0; k < n; ++k) v[at + k] = static_cast<uint8_t>(x >> (8 * (n - 1 - k)));
+}
+
+// open() of a damaged file, on its own thread with a deadline: it must return (a chunk size that wrapped the offset back
+// once looped forever) and must not throw (a block size once asked for gigabytes). 0: opened, 1: refused, 2: threw,
+// 3: still running after 2 s (the thread is left behind).
+struct Opened {
+    int how = 3;
+    std::string error;
+    int64_t frames = 0;
+};
+Opened open_with_deadline(const std::vector<uint8_t>& bytes, const std::string& name) {
+    const auto path = save(name, bytes);
+    struct State {
+        std::atomic<int> how{3};
+        std::string error;
+        int64_t frames = 0;
+    };
+    auto st = std::make_shared<State>();
+    std::thread([path, st] {
+        try {
+            daphne::DsdFile d;
+            std::string e;
+            const bool ok = d.open(path, &e);
+            st->error = e;
+            st->frames = d.info().frames;
+            st->how.store(ok ? 0 : 1, std::memory_order_release);
+        } catch (...) {
+            st->how.store(2, std::memory_order_release);
+        }
+    }).detach();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (st->how.load(std::memory_order_acquire) == 3 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    Opened r;
+    r.how = st->how.load(std::memory_order_acquire);
+    if (r.how != 3) r.error = st->error, r.frames = st->frames;
+    return r;
+}
+
+// DSF offsets: 'fmt ' size 32, channels 52, rate 56, samples 64, block 72; 'data' size 84
+// DFF offsets: FRM8 size 4; FVER size 20; PROP size 36, its FS size 52 and value 60
+
+}  // namespace
+
+TEST_CASE("DSF: damaged header values are refused before they size anything", "[dsd]") {
+    const auto good = load(write_dsf("daphne_h.dsf", 2, 5000, 1));
+    struct Case {
+        const char* what;
+        size_t at;
+        uint64_t value;
+        int n;
+        const char* error;
+    };
+    const Case cases[] = {
+        {"block 0", 72, 0, 4, "block size"},
+        {"block 2^31 (negative as int)", 72, 0x80000000u, 4, "block size"},
+        {"block 2^28 (2 GB for two channels)", 72, 0x10000000u, 4, "block size"},
+        {"9 channels", 52, 9, 4, "channel count"},
+        {"rate 2^31 - 1", 56, 0x7FFFFFFFu, 4, "DSD rate"},
+        {"rate 3 x DSD64", 56, 3 * 2822400u, 4, "DSD rate"},
+        {"'fmt ' size 2^63", 32, 1ull << 63, 8, "'fmt '"},
+        {"'data' size 5 (below its own header)", 84, 5, 8, "'data'"},
+    };
+    for (const Case& c : cases) {
+        auto bad = good;
+        patch_le(bad, c.at, c.value, c.n);
+        const Opened r = open_with_deadline(bad, "daphne_bad.dsf");
+        INFO(c.what << ": " << r.error);
+        CHECK(r.how == 1);
+        CHECK(r.error.find(c.error) != std::string::npos);
+    }
+    auto dsd128_48k = good;   // the 48 kHz family and the higher rates are taken
+    patch_le(dsd128_48k, 56, 48000u * 128, 4);
+    CHECK(open_with_deadline(dsd128_48k, "daphne_48k.dsf").how == 0);
+}
+
+TEST_CASE("DSF: a truncated file plays what is there", "[dsd]") {
+    auto bytes = load(write_dsf("daphne_tr.dsf", 2, 8192, 1));
+    patch_le(bytes, 64, 1ull << 40, 8);   // sample count and 'data' size far beyond the file
+    patch_le(bytes, 84, 1ull << 40, 8);
+    const size_t data = 92;
+    bytes.resize(data + 4096 * 2 + 1000);   // one whole block (both channels) and part of the next
+    const Opened r = open_with_deadline(bytes, "daphne_tr2.dsf");
+    REQUIRE(r.how == 0);
+    CHECK(r.frames == (4096 * 2 + 1000) / 2);
+}
+
+TEST_CASE("DFF: chunk sizes that point backwards or past the end end the walk", "[dsd]") {
+    const auto good = load(write_dff("daphne_h.dff", kStereo, 5000));
+    {   // FVER: 12 + size = 0, so the next chunk would be this one again
+        auto bad = good;
+        patch_be(bad, 20, ~0ull - 11, 8);
+        const Opened r = open_with_deadline(bad, "daphne_loop.dff");
+        INFO(r.error);
+        CHECK(r.how == 1);
+    }
+    {   // the same inside PROP (FS)
+        auto bad = good;
+        patch_be(bad, 52, ~0ull - 11, 8);
+        const Opened r = open_with_deadline(bad, "daphne_loop2.dff");
+        INFO(r.error);
+        CHECK(r.how == 1);
+    }
+    {   // PROP far larger than the form
+        auto bad = good;
+        patch_be(bad, 36, 1ull << 61, 8);
+        CHECK(open_with_deadline(bad, "daphne_prop.dff").how == 1);
+    }
+    {
+        auto bad = good;
+        patch_be(bad, 4, ~0ull, 8);
+        const Opened r = open_with_deadline(bad, "daphne_form.dff");
+        CHECK(r.how == 1);
+        CHECK(r.error.find("form size") != std::string::npos);
+    }
+    {
+        auto bad = good;
+        patch_be(bad, 60, 0x7FFFFFFFu, 4);
+        const Opened r = open_with_deadline(bad, "daphne_fs.dff");
+        CHECK(r.how == 1);
+        CHECK(r.error.find("DSD rate") != std::string::npos);
+    }
+    {   // the sound data cut short (a broken download): what is there plays
+        auto cut = good;
+        cut.resize(cut.size() - 2000);
+        const Opened r = open_with_deadline(cut, "daphne_cut.dff");
+        REQUIRE(r.how == 0);
+        CHECK(r.frames == 5000 - 1000);
+    }
 }
