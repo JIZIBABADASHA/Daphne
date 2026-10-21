@@ -7,9 +7,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <exception>
 #include <thread>
 #include <vector>
 
+#include "daphne/dsp/progress.h"
 #include "daphne/platform/platform.h"
 
 namespace daphne::dsp {
@@ -32,8 +34,9 @@ inline int design_threads() {
 
 // f(begin, end) on contiguous parts of [0, n); parts of at least min_chunk elements. The
 // calling thread runs the first part, so dsp::progress() calls inside f report its share
-// (workers have no progress sink); if that part throws (cancellation), the workers are joined
-// before the exception propagates.
+// (workers have no progress sink). The workers run under the caller's CancelScope flag, so a
+// cancelled design stops on every thread at its next check; an exception on any thread
+// (cancellation) is thrown on the calling thread once all workers are joined.
 template <class F>
 void parallel_for(int64_t n, const F& f, int64_t min_chunk = 1 << 12) {
     if (n <= 0) return;
@@ -44,21 +47,29 @@ void parallel_for(int64_t n, const F& f, int64_t min_chunk = 1 << 12) {
     }
     const platform::Priority prio = platform::thread_priority();
     const bool background = detail::t_design_background;
+    const std::atomic<bool>* cancel = cancel_flag();
+    std::vector<std::exception_ptr> errors(static_cast<size_t>(parts));
     std::vector<std::thread> th;
     th.reserve(static_cast<size_t>(parts - 1));
     for (int64_t t = 1; t < parts; ++t) {
         th.emplace_back([&, t] {
             platform::set_thread_priority(background ? platform::Priority::Background : prio);
-            f(n * t / parts, n * (t + 1) / parts);
+            CancelScope scope(cancel);
+            try {
+                f(n * t / parts, n * (t + 1) / parts);
+            } catch (...) {   // not out of the thread (that ends the process): rethrown by the caller
+                errors[static_cast<size_t>(t)] = std::current_exception();
+            }
         });
     }
     try {
         f(int64_t{0}, n / parts);
     } catch (...) {
-        for (auto& x : th) x.join();
-        throw;
+        errors[0] = std::current_exception();
     }
     for (auto& x : th) x.join();
+    for (const auto& e : errors)
+        if (e) std::rethrow_exception(e);
 }
 
 }  // namespace daphne::dsp

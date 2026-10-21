@@ -183,7 +183,7 @@ TEST_CASE("C API: dc_stop cancels a load in progress; nothing plays", "[capi]") 
         std::atomic<int> code{1};
         std::thread loader([&] {
             char err[256] = {};
-            code = dc_load_utf8(pl, "a.test", R"({"output": {"rate": "176400"}, "filter": {"taps": 1048576}})", 0.0, 1, err, sizeof err);
+            code = dc_load_utf8(pl, "a.test", R"({"output": {"rate": "176400"}, "filter": {"taps": 1048576}, "design": {"threads": 2}})", 0.0, 1, err, sizeof err);
         });
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
         REQUIRE(state_of(pl) == "loading");

@@ -24,6 +24,12 @@ DesignBackgroundScope::~DesignBackgroundScope() { detail::t_design_background = 
 CancelScope::CancelScope(const std::atomic<bool>* flag) : prev_(t_cancel) { t_cancel = flag; }
 CancelScope::~CancelScope() { t_cancel = prev_; }
 
+const std::atomic<bool>* cancel_flag() { return t_cancel; }
+
+void check_cancel() {
+    if (t_cancel && t_cancel->load(std::memory_order_relaxed)) throw DesignCancelled{};
+}
+
 ProgressScope::ProgressScope(std::atomic<double>* sink) : prev_(t_sink), prev_base_(t_base), prev_span_(t_span) {
     t_sink = sink;
     t_base = 0.0;
