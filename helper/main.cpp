@@ -12,6 +12,8 @@
 //   apply    settings                      -> code, error
 //   pause    paused                        stop     hold   (the device is released: rate, DAC format, hog mode;
 //                                                                  hold: kept for the next load, as MIKU does)
+//                                          a stop cancels at once the load that runs (dc_cancel) and the loads still
+//                                          queued: they answer code DC_ERR_CANCELLED; nothing of them plays
 //   seek     seconds                       next     path, gain (dB or null)
 //   state                                  -> state (dc_state's object), kept (a device is kept, nothing loaded)
 //   meter                                  -> l, r
@@ -107,6 +109,7 @@ public:
                 quit_req = std::move(req);
                 break;
             }
+            if (str(req, "cmd") == "stop") cancel_loads();   // before it is queued: not after the load it stops
             if (!answer_now(req)) {
                 std::lock_guard<std::mutex> l(m_);
                 queue_.push_back(std::move(req));
@@ -129,6 +132,29 @@ public:
     }
 
 private:
+    // A stop came: the loads still queued are dropped (each answers cancelled) and the one the worker runs returns at
+    // once (dc_cancel), so the stop is not held behind a load (a first long design) and nothing of them plays.
+    void cancel_loads() {
+        std::vector<json> dropped;
+        {
+            std::lock_guard<std::mutex> l(m_);
+            for (auto it = queue_.begin(); it != queue_.end();) {
+                if (str(*it, "cmd") == "load") {
+                    dropped.push_back(std::move(*it));
+                    it = queue_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        for (const auto& d : dropped) {
+            json r = reply(d, false);
+            r["code"] = DC_ERR_CANCELLED, r["error"] = "cancelled (stop)";
+            emit(r);
+        }
+        dc_cancel(p_);
+    }
+
     // queries that never wait for a running command
     bool answer_now(const json& req) {
         const std::string cmd = str(req, "cmd");

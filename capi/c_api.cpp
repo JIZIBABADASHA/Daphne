@@ -151,7 +151,8 @@ extern "C" {
 
 // 2: the UTF-8 path functions (dc_load_utf8, dc_set_next_utf8, dc_set_next_gain_utf8, dc_filter_cache_dir_utf8)
 // 3: dc_keep_device, dc_release_device, dc_device_kept
-DC_API int dc_abi_version(void) { return 3; }
+// 4: dc_cancel; dc_stop cancels a load in progress (DC_ERR_CANCELLED); dc_state "loading"
+DC_API int dc_abi_version(void) { return 4; }
 DC_API const char* dc_version(void) { return "daphne 0.1.0"; }
 
 DC_API dc_player* dc_create(void) {
@@ -364,6 +365,14 @@ DC_API void dc_stop(dc_player* p) {
         cancel_start(p);   // a load in progress returns at its next check (a design, the prefill) instead of playing
         std::lock_guard<std::mutex> l(p->op);
         stop_player(p);
+    } catch (...) {
+    }
+}
+
+DC_API void dc_cancel(dc_player* p) {
+    if (!p) return;
+    try {
+        cancel_start(p);
     } catch (...) {
     }
 }

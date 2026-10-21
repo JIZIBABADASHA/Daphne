@@ -221,6 +221,43 @@ TEST_CASE("C API: dc_stop cancels a load in progress; nothing plays", "[capi]") 
     dc_internal_player_deps(nullptr);
 }
 
+TEST_CASE("C API: dc_cancel cancels a load at once and leaves what plays alone", "[capi]") {
+    using clock = std::chrono::steady_clock;
+    const std::filesystem::path off("off");
+    test::set_env("DAPHNE_FILTER_CACHE", &off);
+    SlowRig rig;
+    const auto deps = rig.deps(0.0);
+    dc_internal_player_deps(&deps);
+    dc_player* pl = dc_create();
+    REQUIRE(pl);
+    CHECK(dc_abi_version() >= 4);
+    dc_cancel(pl);   // nothing loading: no effect
+    char err[256] = {};
+    REQUIRE(dc_load_utf8(pl, "a.test", R"({"output": {"rate": "native"}})", 0.0, 1, err, sizeof err) == DC_OK);
+    dc_cancel(pl);   // playing, nothing loading: it plays on
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(state_of(pl) == "playing");
+    std::atomic<int> code{1};
+    std::thread loader([&] {
+        char e2[256] = {};
+        code = dc_load_utf8(pl, "a.test", R"({"output": {"rate": "176400"}, "filter": {"taps": 1048576}, "design": {"threads": 2}})", 0.0, 1, e2, sizeof e2);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    REQUIRE(state_of(pl) == "loading");
+    const auto t0 = clock::now();
+    dc_cancel(pl);
+    const double took = std::chrono::duration<double>(clock::now() - t0).count();
+    loader.join();
+    const double load_ended = std::chrono::duration<double>(clock::now() - t0).count();
+    INFO("dc_cancel took " << took * 1000 << " ms, the load ended " << load_ended * 1000 << " ms after it");
+    CHECK(took < 0.05);   // it does not wait for the load
+    CHECK(code == DC_ERR_CANCELLED);
+    CHECK(load_ended < 2.0);
+    dc_destroy(pl);
+    test::set_env("DAPHNE_FILTER_CACHE", nullptr);
+    dc_internal_player_deps(nullptr);
+}
+
 TEST_CASE("C API: loads and stops and queries from several threads at once", "[capi]") {
     // no crash, no deadlock, no race (the tsan job): every load is played or cancelled
     SlowRig rig;
