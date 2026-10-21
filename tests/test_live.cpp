@@ -89,6 +89,31 @@ TEST_CASE("Live decoder: silence before the producer starts, then the stream wit
     CHECK(std::abs(st.adjust) <= 0.005);
 }
 
+TEST_CASE("Live decoder: the write index wrapping at 2^32 is read through, not taken for a reload", "[live]") {
+    Bus bus(131072);
+    bus.index() = 0xFFFFFFFFu - 30000;   // wraps about 0.6 s into the stream
+    std::string e;
+    auto d = open_decoder(kLivePath, &e);
+    REQUIRE(d);
+    std::vector<double> out(1024 * 2), y;
+    bus.write(24000);
+    d->read(out.data(), 1024);   // syncs to the writer (silence)
+    for (int round = 0; round < 80; ++round) {
+        bus.write(1024);
+        const int n = d->read(out.data(), 1024);
+        y.insert(y.end(), out.begin(), out.begin() + 2 * n);
+    }
+    REQUIRE(bus.index() < 0x10000000u);   // the writer did wrap
+    size_t s = 0;
+    while (s < y.size() && y[s] == 0.0) s += 2;
+    REQUIRE(y.size() - s > 2 * 40000);
+    const double step_max = 2 * kPi * 1000.0 / 48000.0 * 0.5 * 1.01;
+    double worst = 0;
+    for (size_t i = s + 2; i < y.size(); i += 2) worst = std::max(worst, std::abs(y[i] - y[i - 2]));
+    CHECK(worst < step_max);   // no break at the wrap
+    CHECK(live_stats().resyncs == 0);
+}
+
 TEST_CASE("Live decoder: lapped by the writer it restarts close to it; a starve returns 5 ms of silence", "[live]") {
     Bus bus(48000);
     std::string e;

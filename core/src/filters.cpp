@@ -3,6 +3,7 @@
 #include "daphne/platform/platform.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -136,10 +137,16 @@ void store_cached_filter(const std::string& key, const std::vector<double>& h) {
 std::vector<double> design_filter(const FilterSettings& s, int fs_in, int fs_out, std::vector<double>* lo) {
     const int ratio = ratio_of(fs_in, fs_out);
     const std::string key = cacheable(s, fs_in, fs_out) ? filter_cache_key(s, fs_in, fs_out) : std::string();
+    // a cached filter is used only when it is what the design gives (taps x ratio coefficients) and every value is
+    // finite: a damaged file is designed again, not played as NaN or as a filter of another length
+    const size_t want = static_cast<size_t>(std::max(s.taps * ratio, 1));
+    auto usable = [want](const std::vector<double>& v) {
+        return v.size() == want && std::all_of(v.begin(), v.end(), [](double x) { return std::isfinite(x); });
+    };
     std::vector<double> h;
-    if (!key.empty() && load_cached_filter(key, h)) {
+    if (!key.empty() && load_cached_filter(key, h) && usable(h)) {
         if (!lo) return h;
-        if (load_cached_filter(key + "_lo", *lo) && lo->size() == h.size()) return h;
+        if (load_cached_filter(key + "_lo", *lo) && usable(*lo)) return h;
     }
     // the low parts are stored only when asked for (they double the file size)
     h = dsp::design_lowpass(s.taps, ratio, fs_in, fs_out, s.phase_alpha(), s.apodize, lo);
@@ -159,14 +166,16 @@ std::unique_ptr<dsp::Resampler> make_resampler(const FilterSettings& s, int fs_i
                                             s.double_double ? &lo : nullptr);
 }
 
-std::vector<std::string> filter_cache_keys_in_use(const Settings& s) {
+std::vector<std::string> filter_cache_keys_in_use(const Settings& s, int source_rate) {
     std::vector<std::string> keys;
     auto add = [&](int fs_in, int fs_out) {
         if (!cacheable(s.filter, fs_in, fs_out)) return;
         keys.push_back(filter_cache_key(s.filter, fs_in, fs_out));
         keys.push_back(keys.back() + "_lo");
     };
-    for (int fs_in : {44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000}) {
+    std::vector<int> rates = {44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000};
+    if (source_rate > 0 && std::find(rates.begin(), rates.end(), source_rate) == rates.end()) rates.push_back(source_rate);
+    for (int fs_in : rates) {
         add(fs_in, pcm_output_rate(fs_in, s.output.rate));
         add(fs_in, modulator_input_rate(fs_in));
     }
@@ -204,9 +213,9 @@ CachePruneResult prune_filter_cache(uint64_t limit_bytes, const std::vector<std:
     return r;
 }
 
-void trim_filter_cache(const Settings& s) {
+void trim_filter_cache(const Settings& s, int source_rate) {
     if (s.design.cache_limit_mb > 0)
-        prune_filter_cache(static_cast<uint64_t>(s.design.cache_limit_mb) << 20, filter_cache_keys_in_use(s));
+        prune_filter_cache(static_cast<uint64_t>(s.design.cache_limit_mb) << 20, filter_cache_keys_in_use(s, source_rate));
 }
 
 }  // namespace daphne

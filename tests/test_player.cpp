@@ -372,6 +372,93 @@ TEST_CASE("Player: seek resumes at the frame asked for", "[player]") {
     CHECK(diff == 0);
 }
 
+namespace {
+// A memory decoder that says when it has been read to its end (the read that returns nothing: the player then moves
+// on to the next track)
+class EndFlagDecoder final : public Decoder {
+public:
+    EndFlagDecoder(std::shared_ptr<const Signal> s, std::atomic<bool>* at_end) : inner_(std::move(s)), at_end_(at_end) {
+        info_ = inner_.info();
+    }
+    bool open(const std::filesystem::path& p, std::string* e) override { return inner_.open(p, e); }
+    void close() override {}
+    int read(double* out, int frames) override {
+        const int n = inner_.read(out, frames);
+        if (n == 0) *at_end_ = true;
+        return n;
+    }
+    bool seek(int64_t frame) override { return inner_.seek(frame); }
+
+private:
+    test::MemoryDecoder inner_;
+    std::atomic<bool>* at_end_;
+};
+}  // namespace
+
+TEST_CASE("Player: a seek while the next track is decoded ahead goes back into this one", "[player]") {
+    // the decoder moves on to the next track about 0.5 s (the ring) before it is heard. A seek then is in this track:
+    // it opens it again and plays it from there (before, the seek landed in the next track). When it cannot be opened
+    // again (the file went away), the playback fails instead of playing the next track at that position.
+    for (const bool gone : {false, true}) {
+        INFO((gone ? "the track cannot be opened again" : "the track opens again"));
+        Rig r;
+        r.dev->speed = 1.0;
+        const auto a = int24_noise(44100, 2, 2 * 44100, 5);
+        r.sources["b"] = int24_noise(44100, 2, 44100, 6);
+        std::atomic<bool> a_read{false}, a_gone{false};
+        PlayerDeps d = r.deps();
+        d.open_decoder = [&, inner = d.open_decoder](const std::filesystem::path& p, std::string* e) -> std::unique_ptr<Decoder> {
+            if (platform::path_to_utf8(p) != "a") return inner(p, e);
+            if (a_gone) {
+                if (e) *e = "the file is gone";
+                return nullptr;
+            }
+            return std::make_unique<EndFlagDecoder>(a, &a_read);
+        };
+        Settings s;
+        s.output.rate = "native";
+        r.player = std::make_unique<Player>(d);
+        std::string e;
+        REQUIRE(r.player->start(platform::path_from_utf8("a"), s, OutputChoice{}, r.callbacks(), &e, 0.0));
+        r.player->set_next(platform::path_from_utf8("b"));
+        const auto t0 = std::chrono::steady_clock::now();
+        while (!a_read && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5))
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        REQUIRE(a_read);
+        sleep_s(0.02);   // the decoder has moved on to "b"; "a" is still heard for about the ring's 0.5 s
+        REQUIRE(r.player->position_seconds() < 1.8);
+        a_gone = gone;
+        const size_t before = r.dev->samples32().size() / 2;   // frames played before the seek
+        r.player->seek(0.5);
+        while (!r.player->finished() && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(15))
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        REQUIRE(r.player->finished());
+        PlayReport rep;
+        std::string err;
+        const bool ok = r.player->wait(&rep, &err);
+        INFO(err);
+        if (gone) {
+            CHECK_FALSE(ok);
+            CHECK(err.find("could not be opened again") != std::string::npos);
+            CHECK_FALSE(r.ended);
+            CHECK(r.tracks == 0);   // "b" was never heard
+        } else {
+            CHECK(ok);
+            CHECK(r.ended);
+            CHECK(r.tracks == 1);   // "b" after "a" again, once
+            // after the seek "a" plays from 0.5 s on (past the 20 ms fade-in), sample for sample
+            const auto y = r.dev->samples32();
+            const int64_t from = 22050 + 2000;
+            const int64_t at = find_frames(y, *a, from, before);   // after the seek, not "a" heard the first time
+            REQUIRE(at > 0);
+            size_t diff = 0;
+            for (int64_t k = 0; k < 2 * 22050; ++k)
+                diff += y[static_cast<size_t>(at * 2 + k)] != as_int32(a->x[static_cast<size_t>(from * 2 + k)]);
+            CHECK(diff == 0);
+        }
+    }
+}
+
 TEST_CASE("Player: pause holds the position, resume goes on from there", "[player]") {
     Rig r;
     r.dev->speed = 4.0;
@@ -994,5 +1081,6 @@ TEST_CASE("Player: an exception while opening, playing or preparing the next tra
         CHECK(failed.empty());
         CHECK(rig.ended);
         CHECK(rig.tracks == 0);
+        CHECK(rig.saw("the next track could not be opened (open failure)"));   // why, for the host's log
     }
 }

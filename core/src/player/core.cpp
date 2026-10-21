@@ -70,9 +70,10 @@ void Player::Impl::kick_cache_trim() {
     auto flag = std::make_shared<std::atomic<bool>>(false);
     PreJob j;
     j.cancel = flag;
-    j.th = std::thread([cfg = s, flag] {
+    // the track playing keeps its filter too when its rate is not one of the usual ones (22.05, 32 kHz ...)
+    j.th = std::thread([cfg = s, rate = rep.source.rate, flag] {
         platform::set_thread_priority(platform::Priority::Background);
-        if (!*flag) trim_filter_cache(cfg);
+        if (!*flag) trim_filter_cache(cfg, rate);
     });
     pre_jobs.push_back(std::move(j));
 }
@@ -110,30 +111,40 @@ void Player::Impl::check_switch() {
     }
 }
 
-void Player::Impl::do_seek(double sec) {
-    if (!io.dev) return;
+bool Player::Impl::do_seek(double sec) {
+    if (!io.dev) return true;
     io.dev->set_paused(true);
     // the device fades out at its next callback, one buffer away (output.buffer_ms): wait for two of them
     const int buf_ms = rep.device.frame_rate() > 0 ? static_cast<int>(1000LL * io.dev->buffer_frames() / rep.device.frame_rate()) : 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(300, 2 * buf_ms + 50));
     while (!io.dev->paused() && !io.dev->failed() && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    // a track heard just now is the one the seek is in. Before the ring is cleared: the heard position is what was
+    // written less what the ring still holds, so with the ring empty everything written would count as heard and a
+    // next track only decoded ahead (the last ~0.5 s of this one) would be taken as playing: the seek landed in it
+    check_switch();
     io.ring->clear();
     io.pend = io.pend_off = 0;
     cross_join.clear();   // the old chain's tail is not played after a seek
     std::string e;
-    check_switch();   // a track heard just now is the one the seek is in
     if (!tl.switches.empty()) {
         // the decoder already moved on to a gapless track that is not heard yet: back to this one
         queue.restore(tl.switches.front().path);
         undo_cross();
         undo_headroom();
         tl.switches.clear();
+        // the decoder holds the next track now: without this one again the seek would play the other at this position
+        bool reopened = false;
         if (dsdf) {
             auto f = std::make_unique<DsdFile>();
-            if (f->open(cur_path, &e)) dsdf = std::move(f);
+            if ((reopened = f->open(cur_path, &e))) dsdf = std::move(f);
         } else if (auto d = open_source(cur_path, s, &e)) {
             dec = std::move(d);
+            reopened = true;
+        }
+        if (!reopened) {
+            err = "seek: the track could not be opened again: " + e;
+            return false;
         }
     }
     int64_t from = static_cast<int64_t>(std::max(0.0, sec) * rep.source.rate);
@@ -180,19 +191,20 @@ void Player::Impl::do_seek(double sec) {
     pos = heard_position();
     event(is_live_path(cur_path) ? std::string("live input: back to the writer (what it wrote meanwhile is skipped)")
                                  : "seek to " + std::to_string(sec) + " s");
+    return true;
 }
 
-void Player::Impl::service_transport() {
+bool Player::Impl::service_transport() {
     std::optional<double> sk;
     {
         std::lock_guard<std::mutex> l(m);
         sk.swap(seek_req);
     }
-    if (sk) do_seek(*sk);
+    if (sk && !do_seek(*sk)) return false;
     // a live source resumed: the producer kept writing while it was paused, so it goes back to the writer
     // (a seek: the device is already silent, the ring is refilled, it fades in) instead of playing that late
     const bool paused_now = want_pause.load();
-    if (io.dev && was_paused && !paused_now && !dsdf && is_live_path(cur_path)) do_seek(pos_sec.load());
+    if (io.dev && was_paused && !paused_now && !dsdf && is_live_path(cur_path) && !do_seek(pos_sec.load())) return false;
     was_paused = paused_now;
     if (io.dev) {
         io.dev->set_paused(want_pause.load());
@@ -211,6 +223,7 @@ void Player::Impl::service_transport() {
         event(b);
     }
     update_diag();
+    return true;
 }
 
 void Player::Impl::run() {
@@ -378,7 +391,10 @@ void Player::Impl::loop(Stream& st) {
             break;
         }
         kick_prepare();
-        service_transport();
+        if (!service_transport()) {
+            ok = false;
+            break;
+        }
         if (!io.eof && !st.produce()) queue_end();
         if (!io.push()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
         else if (io.eof && io.pend_off >= io.pend) {

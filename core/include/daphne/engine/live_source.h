@@ -2,8 +2,11 @@
 // Live input: a float32 stereo ring in memory the host shares with an audio producer it does not
 // control (a browser page's audio tap), read as a decoder opened with the path kLivePath.
 //
-// Ring layout (set_live_bus): uint32 write index in frames (wraps) | 12 bytes reserved | float32
-// stereo frames, cap_frames of them. The producer writes the frames, then the index.
+// Ring layout (set_live_bus): uint32 write index in frames | 12 bytes reserved | float32 stereo frames,
+// cap_frames of them. The producer writes the frames, then the index. The index wraps at 2^32 (about 27 h at
+// 44.1 kHz) and the frame at index i is at i % cap_frames on both sides; the reader compares positions modulo
+// 2^32, so the wrap is not taken for a reload. A cap_frames that is not a power of two still works, but for the
+// moment of the wrap the ring holds only 2^32 % cap_frames frames (for 96000: 23296, about 0.49 s at 48 kHz).
 //
 // The producer runs on its own clock and delivers in bursts, so the decoder keeps a jitter buffer
 // in the ring (0.15 s, raised by 50 ms per stall up to 0.30 s and lowered again after quiet playback;

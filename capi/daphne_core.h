@@ -30,6 +30,7 @@ extern "C" {
 #define DC_ERR_FILE -3       /* the file could not be opened / decoded */
 #define DC_ERR_DEVICE -4     /* the output device could not be opened / started */
 #define DC_ERR_BUFFER -5     /* the output buffer is too small (the return value of *_json functions) */
+#define DC_ERR_INTERNAL -6   /* the engine failed inside (out of memory, an unexpected error; message says what) */
 
 typedef struct dc_player dc_player;
 
@@ -50,7 +51,8 @@ DC_API void dc_destroy(dc_player* p);
  * stopped first. */
 DC_API int dc_load(dc_player* p, const wchar_t* path, const char* settings_json, double seconds, int play, char* err, int err_len);
 DC_API int dc_load_utf8(dc_player* p, const char* path, const char* settings_json, double seconds, int play, char* err, int err_len);
-/* New settings for the playing track (in place, rebuild + crossfade, or device restart as needed). */
+/* New settings for the playing track (in place, rebuild + crossfade, or device restart as needed).
+ * DC_ERR_SETTINGS when the JSON has errors, DC_ERR_INTERNAL when applying them failed (err says why). */
 DC_API int dc_apply(dc_player* p, const char* settings_json, char* err, int err_len);
 DC_API void dc_pause(dc_player* p, int paused);
 DC_API void dc_seek(dc_player* p, double seconds);
@@ -100,7 +102,7 @@ DC_API double dc_design(dc_player* p);
 DC_API void dc_meter(dc_player* p, double* l, double* r);
 
 /* The filter cache folder (UTF-16, NUL-terminated); returns its length, 0 when the cache is disabled
- * (DAPHNE_FILTER_CACHE=off), or DC_ERR_BUFFER. */
+ * (DAPHNE_FILTER_CACHE=off), DC_ERR_BUFFER, or DC_ERR_INTERNAL when the folder could not be worked out. */
 DC_API int dc_filter_cache_dir(wchar_t* out, int len);
 /* The same in UTF-8 (NUL-terminated; the length in bytes). */
 DC_API int dc_filter_cache_dir_utf8(char* out, int len);
