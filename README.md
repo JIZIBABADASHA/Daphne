@@ -161,7 +161,7 @@ dc_destroy(p);
 
 | Component | License | Distribution |
 |---|---|---|
-| [dr_libs](https://github.com/mackron/dr_libs) (dr_wav, dr_flac) | Public domain / MIT-0 | in `third_party/` |
+| [dr_libs](https://github.com/mackron/dr_libs) (dr_wav, dr_flac) | Public domain / MIT-0 | in `third_party/`; dr_flac 0.13.4 with one local fix (its seek estimate converted inf / NaN to an integer, found by fuzzing; marked "Daphne (local change)") |
 | [minimp3](https://github.com/lieff/minimp3) | CC0 | in `third_party/` |
 | [nlohmann/json](https://github.com/nlohmann/json) | MIT | in `third_party/` |
 | [Catch2](https://github.com/catchorg/Catch2) | BSL-1.0 | in `third_party/` (tests only) |

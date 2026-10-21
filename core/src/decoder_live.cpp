@@ -26,6 +26,16 @@ constexpr double kQuietNext = 30.0;    // and between the next ones
 constexpr double kOverflow = 1.2;    // beyond this something stalled: restart near the writer
 constexpr int kWaitMs = 20;          // running: how long to wait for the producer before a starve
 
+// The ring's write index, written by a producer outside this program: an atomic load (acquire) of plain memory.
+// std::atomic_ref where the library has it; Apple's libc++ does not yet, Clang's builtin is the same operation.
+inline uint32_t load_acquire(uint32_t* p) {
+#ifdef __cpp_lib_atomic_ref
+    return std::atomic_ref<uint32_t>(*p).load(std::memory_order_acquire);
+#else
+    return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+#endif
+}
+
 std::atomic<uint8_t*> g_base{nullptr};
 std::atomic<int> g_cap{0};
 std::atomic<int> g_readers{0};   // reads inside the ring right now (set_live_bus waits for them to leave)
@@ -144,7 +154,7 @@ private:
         const uint32_t cap = static_cast<uint32_t>(g_cap.load());
         if (cap == 0) return 0;
         // the producer writes the frames, then the index (release): read as an atomic, the frames up to it are there
-        const uint32_t w = std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(base)).load(std::memory_order_acquire);
+        const uint32_t w = load_acquire(reinterpret_cast<uint32_t*>(base));
         const float* ring = reinterpret_cast<const float*>(base + 16);
         const int rate = g_rate.load();
 

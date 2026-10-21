@@ -6049,7 +6049,18 @@ static drflac_bool32 drflac__seek_to_pcm_frame__binary_search_internal(drflac* p
                             byteRangeHi = byteRangeLo;
                         }
 
-                        targetByte = lastSuccessfulSeekOffset + (drflac_uint64)(((drflac_int64)((pcmFrameIndex-pcmRangeLo) * pFlac->channels * pFlac->bitsPerSample)/8.0) * approxCompressionRatio);
+                        /* Daphne (local change): the estimate is checked before it becomes an integer. With pcmRangeLo == 0 the
+                           ratio above is inf or NaN, and a negative estimate is possible on a damaged stream: converting either to
+                           drflac_uint64 is undefined (found by fuzzing; dr_flac 0.13.4, also upstream). They go to byteRangeHi, which
+                           is where the clamp below put what x86 and ARM gave for them. */
+                        {
+                            const double estimate = ((drflac_int64)((pcmFrameIndex-pcmRangeLo) * pFlac->channels * pFlac->bitsPerSample)/8.0) * approxCompressionRatio;
+                            if (!(estimate >= 0) || estimate >= (double)(byteRangeHi - lastSuccessfulSeekOffset)) {
+                                targetByte = byteRangeHi;
+                            } else {
+                                targetByte = lastSuccessfulSeekOffset + (drflac_uint64)estimate;
+                            }
+                        }
                         if (targetByte > byteRangeHi) {
                             targetByte = byteRangeHi;
                         }
