@@ -925,3 +925,74 @@ TEST_CASE("Player: the report says how fast the chain runs", "[player][throughpu
     CHECK_FALSE(r.saw("real time (it needs"));
 }
 
+
+namespace {
+
+// A source that throws after `after` frames (a decoder hitting a bad allocation or a library error mid-file).
+class ThrowingDecoder final : public Decoder {
+public:
+    ThrowingDecoder(std::shared_ptr<const Signal> s, int64_t after) : inner_(std::move(s)), after_(after) { info_ = inner_.info(); }
+    bool open(const std::filesystem::path& p, std::string* e) override { return inner_.open(p, e); }
+    void close() override {}
+    int read(double* out, int frames) override {
+        if (pos_ >= after_) throw std::runtime_error("decoder failure");
+        const int n = inner_.read(out, frames);
+        pos_ += n;
+        return n;
+    }
+    bool seek(int64_t frame) override { return inner_.seek(frame); }
+
+private:
+    test::MemoryDecoder inner_;
+    int64_t after_, pos_ = 0;
+};
+
+}  // namespace
+
+TEST_CASE("Player: an exception while opening, playing or preparing the next track fails the playback, not the process",
+          "[player]") {
+    Settings s;
+    s.output.rate = "native";
+    const auto music = sine(44100, 1000, 1.0);
+    auto run = [&](Rig& rig, const std::string& path, std::string* failed, std::string* start_error,
+                   const std::filesystem::path& next = {}) {
+        PlayerDeps d = rig.deps();
+        const auto real = d.open_decoder;
+        d.open_decoder = [&, real](const std::filesystem::path& p, std::string* e) -> std::unique_ptr<Decoder> {
+            const std::string name = platform::path_to_utf8(p);
+            if (name == "throws.test") throw std::runtime_error("open failure");
+            if (name == "throws-later.test") return std::make_unique<ThrowingDecoder>(music, 36000);   // after the prefill (about 0.5 s)
+            return real(p, e);
+        };
+        PlayCallbacks cb = rig.callbacks();
+        cb.on_failed = [failed](const std::string& e) { *failed = e; };
+        rig.player = std::make_unique<Player>(d);
+        if (!next.empty()) rig.player->set_next(next);
+        return rig.player->start(platform::path_from_utf8(path), s, OutputChoice{}, cb, start_error);
+    };
+    {   // opening: start() returns the error
+        Rig rig;
+        std::string failed, e;
+        CHECK_FALSE(run(rig, "throws.test", &failed, &e));
+        CHECK(e.find("internal error: open failure") != std::string::npos);
+    }
+    {   // mid-file: the playback fails like a lost device (finish_playback, on_failed)
+        Rig rig;
+        std::string failed, e;
+        REQUIRE(run(rig, "throws-later.test", &failed, &e));
+        rig.finish();
+        CHECK(failed.find("internal error: decoder failure") != std::string::npos);
+        CHECK_FALSE(rig.ended);
+    }
+    {   // the next track: not prepared, so not gapless; this one plays to its end
+        Rig rig;
+        rig.sources["a"] = music;
+        std::string failed, e;
+        REQUIRE(run(rig, "a", &failed, &e, platform::path_from_utf8("throws.test")));
+        rig.finish();
+        INFO(failed);
+        CHECK(failed.empty());
+        CHECK(rig.ended);
+        CHECK(rig.tracks == 0);
+    }
+}

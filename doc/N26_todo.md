@@ -2,10 +2,6 @@
 
 尚未完成的工作與已知、暫不處理的問題。完成的項目移到對應的文件（N25 等），並從這裡刪除。
 
-## 跨平台收尾（N25）
-
-- **`cross-platform-plan` 合併回 `main`**：等下面的拆分步驟 5–7 都完成後一次合併（處理速度偵測、即時輸入延遲、預熱移出處理執行緒已完成，見 N4 / N2）；之後讓 MIKU 的 `Extensions/Daphne` 指向新的版本（MIKU 端另發 PR）。
-
 ## 尚未驗證
 
 - **MSVC ARM64 建置**（Windows on ARM）：程式已避開 x86 專屬的 cpuid、FPCR 改用 `_ReadStatusReg` / `_WriteStatusReg`，但沒有 ARM64 工具組，尚未實際編譯。
@@ -20,7 +16,7 @@
 
 ## 拆分計畫的後續步驟（N25）
 
-順序：0 → 5 → 7，以 Windows 與 macOS 為主；6（Linux）暫緩。每一步一個分支、一個 PR，合進 `cross-platform-plan`。完成的項目打勾，實作時的發現記在最後的「實作筆記」。
+順序：0 → 5 → 7，以 Windows 與 macOS 為主；6（Linux）暫緩。每一步一個分支、一個 PR，直接合進 `main`。完成的項目打勾，實作時的發現記在最後的「實作筆記」。
 
 ### 0. 輸出能力（分支 `output-caps`，PR #18）✅
 

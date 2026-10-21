@@ -137,6 +137,9 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
                 } catch (const dsp::DesignCancelled&) {
                     be = "cancelled";
                     return false;
+                } catch (const std::exception& ex) {
+                    be = std::string("the chain could not be built: ") + ex.what();
+                    return false;
                 }
             });
             while (job.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready)

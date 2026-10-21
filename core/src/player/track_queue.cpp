@@ -53,14 +53,22 @@ void TrackQueue::kick(const std::function<Context()>& make) {
     p->key = chain_key(c.cs, c.cf);
     std::thread worker([p, c] {
         std::string e;
+        // opening may throw on a damaged file: the next track is then not prepared (not gapless), the process goes on
         if (c.dsd) {
             auto f = std::make_unique<DsdFile>();
-            if (f->open(p->path, &e)) p->dsdf = std::move(f);
+            try {
+                if (f->open(p->path, &e)) p->dsdf = std::move(f);
+            } catch (...) {
+            }
             p->opened = true;
             p->done = true;
             return;
         }
-        auto d = c.opener(p->path, &e);
+        std::unique_ptr<Decoder> d;
+        try {
+            d = c.opener(p->path, &e);
+        } catch (...) {
+        }
         const bool have = d != nullptr;
         const AudioInfo src = have ? d->info() : AudioInfo{};
         p->dec = std::move(d);   // take() may hand it over as soon as opened is set

@@ -50,6 +50,7 @@ private:
     DsdInfo info_;
     bool dsf_ = true, lsb_first_ = true;
     int64_t data_off_ = 0;
+    int64_t file_size_ = -1;           // bytes, -1 when unknown: chunk sizes beyond it are cut to what is there
     int block_ = 4096;                 // DSF bytes per channel and block
     std::vector<uint8_t> blk_;         // DSF: current block, channel after channel
     int64_t blk_index_ = -1;

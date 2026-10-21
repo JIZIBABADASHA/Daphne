@@ -29,6 +29,26 @@ uint16_t be16(const uint8_t* p) { return static_cast<uint16_t>(p[0] << 8 | p[1])
 
 bool seek64(FILE* f, int64_t off) { return platform::seek_file(f, off); }
 
+// Header values are checked before they size anything: a damaged or crafted file must fail, not allocate gigabytes or
+// loop forever.
+constexpr uint64_t kMaxBlock = 1 << 20;        // DSF bytes per channel and block (the format fixes 4096)
+constexpr uint64_t kMaxFmtChunk = 1 << 20;     // DSF 'fmt ' chunk (52 bytes in the format)
+
+// DSD64 ... DSD1024 of the 44.1 or the 48 kHz family (what the modulator and DoP handle)
+bool valid_dsd_rate(uint64_t rate) {
+    for (const uint64_t base : {44100ull * 64, 48000ull * 64})
+        for (uint64_t m = 1; m <= 16; m *= 2)
+            if (rate == base * m) return true;
+    return false;
+}
+
+// DFF: where the chunk whose body starts at `body` and holds `size` bytes ends (padded to even), or -1 when it does not
+// fit before `end`. The result is always beyond the chunk's 12-byte header, so a walk over chunks moves forward.
+int64_t chunk_end(int64_t body, uint64_t size, int64_t end) {
+    if (body > end || size > static_cast<uint64_t>(end - body)) return -1;
+    return body + static_cast<int64_t>(size + (size & 1));
+}
+
 // speaker mask bits (WAVEFORMATEXTENSIBLE)
 constexpr uint32_t kFL = 0x1, kFR = 0x2, kFC = 0x4, kLFE = 0x8, kBL = 0x10, kBR = 0x20;
 
@@ -76,6 +96,9 @@ bool DsdFile::open(const std::filesystem::path& path, std::string* error) {
     f_ = nullptr;
     info_ = DsdInfo{};
     f_ = platform::open_file(path, "rb");
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    file_size_ = ec ? -1 : static_cast<int64_t>(size);
     if (!f_) {
         if (error) *error = "cannot open the file";
         return false;
@@ -93,24 +116,30 @@ bool DsdFile::open(const std::filesystem::path& path, std::string* error) {
 }
 
 bool DsdFile::open_dsf(std::string* error) {
-    auto fail = [&](const char* m) {
-        if (error) *error = std::string("DSF: ") + m;
+    auto fail = [&](const std::string& m) {
+        if (error) *error = "DSF: " + m;
         return false;
     };
     uint8_t h[28], fmt[52], data[12];
     if (fread(h, 1, 28, f_) != 28) return fail("short header");
     if (fread(fmt, 1, 52, f_) != 52 || std::memcmp(fmt, "fmt ", 4) != 0) return fail("no 'fmt ' chunk");
     const uint64_t fmt_size = le64(fmt + 4);
+    if (fmt_size < 52 || fmt_size > kMaxFmtChunk) return fail("invalid 'fmt ' chunk size " + std::to_string(fmt_size));
     if (le32(fmt + 16) != 0) return fail("unsupported format id (not raw DSD)");
     const uint32_t ch_type = le32(fmt + 20), ch = le32(fmt + 24), rate = le32(fmt + 28), bps = le32(fmt + 32);
     const uint64_t samples = le64(fmt + 36);
     const uint32_t block = le32(fmt + 44);
     if (bps != 1 && bps != 8) return fail("bits per sample must be 1 or 8");
-    if (ch < 1 || ch > 8 || block == 0 || rate < 2822400) return fail("invalid channel count, block size or rate");
+    if (ch < 1 || ch > 8) return fail("invalid channel count " + std::to_string(ch));
+    if (block == 0 || block > kMaxBlock) return fail("invalid block size " + std::to_string(block));
+    if (!valid_dsd_rate(rate)) return fail("unsupported DSD rate " + std::to_string(rate));
     if (!seek64(f_, 28 + static_cast<int64_t>(fmt_size))) return fail("seek");
     if (fread(data, 1, 12, f_) != 12 || std::memcmp(data, "data", 4) != 0) return fail("no 'data' chunk");
-    const uint64_t data_bytes = le64(data + 4) - 12;
+    const uint64_t data_size = le64(data + 4);
+    if (data_size < 12) return fail("invalid 'data' chunk size " + std::to_string(data_size));
     data_off_ = 28 + static_cast<int64_t>(fmt_size) + 12;
+    uint64_t data_bytes = data_size - 12;
+    if (file_size_ >= 0) data_bytes = std::min<uint64_t>(data_bytes, static_cast<uint64_t>(std::max<int64_t>(0, file_size_ - data_off_)));
     dsf_ = true;
     lsb_first_ = bps == 1;
     block_ = static_cast<int>(block);
@@ -118,8 +147,13 @@ bool DsdFile::open_dsf(std::string* error) {
     info_.dsd_rate = static_cast<int>(rate);
     info_.channels = static_cast<int>(ch);
     info_.channel_mask = dsf_mask(ch_type);
-    // the sample count bounds playback, not the padding of the last block or the chunks after the data
-    info_.frames = static_cast<int64_t>(std::min<uint64_t>(samples / 8, data_bytes / ch));
+    // the sample count bounds playback, not the padding of the last block or the chunks after the data. A block holds
+    // its channels one after another, so in a block cut short only the bytes the last channel still has are a frame
+    // for every channel (beyond them a channel would read the zero fill: full-scale negative in DSD, a click)
+    const uint64_t span = static_cast<uint64_t>(block) * ch, rest = data_bytes % span;
+    const uint64_t per_ch = data_bytes / span * block +
+                            (rest > static_cast<uint64_t>(block) * (ch - 1) ? rest - static_cast<uint64_t>(block) * (ch - 1) : 0);
+    info_.frames = static_cast<int64_t>(std::min<uint64_t>(samples / 8, per_ch));
     blk_.assign(static_cast<size_t>(block_) * ch, 0);
     blk_index_ = -1;
     pos_ = 0;
@@ -133,7 +167,10 @@ bool DsdFile::open_dff(std::string* error) {
     };
     uint8_t h[16];
     if (fread(h, 1, 16, f_) != 16 || std::memcmp(h + 12, "DSD ", 4) != 0) return fail("not a DSD form");
-    const int64_t form_end = 12 + static_cast<int64_t>(be64(h + 4));
+    const uint64_t form_size = be64(h + 4);
+    if (form_size < 4 || form_size > (1ull << 62)) return fail("invalid form size");
+    int64_t form_end = 12 + static_cast<int64_t>(form_size);
+    if (file_size_ >= 0) form_end = std::min(form_end, file_size_);   // a truncated file: what is there
     int64_t off = 16;
     bool have_data = false;
     uint64_t data_bytes = 0;
@@ -146,16 +183,20 @@ bool DsdFile::open_dff(std::string* error) {
         if (!seek64(f_, off) || fread(c, 1, 12, f_) != 12) break;
         const uint64_t size = be64(c + 4);
         const int64_t body = off + 12;
+        const int64_t next = chunk_end(body, size, form_end);
         if (std::memcmp(c, "PROP", 4) == 0) {
             uint8_t t[4];
             if (fread(t, 1, 4, f_) != 4 || std::memcmp(t, "SND ", 4) != 0) return fail("unexpected PROP type");
+            const int64_t prop_end = next < 0 ? form_end : body + static_cast<int64_t>(size);
             int64_t p = body + 4;
-            while (p + 12 <= body + static_cast<int64_t>(size)) {
+            while (p + 12 <= prop_end) {
                 uint8_t s[12];
                 if (!seek64(f_, p) || fread(s, 1, 12, f_) != 12) break;
                 const uint64_t ss = be64(s + 4);
+                const int64_t p_next = chunk_end(p + 12, ss, prop_end);
                 uint8_t v[8] = {};
                 if (std::memcmp(s, "FS  ", 4) == 0 && fread(v, 1, 4, f_) == 4) {
+                    if (!valid_dsd_rate(be32(v))) return fail("unsupported DSD rate " + std::to_string(be32(v)));
                     info_.dsd_rate = static_cast<int>(be32(v));
                 } else if (std::memcmp(s, "CHNL", 4) == 0 && fread(v, 1, 2, f_) == 2) {
                     info_.channels = be16(v);
@@ -170,19 +211,21 @@ bool DsdFile::open_dff(std::string* error) {
                 } else if (std::memcmp(s, "CMPR", 4) == 0 && fread(v, 1, 4, f_) == 4) {
                     cmpr.assign(reinterpret_cast<char*>(v), 4);
                 }
-                p += 12 + static_cast<int64_t>(ss + (ss & 1));
+                if (p_next < 0) break;
+                p = p_next;
             }
         } else if (std::memcmp(c, "DSD ", 4) == 0) {
             data_off_ = body;
-            data_bytes = size;
+            data_bytes = next < 0 ? static_cast<uint64_t>(std::max<int64_t>(0, form_end - body)) : size;   // truncated: what is there
             have_data = true;
         } else if (std::memcmp(c, "DST ", 4) == 0) {
             return fail("DST-compressed DSD is not supported");
         }
-        off = body + static_cast<int64_t>(size + (size & 1));
+        if (next < 0) break;   // the chunk runs past the end: nothing can follow it
+        off = next;
     }
     if (cmpr != "DSD ") return fail("compression '" + cmpr + "' is not supported");
-    if (!have_data || info_.channels < 1 || info_.channels > 8 || info_.dsd_rate < 2822400) return fail("missing or invalid sound data");
+    if (!have_data || info_.channels < 1 || info_.channels > 8 || info_.dsd_rate == 0) return fail("missing or invalid sound data");
     dsf_ = false;
     lsb_first_ = false;
     info_.codec = "DFF";

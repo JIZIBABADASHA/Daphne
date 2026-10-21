@@ -161,11 +161,16 @@ bool Player::Impl::try_gapless() {
     if (np.empty() || is_dsd_path(np) != (dsdf != nullptr)) return false;
     const std::shared_ptr<Prep> p = queue.take(np, cancel);   // opened ahead (kick_prepare)
     std::string e;
+    // a next track that throws while opening (a damaged file) is not gapless: this one ends and the host goes on
     if (dsdf) {
         std::unique_ptr<DsdFile> f = p ? std::move(p->dsdf) : nullptr;
         if (!f) {
             f = std::make_unique<DsdFile>();
-            if (!f->open(np, &e)) return false;
+            try {
+                if (!f->open(np, &e)) return false;
+            } catch (const std::exception&) {
+                return false;
+            }
         }
         if (f->info().dsd_rate != dsdf->info().dsd_rate || f->info().channels != dsdf->info().channels) return false;
         AudioInfo ai{};
@@ -185,7 +190,13 @@ bool Player::Impl::try_gapless() {
         dsdf = std::move(f);
     } else {
         std::unique_ptr<Decoder> nd = p ? std::move(p->dec) : nullptr;
-        if (!nd) nd = deps.open_decoder(np, &e);
+        if (!nd) {
+            try {
+                nd = deps.open_decoder(np, &e);
+            } catch (const std::exception&) {
+                return false;
+            }
+        }
         if (!nd || nd->info().channels != ch) return false;
         const bool fits = cur->fits(chain_settings(s, run_osr), nd->info());
         if (fits) {
