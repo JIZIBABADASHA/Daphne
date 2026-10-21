@@ -57,6 +57,11 @@ bool Player::Impl::open_dsd(int64_t from, std::string* error) {
     };
     for (size_t i = 0; i < at.size(); ++i) {
         const Attempt& a = at[i];
+        if (cancel) {   // stopped while starting: no further attempt
+            io.dev.reset();
+            if (error) *error = "cancelled";
+            return false;
+        }
         // a failure before the last goes to the log, so the host sees why the next was tried
         auto next = [&]() {
             if (io.dev)
@@ -106,6 +111,11 @@ bool Player::Impl::open_dsd(int64_t from, std::string* error) {
                 break;
             }
             io.push();
+        }
+        if (cancel) {
+            io.dev.reset();
+            if (error) *error = "cancelled";
+            return false;
         }
         io.dev->set_dop(dsdenc->dop());
         io.dev->set_paused(want_pause.load());

@@ -10,7 +10,8 @@ static class DaphneNative
 {
     const string Dll = "daphne_core";
 
-    public const int Ok = 0, ErrArg = -1, ErrSettings = -2, ErrFile = -3, ErrDevice = -4, ErrBuffer = -5;
+    public const int Ok = 0, ErrArg = -1, ErrSettings = -2, ErrFile = -3, ErrDevice = -4, ErrBuffer = -5, ErrInternal = -6,
+                     ErrCancelled = -7;   // dc_load cancelled by dc_stop: not a failure
 
     static DaphneNative()
     {

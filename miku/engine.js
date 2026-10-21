@@ -18,6 +18,7 @@ const SM = require('./settings-map');
 const { buildSignal, nowPlaying } = require('./signal');
 
 const DC_ERR_DEVICE = -4;
+const DC_ERR_CANCELLED = -7;   // the load was cancelled by a stop: not a failure
 
 /** The core's "designing ..." message in the page's words. */
 function describeDesign(t) {
@@ -198,6 +199,7 @@ class DaphneEngine extends EventEmitter {
     const r = await this.client.request('load', { path: t.path, settings: this.settingsFor(t), seek: pos || 0, play: !!play });
     if (epoch !== this.loadEpoch) return;   // a newer load took its place
     this.loading = false;
+    if (!r.ok && r.code === DC_ERR_CANCELLED) { this.log('load cancelled (stop)'); this.emit('changed'); return; }
     if (!r.ok) return this.fail(r.code, r.error || '');
     this.loaded = true; this.playing = !!play; this.pos = pos || 0; this.loadedDsd = this.dsdKey(t);
     await this.refreshReport();

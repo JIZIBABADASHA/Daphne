@@ -37,8 +37,14 @@ private:
 };
 
 // Cooperative cancellation: while a CancelScope is active on this thread, progress() throws
-// DesignCancelled once the flag becomes true (designs only hold RAII resources).
+// DesignCancelled once the flag becomes true (designs only hold RAII resources). parallel_for gives its
+// workers the caller's flag, so a design stops within a block on every thread, not at the end of a part.
 struct DesignCancelled {};
+
+// The flag of the CancelScope active on this thread (nullptr: none).
+const std::atomic<bool>* cancel_flag();
+// Throws DesignCancelled when the current CancelScope's flag is set (as progress() does, without reporting).
+void check_cancel();
 
 class CancelScope {
 public:

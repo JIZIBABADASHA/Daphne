@@ -83,11 +83,13 @@ void fft_dd(Planes& x, bool inverse, TwiddleCache& cache) {
         int inner = 0;
         for (int m = kBlock; m > 1; m >>= 1) ++inner;
         parallel_for(n / kBlock, [&](int64_t b, int64_t e) {
-            for (int64_t blk = b; blk < e; ++blk)
+            for (int64_t blk = b; blk < e; ++blk) {
+                check_cancel();   // a cancel stops this pass within a block (it has no progress of its own)
                 for (int l = 2; l <= kBlock; l <<= 1) {
                     const int half = l >> 1;
                     ddc::butterflies(x, tw, nb / half, inverse, half, blk * (kBlock / 2), (blk + 1) * (kBlock / 2));
                 }
+            }
         }, 1);
         stage += inner;
         len = 2 * kBlock;

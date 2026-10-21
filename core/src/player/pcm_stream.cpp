@@ -46,6 +46,11 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
     for (size_t attempt = 0; attempt < rates.size(); ++attempt) {
         const bool last = attempt + 1 == rates.size();
         std::string e;
+        if (cancel) {   // stopped while starting (dc_stop during dc_load): no further rate is tried
+            io.dev.reset();
+            if (error) *error = "cancelled";
+            return false;
+        }
         // the last failure is the error; one before it goes to the log, so the host sees why the next was tried
         auto fail_attempt = [&]() {
             io.dev.reset();
@@ -186,6 +191,11 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
                 break;
             }
             io.push();
+        }
+        if (cancel) {   // stopped during the design or the prefill: the device is not started
+            io.dev.reset();
+            if (error) *error = "cancelled";
+            return false;
         }
         io.dev->set_dop(dsdenc && dsdenc->dop());
         io.dev->set_paused(want_pause.load());
