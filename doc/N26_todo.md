@@ -97,7 +97,7 @@
 ## 已知問題（暫不處理）
 
 - **處理執行緒的 sleep 輪詢**（環滿時 2 ms、排空時 5 ms、等待裝置的迴圈）：之後改成事件等待。
-- **C API 的操作鎖**：查詢（`dc_state`、`dc_meter`、`dc_pause`、`dc_seek`、`dc_set_next`）已不拿 `op`（N4「C API 的執行緒」）。還要等 `op` 的是 `dc_stop` 與 `dc_apply`：載入中按停止要等載入結束；Windows 擴充的 `Stop()`、`Dispose()` 在 UI 執行緒上呼叫 `dc_stop`（上一首的驅動卡住時 MIKU 凍結）；helper 排在 `load` 後面的 `stop` 要等設計完、開始播放才生效。計畫：`dc_stop` 能中斷載入，宿主不在 UI 執行緒上等。
+- **宿主等 C API 的方式**：查詢已不拿 `op`，`dc_stop` 能中斷載入（N4「C API 的執行緒」）。還沒改的是宿主：Windows 擴充的 `Stop()`、`Dispose()` 在 UI 執行緒上呼叫 `dc_stop`（驅動卡住時中斷不了，MIKU 仍會凍結），`Dispose()` 只等輪詢執行緒 0.5 秒就 `dc_destroy`；helper 的 `stop` 排在 `load` 後面（要等載入結束才送到 `dc_stop`）。計畫：Windows 擴充把 `dc_stop` / `dc_destroy` 移出 UI 執行緒並等載入結束；helper 的讀取執行緒收到 `stop` 立刻呼叫 `dc_stop`、丟掉還在排隊的 `load`。
 - **8 階 DSD64 的迴路重置**（N19）：沒有頻寬限制的過載直接送進調變器時，新的表比原本的表容易重置迴路（約 1.5 – 2 倍）：停在限幅器天花板的 40 Hz 方波 3 秒重置 410 次（原本 2 – 3 次）；4 倍滿刻度方波在 440 Hz、1 kHz（44.1 kHz 輸入）重置 526 – 1599 次（原本 0 次），50 / 100 Hz 兩者都會重置（原本約 1200 – 1300 次，新表約 2100 次）。處理鏈的升頻濾波器與限幅器讓這種輸入不會出現，處理鏈中的測試都是 0 次；若之後有不經升頻濾波器與限幅器的輸入路徑，要重新檢查。
 
 ## MIKU 擴充（`src/Daphne.Extension`，暫緩）

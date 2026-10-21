@@ -170,6 +170,101 @@ TEST_CASE("C API: while a load waits (a slow device, a long design), the queries
     dc_internal_player_deps(nullptr);
 }
 
+TEST_CASE("C API: dc_stop cancels a load in progress; nothing plays", "[capi]") {
+    using clock = std::chrono::steady_clock;
+    const std::filesystem::path off("off");
+    test::set_env("DAPHNE_FILTER_CACHE", &off);   // the long filter is designed, not read from a cache
+    {   // during a long filter design (1M taps, seconds): dc_stop returns at once, dc_load says cancelled
+        SlowRig rig;
+        const auto deps = rig.deps(0.0);
+        dc_internal_player_deps(&deps);
+        dc_player* pl = dc_create();
+        REQUIRE(pl);
+        std::atomic<int> code{1};
+        std::thread loader([&] {
+            char err[256] = {};
+            code = dc_load_utf8(pl, "a.test", R"({"output": {"rate": "176400"}, "filter": {"taps": 1048576}})", 0.0, 1, err, sizeof err);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        REQUIRE(state_of(pl) == "loading");
+        const auto t0 = clock::now();
+        dc_stop(pl);
+        const double took = std::chrono::duration<double>(clock::now() - t0).count();
+        loader.join();
+        INFO("dc_stop took " << took * 1000 << " ms");
+        CHECK(took < 2.0);   // the design stops at its next check (before: the whole design, then the start)
+        CHECK(code == DC_ERR_CANCELLED);
+        CHECK(rig.dev->take().empty());   // the device was never started
+        CHECK(state_of(pl) == "idle");
+        dc_destroy(pl);
+    }
+    {   // while the device takes 1.5 s to open (a driver that hangs): that cannot be interrupted, dc_stop waits for it,
+        // but the device is not started after it and dc_load says cancelled
+        SlowRig rig;
+        const auto deps = rig.deps(1.5);
+        dc_internal_player_deps(&deps);
+        dc_player* pl = dc_create();
+        REQUIRE(pl);
+        std::atomic<int> code{1};
+        std::thread loader([&] {
+            char err[256] = {};
+            code = dc_load_utf8(pl, "a.test", R"({"output": {"rate": "native"}})", 0.0, 1, err, sizeof err);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        dc_stop(pl);
+        loader.join();
+        CHECK(code == DC_ERR_CANCELLED);
+        CHECK(rig.dev->take().empty());
+        dc_destroy(pl);
+    }
+    test::set_env("DAPHNE_FILTER_CACHE", nullptr);
+    dc_internal_player_deps(nullptr);
+}
+
+TEST_CASE("C API: loads and stops and queries from several threads at once", "[capi]") {
+    // no crash, no deadlock, no race (the tsan job): every load is played or cancelled
+    SlowRig rig;
+    rig.dev->speed = 4.0;
+    const auto deps = rig.deps(0.0);
+    dc_internal_player_deps(&deps);
+    dc_player* pl = dc_create();
+    REQUIRE(pl);
+    std::atomic<bool> stop{false};
+    std::atomic<int> ok{0}, cancelled{0}, other{0};
+    std::thread loader([&] {
+        for (int i = 0; i < 20 && !stop; ++i) {
+            char err[256] = {};
+            const int c = dc_load_utf8(pl, "a.test", R"({"output": {"rate": "native"}})", 0.0, 1, err, sizeof err);
+            (c == DC_OK ? ok : c == DC_ERR_CANCELLED ? cancelled : other)++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        }
+        stop = true;
+    });
+    std::thread stopper([&] {
+        while (!stop) {
+            dc_stop(pl);
+            std::this_thread::sleep_for(std::chrono::milliseconds(7));
+        }
+    });
+    std::thread querier([&] {
+        while (!stop) {
+            state_of(pl);
+            double l = 0, r = 0;
+            dc_meter(pl, &l, &r);
+            dc_pause(pl, 0);
+            dc_set_next_utf8(pl, nullptr);
+        }
+    });
+    loader.join();
+    stopper.join();
+    querier.join();
+    INFO("played " << ok << ", cancelled " << cancelled << ", other " << other);
+    CHECK(ok + cancelled == 20);
+    CHECK(other == 0);
+    dc_destroy(pl);
+    dc_internal_player_deps(nullptr);
+}
+
 TEST_CASE("C API: dc_filter_cache_dir_utf8 returns the folder in UTF-8", "[capi]") {
     const std::string name = "daphne_快取_é";
     const auto dir = std::filesystem::temp_directory_path() /

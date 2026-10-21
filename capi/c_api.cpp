@@ -29,8 +29,10 @@ using nlohmann::json;
 // the player through that copy: the Player's own methods are safe from any thread (atomics, its own locks).
 struct dc_player {
     std::mutex op;                       // load / stop / apply / destroy
-    std::mutex pm;                       // the player pointer: held only to copy or swap it
+    std::mutex pm;                       // the player pointers: held only to copy or swap them
     std::shared_ptr<daphne::Player> player;
+    std::shared_ptr<daphne::Player> starting;   // the player dc_load is starting (dc_stop cancels it without op)
+    bool stop_requested = false;                // dc_stop came during this dc_load (also before `starting` was set)
     std::atomic<bool> loading{false};    // dc_load is running (dc_state: "loading" while no player is published)
     std::mutex m;                        // events, report, state
     std::deque<std::string> events;
@@ -106,6 +108,18 @@ void stop_player(dc_player* p) {
     old.reset();
 }
 
+// without op: the player dc_load is starting, if any, is told to stop; dc_load then returns DC_ERR_CANCELLED. A filter
+// design and the prefill check for it; a device open that hangs in its driver cannot be interrupted.
+void cancel_start(dc_player* p) {
+    std::shared_ptr<daphne::Player> s;
+    {
+        std::lock_guard<std::mutex> l(p->pm);
+        if (p->loading) p->stop_requested = true;
+        s = p->starting;
+    }
+    if (s) s->stop();
+}
+
 // tests only (capi/internal.h): what the players are built with (empty: the platform's devices and decoders)
 std::mutex g_deps_m;
 daphne::PlayerDeps g_deps;
@@ -151,6 +165,7 @@ DC_API dc_player* dc_create(void) {
 DC_API void dc_destroy(dc_player* p) {
     if (!p) return;
     try {
+        cancel_start(p);
         std::lock_guard<std::mutex> l(p->op);
         stop_player(p);
     } catch (...) {
@@ -175,10 +190,18 @@ namespace {
 int load(dc_player* p, const std::filesystem::path& path, const char* settings_json, double seconds, int play, char* err, int err_len) {
     try {
         std::lock_guard<std::mutex> l(p->op);
-        p->loading = true;
+        {
+            std::lock_guard<std::mutex> g(p->pm);   // a dc_stop from here on cancels this load
+            p->loading = true;
+            p->stop_requested = false;
+        }
         struct Loaded {
             dc_player* p;
-            ~Loaded() { p->loading = false; }
+            ~Loaded() {
+                std::lock_guard<std::mutex> g(p->pm);
+                p->loading = false;
+                p->starting.reset();
+            }
         } loaded{p};
         p->design = 1.0;   // not the last player's: a design stopped halfway would show until the next one ends
         daphne::Settings s;
@@ -239,8 +262,35 @@ int load(dc_player* p, const std::filesystem::path& path, const char* settings_j
             player = std::make_shared<daphne::Player>(g_deps);
         }
         player->pause(!play);
+        bool stopped_already = false;
+        {
+            std::lock_guard<std::mutex> g(p->pm);   // dc_stop can reach it from here on, without op
+            stopped_already = p->stop_requested;    // while the last track was stopped (a driver slow to let go)
+            if (!stopped_already) p->starting = player;
+        }
+        if (stopped_already) {
+            put(err, err_len, "cancelled (dc_stop)");
+            return DC_ERR_CANCELLED;
+        }
         std::string e;
-        if (!player->start(path, s, out, cb, &e, seconds)) {
+        const bool started = player->start(path, s, out, cb, &e, seconds);
+        bool cancelled = false;
+        {
+            std::lock_guard<std::mutex> g(p->pm);
+            p->starting.reset();
+            cancelled = p->stop_requested;
+        }
+        if (cancelled) {   // dc_stop came during the start: not published, not an error of the file or the device
+            if (started) {
+                player->stop();
+                daphne::PlayReport r;
+                std::string we;
+                player->wait(&r, &we);
+            }
+            put(err, err_len, "cancelled (dc_stop)");
+            return DC_ERR_CANCELLED;
+        }
+        if (!started) {
             put(err, err_len, e);
             std::lock_guard<std::mutex> g(p->m);
             p->error = e;
@@ -311,6 +361,7 @@ DC_API void dc_set_next_gain_utf8(dc_player* p, const char* path, double headroo
 DC_API void dc_stop(dc_player* p) {
     if (!p) return;
     try {
+        cancel_start(p);   // a load in progress returns at its next check (a design, the prefill) instead of playing
         std::lock_guard<std::mutex> l(p->op);
         stop_player(p);
     } catch (...) {

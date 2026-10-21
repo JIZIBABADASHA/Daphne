@@ -33,6 +33,7 @@ extern "C" {
 #define DC_ERR_DEVICE -4     /* the output device could not be opened / started */
 #define DC_ERR_BUFFER -5     /* the output buffer is too small (the return value of *_json functions) */
 #define DC_ERR_INTERNAL -6   /* the engine failed inside (out of memory, an unexpected error; message says what) */
+#define DC_ERR_CANCELLED -7  /* dc_load: a dc_stop (or dc_destroy) came while it was starting; nothing plays */
 
 typedef struct dc_player dc_player;
 
@@ -41,7 +42,8 @@ DC_API int dc_abi_version(void);
 DC_API const char* dc_version(void);
 
 DC_API dc_player* dc_create(void);
-/* Stops playback and frees the player. */
+/* Stops playback (a dc_load in progress is cancelled first, as by dc_stop) and frees the player. No other call on
+ * this player may be in progress or start meanwhile: wait for them (a host's poll thread, a load on a worker) first. */
 DC_API void dc_destroy(dc_player* p);
 
 /* Paths: the functions taking wchar_t paths are the original ones (UTF-16 on Windows; on other systems wchar_t
@@ -68,7 +70,10 @@ DC_API void dc_set_next_utf8(dc_player* p, const char* path);
  * its first sample is decoded; NaN keeps the current one. */
 DC_API void dc_set_next_gain(dc_player* p, const wchar_t* path, double headroom_db);
 DC_API void dc_set_next_gain_utf8(dc_player* p, const char* path, double headroom_db);
-/* Stops playback (DSD: the DAC is returned to PCM first) and waits for it. */
+/* Stops playback (DSD: the DAC is returned to PCM first) and waits for it. A dc_load in progress is cancelled first
+ * (it returns DC_ERR_CANCELLED and nothing plays): a filter design or the prefill stops at once, then dc_stop waits for
+ * the load to return. A device that hangs in its driver while opening cannot be interrupted; a host keeps dc_stop off
+ * its UI thread for that. */
 DC_API void dc_stop(dc_player* p);
 
 /* macOS, exclusive mode: keep the device between tracks (MIKU's way; process-wide). On: a Core Audio output closed in

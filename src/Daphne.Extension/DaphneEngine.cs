@@ -292,6 +292,11 @@ public sealed partial class DaphneEngine : IAudioEngine
 
     int Fail(int code, string err)
     {
+        if (code == DaphneNative.ErrCancelled)   // stopped while it loaded: nothing to report
+        {
+            Log.Info("[daphne] load cancelled (stop)");
+            return code;
+        }
         LastFailureWasDevice = code == DaphneNative.ErrDevice;
         _signal = null;
         Log.Info($"[daphne] load failed ({code}): {err}");
