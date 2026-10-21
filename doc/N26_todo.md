@@ -101,7 +101,7 @@
 ## 已知問題（暫不處理）
 
 - **處理執行緒的 sleep 輪詢**（環滿時 2 ms、排空時 5 ms、等待裝置的迴圈）：之後改成事件等待。
-- **8 階 DSD64 的迴路重置**（N19）：沒有頻寬限制、停在限幅器天花板的 40 Hz 方波直接送進調變器時會重置迴路幾次（原本的表只有狀態限制）。處理鏈的升頻濾波器讓這種輸入不會出現，處理鏈中的測試都是 0 次；若之後有不經升頻濾波器的輸入路徑，要重新檢查。
+- **8 階 DSD64 的迴路重置**（N19）：沒有頻寬限制的過載直接送進調變器時，新的表比原本的表容易重置迴路（約 1.5 – 2 倍）：停在限幅器天花板的 40 Hz 方波 3 秒重置 410 次（原本 2 – 3 次）；4 倍滿刻度方波在 440 Hz、1 kHz（44.1 kHz 輸入）重置 526 – 1599 次（原本 0 次），50 / 100 Hz 兩者都會重置（原本約 1200 – 1300 次，新表約 2100 次）。處理鏈的升頻濾波器與限幅器讓這種輸入不會出現，處理鏈中的測試都是 0 次；若之後有不經升頻濾波器與限幅器的輸入路徑，要重新檢查。
 
 ## MIKU 擴充（`src/Daphne.Extension`，暫緩）
 
@@ -179,6 +179,5 @@
 - FFmpeg：與 Windows 同版本（8.1.3，LGPL、動態連結），從原始碼編（ffmpeg.org 的 tarball，SHA-256 寫在腳本裡；ffmpeg.org 沒有公布 SHA-256，這個值是寫腳本時下載的檔案的），只開引擎需要的 demuxer / decoder（沒有專屬解碼器的格式：M4A / ALAC / AAC、Ogg、Opus、APE、WavPack、WMA、TTA…）。`--install-name-dir=@rpath`，所以核心連到的是 `@rpath/libavcodec.62.dylib` 等，打包時照這些名字複製。沒有 FFmpeg 時這些格式在 Mac 上不能播（測試機的音樂庫有 46 首 ALAC）。
 - CMake：macOS / Linux 的 FFmpeg 原本只用 pkg-config 找（測試機的 ssh 環境找不到 pkg-config），改成也可以指定資料夾（`DAPHNE_FFMPEG_DIR`，含 `include/` 和 `lib/`）；Windows 的路徑不變。
 - 每個 arch 分開編（`build-mac-arm64/`、`build-mac-x86_64/`，最低 macOS 11.0），因為 MIKU 的安裝包也是每個 arch 一份。打包後刪掉所有絕對路徑的 rpath，檢查 `otool -L` 只剩 `@rpath/` 和系統的函式庫，ad-hoc 簽章（`install_name_tool` 會讓簽章失效；MIKU 的安裝包會再簽一次），在本機 arch 上啟動 helper 確認 hello。
-- `bin/` 只放程式（MIKU 的安裝包會簽 `bin/` 裡的每個檔案）；FFmpeg 的授權（`FFmpeg-COPYING.LGPLv2.1`）與原始碼位置（`FFmpeg-SOURCE.txt`）和 `LICENSE` 一起放在模組根目錄。`.gitattributes` 讓 `*.sh` 在每個 checkout 都是 LF：Windows（`core.autocrlf`）checkout 的 CRLF 腳本複製到 Mac 會在 `set -o pipefail` 失敗（`pipefail
-`）。
+- `bin/` 只放程式（MIKU 的安裝包會簽 `bin/` 裡的每個檔案）；FFmpeg 的授權（`FFmpeg-COPYING.LGPLv2.1`）與原始碼位置（`FFmpeg-SOURCE.txt`）和 `LICENSE` 一起放在模組根目錄。`.gitattributes` 讓 `*.sh` 在每個 checkout 都是 LF：Windows（`core.autocrlf`）checkout 的 CRLF 腳本複製到 Mac 會在 `set -o pipefail` 失敗（`pipefail\r`）。
 - 結果（Intel Mac）：每個 arch 約 4 MB；arm64 版全是 arm64、x64 版全是 x86_64；x64 的 helper 回報 `{"abi":3,"e":"hello","version":"daphne 0.1.0"}`。arm64 版要在 Apple Silicon 的 Mac 上試。
