@@ -97,7 +97,7 @@
 ## 已知問題（暫不處理）
 
 - **處理執行緒的 sleep 輪詢**（環滿時 2 ms、排空時 5 ms、等待裝置的迴圈）：之後改成事件等待。
-- **helper 的 `stop` 排在 `load` 後面**：查詢已不拿 `op`、`dc_stop` 能中斷載入（N4「C API 的執行緒」），Windows 擴充也已不在 UI 執行緒上等（N4「Windows 擴充呼叫 C API 的方式」）。helper 的 `stop` 仍排在 `load` 後面，要等載入結束才送到 `dc_stop`。計畫：讀取執行緒收到 `stop` 立刻呼叫 `dc_stop`、丟掉還在排隊的 `load`；engine.js 以 helper 回傳的 load id 比對。
+- **helper 在 Mac 上實機確認**：Windows 上以腳本驅動 helper 的停止情境已通過（N4「helper 程序」）；還要在 Mac 的 MIKU 裡（Core Audio + DAC）用 1M taps 第一次設計時按停止，確認停止後不出聲（`verify/miku_shell.js`、`verify/helper.py`）。
 - **Windows 擴充在 MIKU 裡實機確認**：主控台程式驅動 `DaphneEngine` 的情境都通過（N4）；還要在 MIKU 裡用 1M taps 第一次設計時按停止、換歌、關閉 MIKU，確認畫面不凍結、不出錯誤訊息。
 - **8 階 DSD64 的迴路重置**（N19）：沒有頻寬限制的過載直接送進調變器時，新的表比原本的表容易重置迴路（約 1.5 – 2 倍）：停在限幅器天花板的 40 Hz 方波 3 秒重置 410 次（原本 2 – 3 次）；4 倍滿刻度方波在 440 Hz、1 kHz（44.1 kHz 輸入）重置 526 – 1599 次（原本 0 次），50 / 100 Hz 兩者都會重置（原本約 1200 – 1300 次，新表約 2100 次）。處理鏈的升頻濾波器與限幅器讓這種輸入不會出現，處理鏈中的測試都是 0 次；若之後有不經升頻濾波器與限幅器的輸入路徑，要重新檢查。
 

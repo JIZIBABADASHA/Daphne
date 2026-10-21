@@ -75,6 +75,10 @@ DC_API void dc_set_next_gain_utf8(dc_player* p, const char* path, double headroo
  * the load to return. A device that hangs in its driver while opening cannot be interrupted; a host keeps dc_stop off
  * its UI thread for that. */
 DC_API void dc_stop(dc_player* p);
+/* ABI 4: cancels a dc_load in progress (it returns DC_ERR_CANCELLED, nothing plays) and returns at once, without
+ * stopping what plays otherwise: for a host whose stop is queued behind its load (daphne-helper), so the load is not
+ * waited for before the stop reaches dc_stop. No effect when nothing is loading. */
+DC_API void dc_cancel(dc_player* p);
 
 /* macOS, exclusive mode: keep the device between tracks (MIKU's way; process-wide). On: a Core Audio output closed in
  * exclusive mode (dc_stop, the next dc_load, the end of the last track) stays open: hog mode, rate and DAC format, the
