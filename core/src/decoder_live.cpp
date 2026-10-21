@@ -143,8 +143,8 @@ private:
     int produce_from(uint8_t* base, double* out, int frames) {
         const uint32_t cap = static_cast<uint32_t>(g_cap.load());
         if (cap == 0) return 0;
-        const uint32_t w = *reinterpret_cast<volatile const uint32_t*>(base);
-        std::atomic_thread_fence(std::memory_order_acquire);   // the frames before the index
+        // the producer writes the frames, then the index (release): read as an atomic, the frames up to it are there
+        const uint32_t w = std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(base)).load(std::memory_order_acquire);
         const float* ring = reinterpret_cast<const float*>(base + 16);
         const int rate = g_rate.load();
 

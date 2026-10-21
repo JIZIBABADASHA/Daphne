@@ -1,2 +1,3 @@
 # shell scripts run on macOS / Linux: LF in every checkout, also on Windows (core.autocrlf), so a copy works there
 *.sh text eol=lf
+fuzz/corpus/** binary

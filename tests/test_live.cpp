@@ -36,7 +36,7 @@ struct Bus {
             const size_t k = (index() + static_cast<uint32_t>(i)) % static_cast<uint32_t>(cap);
             ring()[2 * k] = v, ring()[2 * k + 1] = -v;
         }
-        index() += static_cast<uint32_t>(n);
+        std::atomic_ref<uint32_t>(index()).fetch_add(static_cast<uint32_t>(n), std::memory_order_release);   // as a producer does
     }
     int cap;
     std::vector<uint8_t> mem;
@@ -336,7 +336,7 @@ TEST_CASE("Live decoder: a ring detached or replaced while it reads can be freed
         using clock = std::chrono::steady_clock;
         const auto end = clock::now() + std::chrono::milliseconds(8);
         while (clock::now() < end) {
-            index(*cur) += 48;
+            std::atomic_ref<uint32_t>(index(*cur)).fetch_add(48, std::memory_order_release);
             const auto until = clock::now() + std::chrono::microseconds(10);
             while (clock::now() < until) std::this_thread::yield();
         }
