@@ -1,9 +1,12 @@
-# Downloads CMake (Kitware's portable zip) into -Dest, checked against the SHA-256 list of the same release.
+# Downloads CMake (Kitware's portable zip) into -Dest, checked against its SHA-256: the one written here for the
+# default version, else the SHA-256 list of the same release (another -Version, without -Sha256).
 # For build machines without CMake 3.25+ (on PATH or in Visual Studio).
 param(
     [Parameter(Mandatory = $true)][string]$Dest,
-    [string]$Version = "3.31.6"
+    [string]$Version = "3.31.6",
+    [string]$Sha256 = ""
 )
+$pinned = @{ "3.31.6" = "d163cd3ab4959b0a53fa8988f2ddbd2e6c501658201e6a154386bad9dbe4f836" }   # cmake-3.31.6-windows-x86_64.zip
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -13,9 +16,13 @@ $zip = Join-Path $env:TEMP "daphne_$name"
 $tmp = Join-Path $env:TEMP "daphne_cmake_extract"
 Write-Host "Downloading $base/$name"
 Invoke-WebRequest -Uri "$base/$name" -OutFile $zip -UseBasicParsing
-$sums = (Invoke-WebRequest -Uri "$base/cmake-$Version-SHA-256.txt" -UseBasicParsing).Content
-if ($sums -is [byte[]]) { $sums = [Text.Encoding]::ASCII.GetString($sums) }
-$want = ($sums -split "`n" | Where-Object { $_ -match "^([0-9a-f]{64})\s+$([regex]::Escape($name))\s*$" } | ForEach-Object { $Matches[1] }) | Select-Object -First 1
+if ($Sha256) { $want = $Sha256.ToLowerInvariant() }
+elseif ($pinned.ContainsKey($Version)) { $want = $pinned[$Version] }
+else {
+    $sums = (Invoke-WebRequest -Uri "$base/cmake-$Version-SHA-256.txt" -UseBasicParsing).Content
+    if ($sums -is [byte[]]) { $sums = [Text.Encoding]::ASCII.GetString($sums) }
+    $want = ($sums -split "`n" | Where-Object { $_ -match "^([0-9a-f]{64})\s+$([regex]::Escape($name))\s*$" } | ForEach-Object { $Matches[1] }) | Select-Object -First 1
+}
 $got = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
 if (-not $want -or $got -ne $want) {
     Remove-Item -Force $zip

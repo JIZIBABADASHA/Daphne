@@ -176,10 +176,11 @@ struct Player::Impl {
     void loop(Stream& st);
     class PcmStream;
     class DsdDirectStream;
-    // One pass of the transport requests (processing thread).
-    void service_transport();
-    // Seek with the device open: pause it (PCM fades out), drop what is queued, refill, resume.
-    void do_seek(double sec);
+    // One pass of the transport requests (processing thread). False: the playback cannot go on (err says why).
+    bool service_transport();
+    // Seek with the device open: pause it (PCM fades out), drop what is queued, refill, resume. False when the decoder
+    // had moved on to a gapless track and this one could not be opened again (err): playing on would play the other.
+    bool do_seek(double sec);
     // gapless: report tracks that are now heard
     void check_switch();
     // Chain frame being heard (the device's queue counted back from abs_out).

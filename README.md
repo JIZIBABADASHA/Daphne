@@ -13,17 +13,18 @@
 </p>
 
 <p align="center">
-  <b>A bit-perfect-first audio playback engine for Windows</b><br>
-  high-precision PCM upsampling · 1-bit DSD modulation · WASAPI and ASIO
+  <b>A bit-perfect-first audio playback engine for Windows and macOS</b><br>
+  high-precision PCM upsampling · 1-bit DSD modulation · WASAPI, ASIO and Core Audio
 </p>
 
 ---
 
 Daphne is a standalone C++20 playback engine. It decodes PCM and DSD files, runs them through a
-64-bit floating-point processing chain, and sends the result to a WASAPI or ASIO device, untouched
-whenever nothing in the chain needs to change a sample. It ships as a static library, a C API DLL
-(`daphne_core.dll`) and a command-line player, and includes an extension module for the
-[MIKU player](https://github.com/JIZIBABADASHA/MIKU-Player).
+64-bit floating-point processing chain, and sends the result to a WASAPI or ASIO device on Windows or a
+Core Audio device on macOS, untouched whenever nothing in the chain needs to change a sample. It ships as a
+static library, a C API library (`daphne_core.dll`, `libdaphne_core.dylib`), a command-line player and a helper
+process (`daphne-helper`), and includes an extension module for the
+[MIKU player](https://github.com/JIZIBABADASHA/MIKU-Player) on both systems.
 
 ## Highlights
 
@@ -80,7 +81,7 @@ flowchart TD
 | **Resampler** (N6–N8) | Integer-ratio polyphase FIR upsampling to 2x, the family maximum, or a fixed rate. Taps from 16 to 1,048,576; phase from linear (α 0) to minimum (α 1); apodizing removes the recording's own ringing (pass band to 0.4535 fs, i.e. 20 kHz at 44.1 kHz). |
 | **Modulator** (N18–N19) | The same filter upsamples to 705.6 / 768 kHz, a limiter keeps the input at 0.85 of the loop's stable maximum, and the 1-bit loop runs at 44.1 kHz × 64 … 1024 (one thread per channel). |
 | **Quantization** (N21) | TPDF dither to the device word length, applied only when the samples were changed. No noise shaping. |
-| **Output** (N23–N24) | A lock-free ring feeds the device callback. WASAPI exclusive is event-driven and negotiates the widest format the device takes; ASIO handles every PCM sample type and native DSD, reopens on driver resets, and never ends native DSD with a switch to PCM. |
+| **Output** (N23–N24) | A lock-free ring feeds the device callback. WASAPI exclusive is event-driven and negotiates the widest format the device takes; ASIO handles every PCM sample type and native DSD, reopens on driver resets, and never ends native DSD with a switch to PCM. Core Audio (macOS) plays shared or exclusive (hog mode), sets the device's rate and, exclusive, its widest integer format, and sends DSD as DoP. |
 
 ## Building
 
@@ -97,8 +98,9 @@ scripts\build.cmd                            :: Release build + unit tests
 The output lands in `build\bin\Release\`: `daphne.exe`, `daphne_core.dll`, `daphne_tests.exe` and the
 FFmpeg DLLs. The code builds without warnings at `/W4`.
 
-The engine, the player and the tests also build on macOS and Linux (no device output there yet; the
-player is tested on a fake device, [N25](doc/N25_跨平台.md)):
+The engine, the player and the tests also build on macOS (Core Audio output, N24; `miku/pack-mac.sh` builds
+the module for MIKU's Mac installer) and on Linux (no device output there yet; the player is tested on a fake
+device, [N25](doc/N25_跨平台.md)):
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel
@@ -164,7 +166,7 @@ dc_destroy(p);
 | [nlohmann/json](https://github.com/nlohmann/json) | MIT | in `third_party/` |
 | [Catch2](https://github.com/catchorg/Catch2) | BSL-1.0 | in `third_party/` (tests only) |
 | [FFmpeg](https://ffmpeg.org) | LGPL-2.1+ | downloaded by `fetch_ffmpeg.ps1` (Windows: BtbN's n8.1.3 build, kept as the release `ffmpeg-n8.1.3-win64` of this repository) or built from its source by `miku/pack-mac.sh` (macOS), linked dynamically |
-| [ASIO SDK](https://www.steinberg.net/developers/) | Steinberg licence | downloaded by `fetch_asiosdk.ps1`, not redistributed |
+| [ASIO SDK](https://www.steinberg.net/developers/) 2.3.4 | Steinberg licence or GPLv3 (dual licensed; used under GPLv3) | downloaded by `fetch_asiosdk.ps1` (checked against its SHA-256), not redistributed |
 | [GFS Didot](https://fonts.google.com/specimen/GFS+Didot) | SIL OFL 1.1 | in `src/Daphne.Extension/web/fonts/` (the wordmark) |
 
 ASIO is a trademark and software of Steinberg Media Technologies GmbH.

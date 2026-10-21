@@ -148,8 +148,12 @@ private:
         const float* ring = reinterpret_cast<const float*>(base + 16);
         const int rate = g_rate.load();
 
-        if (!synced_ || w < read_ || w - read_ > cap - 4096) {
-            // first read, page reloaded, or the writer lapped us: restart close to the writer
+        // how far the writer is ahead, modulo 2^32 (the index wraps there: about 27 h at 44.1 kHz), and the margin
+        // short of a full ring that counts as lapped (signed: a ring under 4096 frames would wrap the unsigned one)
+        const int64_t ahead = static_cast<int32_t>(w - read_);
+        const int64_t margin = std::min<int64_t>(4096, cap / 2);
+        if (!synced_ || ahead < 0 || ahead > static_cast<int64_t>(cap) - margin) {
+            // first read, page reloaded (the writer went back), or the writer lapped us: restart close to the writer
             if (synced_) g_resyncs++;
             read_ = w, frac_ = 0, synced_ = true, primed_ = false, adj_ = 0;
             return 0;

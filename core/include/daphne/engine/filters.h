@@ -46,8 +46,9 @@ bool filter_cached(const FilterSettings& s, int fs_in, int fs_out);
 void store_cached_filter(const std::string& key, const std::vector<double>& h);
 
 // Cache keys the settings use: the PCM filter and the modulator's pre-filter for the source rates
-// 44.1k .. 384k (with their low parts), whichever core is chosen.
-std::vector<std::string> filter_cache_keys_in_use(const Settings& s);
+// 44.1k .. 384k and source_rate (the track playing, e.g. 22.05 or 32 kHz; 0 = none), with their low parts,
+// whichever core is chosen.
+std::vector<std::string> filter_cache_keys_in_use(const Settings& s, int source_rate = 0);
 
 struct CachePruneResult {
     uint64_t files = 0, bytes = 0;            // left in the cache
@@ -56,7 +57,8 @@ struct CachePruneResult {
 // Deletes the least recently used cache files until the cache is at most limit_bytes (0 = delete
 // all it may), keeping the files of `keep` (cache keys) whatever their size.
 CachePruneResult prune_filter_cache(uint64_t limit_bytes, const std::vector<std::string>& keep);
-// prune_filter_cache with design.cache_limit_mb, keeping the settings' filters (nothing when the limit is 0).
-void trim_filter_cache(const Settings& s);
+// prune_filter_cache with design.cache_limit_mb, keeping the settings' filters for the usual rates and source_rate
+// (nothing when the limit is 0).
+void trim_filter_cache(const Settings& s, int source_rate = 0);
 
 }  // namespace daphne

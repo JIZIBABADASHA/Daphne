@@ -37,7 +37,10 @@ namespace {
 
 void put(char* dst, int len, const std::string& s) {
     if (!dst || len <= 0) return;
-    const size_t n = std::min(static_cast<size_t>(len - 1), s.size());
+    size_t n = std::min(static_cast<size_t>(len - 1), s.size());
+    // cut short: not in the middle of a UTF-8 character (a path, a device name), back to where one starts
+    if (n < s.size())
+        while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) --n;
     std::memcpy(dst, s.data(), n);
     dst[n] = 0;
 }
@@ -147,6 +150,7 @@ namespace {
 int load(dc_player* p, const std::filesystem::path& path, const char* settings_json, double seconds, int play, char* err, int err_len) {
     try {
         std::lock_guard<std::mutex> l(p->op);
+        p->design = 1.0;   // not the last player's: a design stopped halfway would show until the next one ends
         daphne::Settings s;
         std::string msg;
         if (!parse(settings_json, s, msg)) {
@@ -238,8 +242,12 @@ DC_API int dc_apply(dc_player* p, const char* settings_json, char* err, int err_
             p->player->apply(s, out);
         }
         return DC_OK;
+    } catch (const std::exception& ex) {   // not the caller's argument: the engine failed (memory, ...)
+        put(err, err_len, ex.what());
+        return DC_ERR_INTERNAL;
     } catch (...) {
-        return DC_ERR_ARG;
+        put(err, err_len, "unknown error");
+        return DC_ERR_INTERNAL;
     }
 }
 
@@ -347,8 +355,8 @@ DC_API int dc_filter_cache_dir(wchar_t* out, int len) {
         if (!out || len <= static_cast<int>(d.size())) return d.empty() ? 0 : DC_ERR_BUFFER;
         std::wmemcpy(out, d.c_str(), d.size() + 1);
         return static_cast<int>(d.size());
-    } catch (...) {
-        return 0;
+    } catch (...) {   // not "the cache is off" (0): the folder could not be worked out
+        return DC_ERR_INTERNAL;
     }
 }
 
@@ -358,8 +366,8 @@ DC_API int dc_filter_cache_dir_utf8(char* out, int len) {
         if (!out || len <= static_cast<int>(d.size())) return d.empty() ? 0 : DC_ERR_BUFFER;
         std::memcpy(out, d.c_str(), d.size() + 1);
         return static_cast<int>(d.size());
-    } catch (...) {
-        return 0;
+    } catch (...) {   // not "the cache is off" (0): the folder could not be worked out
+        return DC_ERR_INTERNAL;
     }
 }
 

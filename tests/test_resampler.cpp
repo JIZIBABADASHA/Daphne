@@ -1,7 +1,9 @@
 #include <catch_amalgamated.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <vector>
 
 #include "daphne/dsp/filter_design.h"
@@ -223,11 +225,34 @@ TEST_CASE("Filter cache: store, load, low parts, prune", "[cache]") {
     CHECK(daphne::filter_cache_key(f, 44100, 176400) != key);
     daphne::design_filter(f, 44100, 176400);
 
+    // a damaged file under the key (another length, a NaN) is designed again, and the result stored over it
+    f.phase = daphne::FilterPhase::Minimum;
+    f.phase_custom = 0.5;
+    REQUIRE(daphne::filter_cache_key(f, 44100, 176400) == key);
+    for (const auto& bad : {std::vector<double>(h1.begin(), h1.begin() + 100),
+                            [&] { auto v = h1; v[7] = std::numeric_limits<double>::quiet_NaN(); return v; }()}) {
+        daphne::store_cached_filter(key, bad);
+        CHECK(daphne::design_filter(f, 44100, 176400) == h1);
+        REQUIRE(daphne::load_cached_filter(key, c));
+        CHECK(c == h1);
+    }
+    f.phase_custom = 0.25;
+    f.phase = daphne::FilterPhase::Custom;
+
     // prune to zero keeping the first filter
     const auto r = daphne::prune_filter_cache(0, {key, key + "_lo"});
     CHECK(r.removed_files == 1);
     CHECK(r.files == 2);
     CHECK(daphne::load_cached_filter(key, c));
+
+    // the playing track's own rate is kept too when it is not one of the usual ones
+    daphne::Settings st;
+    st.output.rate = "176400";
+    const auto k32 = daphne::filter_cache_key(st.filter, 32000, daphne::pcm_output_rate(32000, st.output.rate));
+    const auto usual = daphne::filter_cache_keys_in_use(st), with32 = daphne::filter_cache_keys_in_use(st, 32000);
+    CHECK(std::find(usual.begin(), usual.end(), k32) == usual.end());
+    CHECK(std::find(with32.begin(), with32.end(), k32) != with32.end());
+    CHECK(daphne::filter_cache_keys_in_use(st, 44100) == usual);   // a usual rate adds nothing
 
     test::set_env("DAPHNE_FILTER_CACHE", nullptr);
     std::filesystem::remove_all(dir, ec);

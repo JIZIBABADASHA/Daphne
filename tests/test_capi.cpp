@@ -1,9 +1,11 @@
 // The C API's UTF-8 path functions (N25): paths with non-ASCII characters reach the engine intact.
 #include <catch_amalgamated.hpp>
 
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include <dr_libs/dr_wav.h>
 
@@ -57,6 +59,29 @@ TEST_CASE("C API: dc_load_utf8 reads a file whose name is not ASCII", "[capi]") 
     dc_destroy(pl);
     std::error_code ec;
     std::filesystem::remove(p, ec);
+}
+
+TEST_CASE("C API: an error message cut to the caller's buffer ends on a whole UTF-8 character", "[capi]") {
+    // the settings error names the unknown field, here in Chinese: every buffer size gives a prefix of the message
+    // that stops before a character, never inside one
+    const char* settings = R"({"output": {"api": "x"}, "測試鍵": 1})";
+    dc_player* pl = dc_create();
+    REQUIRE(pl);
+    char full[512] = {};
+    REQUIRE(dc_load_utf8(pl, "x.wav", settings, 0.0, 0, full, sizeof full) == DC_ERR_SETTINGS);
+    const std::string msg = full;
+    REQUIRE(msg.find("測試鍵") != std::string::npos);
+    for (int len = 1; len <= static_cast<int>(msg.size()) + 2; ++len) {
+        std::vector<char> err(static_cast<size_t>(len) + 8, 'z');
+        CHECK(dc_load_utf8(pl, "x.wav", settings, 0.0, 0, err.data(), len) == DC_ERR_SETTINGS);
+        const std::string got(err.data());
+        INFO("buffer " << len << ": " << got.size() << " bytes");
+        CHECK(static_cast<int>(got.size()) <= len - 1);
+        CHECK(msg.compare(0, got.size(), got) == 0);
+        CHECK((got.size() == msg.size() || (static_cast<unsigned char>(msg[got.size()]) & 0xC0) != 0x80));
+        CHECK(static_cast<int>(got.size()) >= std::min(len - 1, static_cast<int>(msg.size())) - 3);   // at most a cut character left out
+    }
+    dc_destroy(pl);
 }
 
 TEST_CASE("C API: dc_filter_cache_dir_utf8 returns the folder in UTF-8", "[capi]") {
