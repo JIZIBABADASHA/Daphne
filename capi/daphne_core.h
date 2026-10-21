@@ -1,7 +1,9 @@
 /* daphne_core C ABI: the player for host applications (daphne_core.dll / libdaphne_core.so / .dylib).
  * Calls only go host -> library; the library never calls back into the host. Events and state are
  * polled as JSON (UTF-8). Errors are return codes plus an optional message buffer; no exception
- * crosses this boundary. Every function may be called from any thread. */
+ * crosses this boundary. Every function may be called from any thread. dc_load, dc_apply, dc_stop and dc_destroy
+ * run one at a time (a load can block for minutes: a first long filter design, or a device that is slow to open);
+ * dc_state, dc_meter, dc_design, dc_poll_event, dc_pause, dc_seek and dc_set_next* never wait for them. */
 #ifndef DAPHNE_CORE_H
 #define DAPHNE_CORE_H
 
@@ -54,6 +56,8 @@ DC_API int dc_load_utf8(dc_player* p, const char* path, const char* settings_jso
 /* New settings for the playing track (in place, rebuild + crossfade, or device restart as needed).
  * DC_ERR_SETTINGS when the JSON has errors, DC_ERR_INTERNAL when applying them failed (err says why). */
 DC_API int dc_apply(dc_player* p, const char* settings_json, char* err, int err_len);
+/* Pause / seek the playing track (nothing while a dc_load has not started its player yet: dc_load's `play` and
+ * `seconds` are the ones it starts with). */
 DC_API void dc_pause(dc_player* p, int paused);
 DC_API void dc_seek(dc_player* p, double seconds);
 /* Gapless: the track to continue with when this one ends (same output format only; another sample rate
@@ -77,8 +81,8 @@ DC_API void dc_keep_device(int on);
 DC_API int dc_release_device(void);
 DC_API int dc_device_kept(void);
 
-/* State snapshot as JSON:
- *   {"state": "idle|playing|paused|ended|failed", "position": s, "duration": s, "track": n, "design": 0..1,
+/* State snapshot as JSON (never waits for a dc_load in progress: "loading" meanwhile, with "design"):
+ *   {"state": "idle|loading|playing|paused|ended|failed", "position": s, "duration": s, "track": n, "design": 0..1,
  *    "error": "...", "report": {"source": {...}, "device": {...}, "device_name": "...", "bit_perfect": b,
  *    "reason": "...", "filter": "...", "chain": [...], "latency_ms": x, "underruns": n, "clipped": n, "realtime": x}}
  * "realtime": the processing speed against real time while playing (audio seconds per second of work over the last

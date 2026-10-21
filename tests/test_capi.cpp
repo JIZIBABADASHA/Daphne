@@ -2,14 +2,20 @@
 #include <catch_amalgamated.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <dr_libs/dr_wav.h>
 
 #include "daphne_core.h"
+#include "fake_output.h"
+#include "internal.h"
 #include "test_util.h"
 
 namespace {
@@ -82,6 +88,86 @@ TEST_CASE("C API: an error message cut to the caller's buffer ends on a whole UT
         CHECK(static_cast<int>(got.size()) >= std::min(len - 1, static_cast<int>(msg.size())) - 3);   // at most a cut character left out
     }
     dc_destroy(pl);
+}
+
+namespace {
+// A fake output whose first open takes `open_s` (a driver that hangs a while), and memory sources by name.
+struct SlowRig {
+    std::shared_ptr<test::FakeDevice> dev = std::make_shared<test::FakeDevice>();
+    std::atomic<int> opens{0};
+    std::shared_ptr<test::Signal> music;
+    daphne::PlayerDeps deps(double open_s) {
+        daphne::PlayerDeps d;
+        const auto inner = test::fake_opener(dev);
+        d.open_output = [this, inner, open_s](const daphne::OutputRequest& r, std::string* e) {
+            if (opens++ == 0) std::this_thread::sleep_for(std::chrono::duration<double>(open_s));
+            return inner(r, e);
+        };
+        d.open_decoder = [this](const std::filesystem::path&, std::string*) -> std::unique_ptr<daphne::Decoder> {
+            return std::make_unique<test::MemoryDecoder>(music);
+        };
+        return d;
+    }
+    SlowRig() {
+        dev->speed = 1.0;
+        music = std::make_shared<test::Signal>();
+        const int64_t frames = 3 * 44100;
+        music->info.rate = 44100, music->info.channels = 2, music->info.frames = frames, music->info.codec = "TEST";
+        music->x.resize(static_cast<size_t>(frames) * 2);
+        for (int64_t i = 0; i < frames; ++i) music->x[2 * i] = music->x[2 * i + 1] = 0.5 * std::sin(2 * 3.141592653589793 * 1000.0 * i / 44100);
+    }
+};
+std::string state_of(dc_player* pl) {
+    std::vector<char> b(1 << 16);
+    const int n = dc_state(pl, b.data(), static_cast<int>(b.size()));
+    if (n <= 0) return {};
+    const std::string j(b.data(), static_cast<size_t>(n));
+    const auto k = j.find("\"state\":\"");
+    return k == std::string::npos ? std::string() : j.substr(k + 9, j.find('"', k + 9) - (k + 9));
+}
+}  // namespace
+
+TEST_CASE("C API: while a load waits (a slow device, a long design), the queries answer at once", "[capi]") {
+    // the load holds the operation lock for its whole length; state, meter, pause, seek and set_next do not wait for it
+    SlowRig rig;
+    const auto deps = rig.deps(1.5);
+    dc_internal_player_deps(&deps);
+    dc_player* pl = dc_create();
+    REQUIRE(pl);
+    std::atomic<int> code{1};
+    std::thread loader([&] {
+        char err[256] = {};
+        code = dc_load_utf8(pl, "a.test", R"({"output": {"rate": "native"}})", 0.0, 1, err, sizeof err);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));   // the load is in the slow open now
+    using clock = std::chrono::steady_clock;
+    double worst = 0;
+    int loading = 0, calls = 0;
+    const auto until = clock::now() + std::chrono::milliseconds(800);
+    while (clock::now() < until) {
+        const auto t0 = clock::now();
+        const std::string st = state_of(pl);
+        double l = 0, r = 0;
+        dc_meter(pl, &l, &r);
+        dc_pause(pl, 0);
+        dc_seek(pl, 0.0);
+        dc_set_next_utf8(pl, nullptr);
+        worst = std::max(worst, std::chrono::duration<double>(clock::now() - t0).count());
+        loading += st == "loading";
+        ++calls;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    INFO("slowest round of queries " << worst * 1000 << " ms over " << calls << " rounds");
+    CHECK(worst < 0.1);         // microseconds in fact; the load still waits for its device here
+    CHECK(loading == calls);    // "loading" while no player is published
+    CHECK(code == 1);           // still loading
+    loader.join();
+    CHECK(code == DC_OK);
+    CHECK(state_of(pl) == "playing");
+    dc_stop(pl);
+    CHECK(state_of(pl) == "idle");
+    dc_destroy(pl);
+    dc_internal_player_deps(nullptr);
 }
 
 TEST_CASE("C API: dc_filter_cache_dir_utf8 returns the folder in UTF-8", "[capi]") {

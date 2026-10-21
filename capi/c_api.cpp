@@ -1,4 +1,5 @@
 #include "daphne_core.h"
+#include "internal.h"
 
 #include <atomic>
 #include <cmath>
@@ -7,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
@@ -21,9 +23,15 @@
 
 using nlohmann::json;
 
+// Calls that change what plays (load, stop, apply, destroy) take `op` and run one at a time; a load holds it until
+// playback has started, which can take minutes (a first long filter design) or hang in a driver. Everything else
+// (state, meter, pause, seek, set_next) only copies the player pointer under `pm`, never waits for `op`, and uses
+// the player through that copy: the Player's own methods are safe from any thread (atomics, its own locks).
 struct dc_player {
-    std::mutex op;                       // load / stop / apply
-    std::unique_ptr<daphne::Player> player;
+    std::mutex op;                       // load / stop / apply / destroy
+    std::mutex pm;                       // the player pointer: held only to copy or swap it
+    std::shared_ptr<daphne::Player> player;
+    std::atomic<bool> loading{false};    // dc_load is running (dc_state: "loading" while no player is published)
     std::mutex m;                        // events, report, state
     std::deque<std::string> events;
     daphne::PlayReport report;
@@ -75,14 +83,32 @@ void push_event(dc_player* p, json e) {
     if (p->events.size() > 256) p->events.pop_front();
 }
 
+// the player now (a copy: it stays valid while the caller uses it, whatever load / stop do meanwhile)
+std::shared_ptr<daphne::Player> current(dc_player* p) {
+    std::lock_guard<std::mutex> l(p->pm);
+    return p->player;
+}
+
+// under op: the player is unpublished first (queries see none from now on), then stopped here. A query may still
+// hold a copy for a moment; it is let go before the player is freed, so the freeing happens on this thread.
 void stop_player(dc_player* p) {
-    if (!p->player) return;
-    p->player->stop();
+    std::shared_ptr<daphne::Player> old;
+    {
+        std::lock_guard<std::mutex> l(p->pm);
+        old.swap(p->player);
+    }
+    if (!old) return;
+    old->stop();
     daphne::PlayReport r;
     std::string e;
-    p->player->wait(&r, &e);
-    p->player.reset();
+    old->wait(&r, &e);
+    while (old.use_count() > 1) std::this_thread::yield();
+    old.reset();
 }
+
+// tests only (capi/internal.h): what the players are built with (empty: the platform's devices and decoders)
+std::mutex g_deps_m;
+daphne::PlayerDeps g_deps;
 
 // A wchar_t path of the C API: UTF-16 on Windows (the OS's own), UTF-32 elsewhere.
 std::filesystem::path path_from_wide(const wchar_t* w) {
@@ -100,8 +126,7 @@ int load(dc_player* p, const std::filesystem::path& path, const char* settings_j
 
 void set_next(dc_player* p, const std::filesystem::path& path, std::optional<double> headroom_db) {
     if (!p) return;
-    std::lock_guard<std::mutex> l(p->op);
-    if (p->player) p->player->set_next(path, headroom_db);
+    if (const auto pl = current(p)) pl->set_next(path, headroom_db);
 }
 
 std::optional<double> headroom(double db) { return std::isnan(db) ? std::nullopt : std::optional<double>(db); }
@@ -150,6 +175,11 @@ namespace {
 int load(dc_player* p, const std::filesystem::path& path, const char* settings_json, double seconds, int play, char* err, int err_len) {
     try {
         std::lock_guard<std::mutex> l(p->op);
+        p->loading = true;
+        struct Loaded {
+            dc_player* p;
+            ~Loaded() { p->loading = false; }
+        } loaded{p};
         p->design = 1.0;   // not the last player's: a design stopped halfway would show until the next one ends
         daphne::Settings s;
         std::string msg;
@@ -203,7 +233,11 @@ int load(dc_player* p, const std::filesystem::path& path, const char* settings_j
             }
             push_event(p, {{"type", "failed"}, {"error", e}});
         };
-        auto player = std::make_unique<daphne::Player>();
+        std::shared_ptr<daphne::Player> player;
+        {
+            std::lock_guard<std::mutex> g(g_deps_m);
+            player = std::make_shared<daphne::Player>(g_deps);
+        }
         player->pause(!play);
         std::string e;
         if (!player->start(path, s, out, cb, &e, seconds)) {
@@ -213,7 +247,10 @@ int load(dc_player* p, const std::filesystem::path& path, const char* settings_j
             p->failed = true;
             return player->last_failure_was_device() ? DC_ERR_DEVICE : DC_ERR_FILE;
         }
-        p->player = std::move(player);
+        {
+            std::lock_guard<std::mutex> g(p->pm);   // published: queries see it from now on
+            p->player = std::move(player);
+        }
         return DC_OK;
     } catch (const std::exception& ex) {
         put(err, err_len, ex.what());
@@ -235,11 +272,11 @@ DC_API int dc_apply(dc_player* p, const char* settings_json, char* err, int err_
             put(err, err_len, msg);
             return DC_ERR_SETTINGS;
         }
-        if (p->player) {
+        if (const auto pl = current(p)) {
             daphne::OutputChoice out;
             out.api = s.output.api;
             out.device = s.output.device;
-            p->player->apply(s, out);
+            pl->apply(s, out);
         }
         return DC_OK;
     } catch (const std::exception& ex) {   // not the caller's argument: the engine failed (memory, ...)
@@ -253,14 +290,12 @@ DC_API int dc_apply(dc_player* p, const char* settings_json, char* err, int err_
 
 DC_API void dc_pause(dc_player* p, int paused) {
     if (!p) return;
-    std::lock_guard<std::mutex> l(p->op);
-    if (p->player) p->player->pause(paused != 0);
+    if (const auto pl = current(p)) pl->pause(paused != 0);
 }
 
 DC_API void dc_seek(dc_player* p, double seconds) {
     if (!p) return;
-    std::lock_guard<std::mutex> l(p->op);
-    if (p->player) p->player->seek(seconds);
+    if (const auto pl = current(p)) pl->seek(seconds);
 }
 
 DC_API void dc_set_next(dc_player* p, const wchar_t* path) { set_next(p, path_from_wide(path), std::nullopt); }
@@ -285,16 +320,22 @@ DC_API void dc_stop(dc_player* p) {
 DC_API int dc_state(dc_player* p, char* out, int len) {
     if (!p) return DC_ERR_ARG;
     try {
-        std::lock_guard<std::mutex> l(p->op);
+        const auto pl = current(p);   // never waits for a load in progress
         json j;
         std::string state = "idle";
         double position = 0, duration = 0;
-        if (p->player) {
-            if (p->player->ended()) state = "ended";
-            else if (p->failed) state = "failed";
-            else state = p->player->paused() ? "paused" : "playing";
-            position = p->player->position_seconds();
-        } else if (p->failed) {
+        const bool failed = [&] {
+            std::lock_guard<std::mutex> g(p->m);
+            return p->failed;
+        }();
+        if (pl) {
+            if (pl->ended()) state = "ended";
+            else if (failed) state = "failed";
+            else state = pl->paused() ? "paused" : "playing";
+            position = pl->position_seconds();
+        } else if (p->loading) {
+            state = "loading";
+        } else if (failed) {
             state = "failed";
         }
         std::lock_guard<std::mutex> g(p->m);
@@ -302,13 +343,13 @@ DC_API int dc_state(dc_player* p, char* out, int len) {
             duration = static_cast<double>(p->report.source.frames) / p->report.source.rate;
         j = {{"state", state}, {"position", position}, {"duration", duration}, {"track", p->track},
              {"design", p->design.load()}, {"error", p->error}, {"report", report_json(p->report)}};
-        if (const auto ls = daphne::live_stats(); ls.active && p->player)
+        if (const auto ls = daphne::live_stats(); ls.active && pl)
             j["live"] = {{"fill", ls.fill}, {"read", ls.read}, {"resyncs", ls.resyncs}, {"starves", ls.starves}, {"adjust", ls.adjust}, {"target", ls.target}};
-        if (p->player) {
+        if (pl) {
             // the report is the one of the last start / change; the speed is measured on as it plays
-            j["report"]["realtime"] = p->player->realtime_factor();
-            j["asio_rates"] = p->player->asio_rates();
-            j["debug"] = json::parse(p->player->debug_json(), nullptr, false);
+            j["report"]["realtime"] = pl->realtime_factor();
+            j["asio_rates"] = pl->asio_rates();
+            j["debug"] = json::parse(pl->debug_json(), nullptr, false);
         }
         return put_json(out, len, j.dump());
     } catch (...) {
@@ -337,10 +378,8 @@ DC_API int dc_live_socket(const char* path, int rate) { return path && daphne::l
 
 DC_API void dc_meter(dc_player* p, double* l, double* r) {
     double a = 0, b = 0;
-    if (p) {
-        std::lock_guard<std::mutex> g(p->op);
-        if (p->player) p->player->meter(a, b);
-    }
+    if (p)
+        if (const auto pl = current(p)) pl->meter(a, b);
     if (l) *l = a;
     if (r) *r = b;
 }
@@ -400,6 +439,12 @@ DC_API int dc_release_device(void) {
 }
 
 DC_API int dc_device_kept(void) { return daphne::output_device_kept() ? 1 : 0; }
+
+// tests only (internal.h): the devices and decoders the next players are built with
+DC_API void dc_internal_player_deps(const daphne::PlayerDeps* deps) {
+    std::lock_guard<std::mutex> g(g_deps_m);
+    g_deps = deps ? *deps : daphne::PlayerDeps{};
+}
 
 DC_API int dc_devices(char* out, int len) {
     try {
