@@ -34,6 +34,14 @@ public sealed partial class DaphneEngine : IAudioEngine
     Thread _poll;
     volatile bool _disposed;
 
+    // The core's calls that change what plays never run on MIKU's thread: dc_stop / dc_apply wait for a load in
+    // progress or a driver that is slow to let go (MIKU froze on a track change while the Audiobyte driver hung).
+    // A stop bumps _epoch and runs dc_stop in the background (it cancels a load in progress: DC_ERR_CANCELLED); a load
+    // first waits for the stops before it, and is not taken as playing when a stop came while it ran.
+    long _epoch;
+    readonly object _nativeLock = new();
+    Task _stopping = Task.CompletedTask, _loading = Task.CompletedTask, _applying = Task.CompletedTask;
+
     Track _track, _next;
     double _pausedAt;
     volatile bool _loaded, _playing;
@@ -276,9 +284,19 @@ public sealed partial class DaphneEngine : IAudioEngine
             ProbeCaps();
             string json = SettingsFor(t);
             string path = t.IsLive ? "live:" : t.Path;
-            int r = await Task.Run(() => DaphneNative.Load(_p, path, json, seek, play, out var err) is var code && code == DaphneNative.Ok
-                ? code : Fail(code, err));
-            if (r != DaphneNative.Ok) return;
+            long epoch = Interlocked.Read(ref _epoch);
+            await StopsBefore();   // a stop issued before this load must not cancel it
+            string err = null;
+            Task<int> load;
+            lock (_nativeLock) _loading = load = Task.Run(() => DaphneNative.Load(_p, path, json, seek, play, out err));
+            int r = await load;
+            if (epoch != Interlocked.Read(ref _epoch))
+            {
+                // stopped while it loaded: dc_stop cancelled it (DC_ERR_CANCELLED) or stops it now; not playing
+                if (r == DaphneNative.Ok) _ = StopNative();
+                return;
+            }
+            if (r != DaphneNative.Ok) { Fail(r, err); return; }
             _loaded = true;
             _playing = play;
             _position = seek;
@@ -340,9 +358,29 @@ public sealed partial class DaphneEngine : IAudioEngine
         return Task.CompletedTask;
     }
 
+    /// <summary>dc_stop in the background (never on MIKU's thread); a load in progress is cancelled by it.</summary>
+    Task StopNative()
+    {
+        var p = _p;
+        lock (_nativeLock)
+        {
+            var before = _stopping;
+            _stopping = Task.Run(async () =>
+            {
+                await before;
+                try { if (p != IntPtr.Zero) DaphneNative.dc_stop(p); }
+                catch (Exception ex) { Log.Error("daphne stop", ex); }
+            });
+            return _stopping;
+        }
+    }
+
+    Task StopsBefore() { lock (_nativeLock) return _stopping; }
+
     public void Stop()
     {
-        DaphneNative.dc_stop(_p);
+        Interlocked.Increment(ref _epoch);
+        _ = StopNative();
         _loaded = false;
         _playing = false;
         _track = null; _next = null; _signal = null; _pausedAt = 0;
@@ -354,7 +392,7 @@ public sealed partial class DaphneEngine : IAudioEngine
     {
         var t = _track; double pos = Position; bool play = IsPlaying;
         await _gate.WaitAsync();
-        try { DaphneNative.dc_stop(_p); _loaded = false; }
+        try { Interlocked.Increment(ref _epoch); await StopNative(); _loaded = false; }
         finally { _gate.Release(); }
         if (t != null) await LoadAsync(t, pos, play);
     }
@@ -369,8 +407,20 @@ public sealed partial class DaphneEngine : IAudioEngine
     void Apply()
     {
         if (!_loaded || _track == null) return;
-        int r = DaphneNative.Apply(_p, SettingsFor(_track), out var err);
-        if (r != DaphneNative.Ok) Log.Info("[daphne] settings: " + err);
+        // in the background, in order: dc_apply waits for a load or a stop in progress
+        string json = SettingsFor(_track);
+        var p = _p;
+        lock (_nativeLock)
+        {
+            var before = _applying;
+            _applying = Task.Run(async () =>
+            {
+                await before;
+                if (p == IntPtr.Zero || _disposed) return;
+                int r = DaphneNative.Apply(p, json, out var err);
+                if (r != DaphneNative.Ok) Log.Info("[daphne] settings: " + err);
+            });
+        }
     }
 
     public void InvalidateNext() => QueueNext();
@@ -549,11 +599,24 @@ public sealed partial class DaphneEngine : IAudioEngine
     public void Dispose()
     {
         _disposed = true;
-        try { DaphneNative.dc_stop(_p); } catch { }
+        Interlocked.Increment(ref _epoch);
+        var stop = StopNative();   // cancels a load in progress
         RestoreHardwareVolume();
         _hwDevice?.Dispose();
         _hwDevice = null;
-        try { _poll?.Join(500); } catch { }
+        // dc_destroy only when no call is left on the player (the poll thread, a load, a stop, a settings change):
+        // freeing it under one would use freed memory. A driver that hangs keeps a call in it: then the player is left
+        // as it is (the process is ending) rather than freed under that call.
+        bool idle = false;
+        try
+        {
+            bool pollDone = _poll == null || _poll.Join(2000);
+            Task[] calls;
+            lock (_nativeLock) calls = new[] { stop, _loading, _applying };
+            idle = pollDone && Task.WaitAll(calls, 5000);
+        }
+        catch (Exception ex) { Log.Error("daphne dispose", ex); }
+        if (!idle) { Log.Info("[daphne] a call is still in the core at exit (a driver not letting go): the player is not freed"); return; }
         if (_p != IntPtr.Zero) { DaphneNative.dc_destroy(_p); _p = IntPtr.Zero; }
     }
 }
