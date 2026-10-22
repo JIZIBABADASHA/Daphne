@@ -99,7 +99,8 @@ The output lands in `build\bin\Release\`: `daphne.exe`, `daphne_core.dll`, `daph
 FFmpeg DLLs. The code builds without warnings at `/W4`.
 
 The engine, the player and the tests also build on macOS (Core Audio output, N24; `miku/pack-mac.sh` builds
-the module for MIKU's Mac installer) and on Linux (no device output there yet; the player is tested on a fake
+the module for MIKU's Mac installer on macOS 11+ with only the Xcode command line tools: CMake and FFmpeg's source
+are downloaded into `.tools` and `third_party` when missing) and on Linux (no device output there yet; the player is tested on a fake
 device, [N25](doc/N25_跨平台.md)):
 
 ```sh

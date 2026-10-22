@@ -14,9 +14,10 @@
 #
 #   miku/pack-mac.sh <out-dir> [arm64] [x86_64]     (both architectures by default)
 #
-# Needs macOS with the Xcode command line tools and CMake (on the PATH, or CMAKE=/path/to/cmake). FFmpeg (the version
-# the Windows build uses, LGPL, shared, decoders only) is built from source the first time and then reused:
-# third_party/ffmpeg-src/ (the source), build-mac-<arch>/ (FFmpeg and the engine).
+# Needs macOS 11 or later with the Xcode command line tools, nothing else: CMake is the one on the PATH (or
+# CMAKE=/path/to/cmake), else Kitware's portable build downloaded into .tools/ (as scripts/fetch_cmake.ps1 on Windows).
+# FFmpeg (the version the Windows build uses, LGPL, shared, decoders only) is built from source the first time and then
+# reused: third_party/ffmpeg-src/ (the source), build-mac-<arch>/ (FFmpeg and the engine).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:?usage: miku/pack-mac.sh <out-dir> [arm64] [x86_64]}"; shift
@@ -24,11 +25,28 @@ ARCHS=("$@"); [ ${#ARCHS[@]} -gt 0 ] || ARCHS=(arm64 x86_64)
 MIN=11.0                        # the oldest macOS the module runs on (MIKU's Electron needs newer anyway)
 FF_VER=8.1.3                    # as scripts/fetch_ffmpeg.ps1 (Windows)
 FF_SHA=7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3   # of ffmpeg-8.1.3.tar.xz from ffmpeg.org
-CMAKE="${CMAKE:-$(command -v cmake || true)}"
-[ -n "$CMAKE" ] || { echo "daphne: CMake not found (install it, or set CMAKE=/path/to/cmake)" >&2; exit 1; }
+CM_VER=3.31.6                   # as scripts/fetch_cmake.ps1 (Windows)
+CM_SHA=330b9514f5112e5ed4fb08b8b05803b776fd9b539a6ae12927d14dcc0ee2ba8d   # of cmake-3.31.6-macos-universal.tar.gz
 JOBS=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 fail() { echo "daphne: $1" >&2; exit 1; }
+
+CMAKE="${CMAKE:-$(command -v cmake || true)}"
+if [ -z "$CMAKE" ]; then
+  CM="$ROOT/.tools/cmake-$CM_VER-macos-universal"
+  CMAKE="$CM/CMake.app/Contents/bin/cmake"
+  if [ ! -x "$CMAKE" ]; then
+    echo "daphne: CMake is not installed; downloading CMake $CM_VER into .tools/"
+    mkdir -p "$ROOT/.tools"
+    CT="$ROOT/.tools/cmake-$CM_VER-macos-universal.tar.gz"
+    curl -fL -o "$CT" "https://github.com/Kitware/CMake/releases/download/v$CM_VER/cmake-$CM_VER-macos-universal.tar.gz" ||
+      fail "CMake could not be downloaded"
+    echo "$CM_SHA  $CT" | shasum -a 256 -c - >/dev/null || { rm -f "$CT"; fail "cmake-$CM_VER-macos-universal.tar.gz does not match its SHA-256"; }
+    rm -rf "$CM"; tar xf "$CT" -C "$ROOT/.tools"; rm -f "$CT"
+    xattr -dr com.apple.quarantine "$CM" 2>/dev/null || true
+    [ -x "$CMAKE" ] || fail "CMake $CM_VER did not unpack to $CM"
+  fi
+fi
 
 # FFmpeg's source, checked against the release this script was written for
 SRC="$ROOT/third_party/ffmpeg-src"
