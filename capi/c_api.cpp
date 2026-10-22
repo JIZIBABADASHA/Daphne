@@ -270,7 +270,7 @@ int load(dc_player* p, const std::filesystem::path& path, const char* settings_j
             if (!stopped_already) p->starting = player;
         }
         if (stopped_already) {
-            put(err, err_len, "cancelled (dc_stop)");
+            put(err, err_len, "cancelled (dc_stop or dc_cancel)");
             return DC_ERR_CANCELLED;
         }
         std::string e;
@@ -288,7 +288,7 @@ int load(dc_player* p, const std::filesystem::path& path, const char* settings_j
                 std::string we;
                 player->wait(&r, &we);
             }
-            put(err, err_len, "cancelled (dc_stop)");
+            put(err, err_len, "cancelled (dc_stop or dc_cancel)");
             return DC_ERR_CANCELLED;
         }
         if (!started) {
@@ -306,6 +306,9 @@ int load(dc_player* p, const std::filesystem::path& path, const char* settings_j
     } catch (const std::exception& ex) {
         put(err, err_len, ex.what());
         return DC_ERR_FILE;
+    } catch (...) {   // anything else must not cross the C boundary (it would end the host)
+        put(err, err_len, "unknown error");
+        return DC_ERR_INTERNAL;
     }
 }
 

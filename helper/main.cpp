@@ -12,8 +12,8 @@
 //   apply    settings                      -> code, error
 //   pause    paused                        stop     hold   (the device is released: rate, DAC format, hog mode;
 //                                                                  hold: kept for the next load, as MIKU does)
-//                                          a stop cancels at once the load that runs (dc_cancel) and the loads still
-//                                          queued: they answer code DC_ERR_CANCELLED; nothing of them plays
+//                                          a stop or a load cancels at once the load that runs (dc_cancel) and the
+//                                          loads still queued: they answer code DC_ERR_CANCELLED; nothing of them plays
 //   seek     seconds                       next     path, gain (dB or null)
 //   state                                  -> state (dc_state's object), kept (a device is kept, nothing loaded)
 //   meter                                  -> l, r
@@ -109,7 +109,13 @@ public:
                 quit_req = std::move(req);
                 break;
             }
-            if (str(req, "cmd") == "stop") cancel_loads();   // before it is queued: not after the load it stops
+            // before it is queued, not after the load it replaces: a stop, or a load (MIKU changes tracks with a load
+            // alone, no stop in between), cancels the loads before it
+            const std::string cmd = str(req, "cmd");
+            if (cmd == "stop" || cmd == "load") {
+                const uint64_t gen = cancel_loads(cmd == "stop" ? "cancelled (stop)" : "cancelled (a later load)");
+                if (cmd == "load") req["_gen"] = gen;
+            }
             if (!answer_now(req)) {
                 std::lock_guard<std::mutex> l(m_);
                 queue_.push_back(std::move(req));
@@ -132,12 +138,16 @@ public:
     }
 
 private:
-    // A stop came: the loads still queued are dropped (each answers cancelled) and the one the worker runs returns at
-    // once (dc_cancel), so the stop is not held behind a load (a first long design) and nothing of them plays.
-    void cancel_loads() {
+    // A stop or a load came: the loads still queued are dropped (each answers cancelled) and the one the worker runs
+    // returns at once (dc_cancel), so the command is not held behind a load (a first long design) and nothing of them
+    // plays. A load the worker has taken but not yet started sees the new generation and does not start (execute);
+    // left: the microseconds between that check and dc_load taking hold, where the cancel is not seen.
+    uint64_t cancel_loads(const char* why) {
         std::vector<json> dropped;
+        uint64_t gen;
         {
             std::lock_guard<std::mutex> l(m_);
+            gen = ++gen_;
             for (auto it = queue_.begin(); it != queue_.end();) {
                 if (str(*it, "cmd") == "load") {
                     dropped.push_back(std::move(*it));
@@ -149,10 +159,11 @@ private:
         }
         for (const auto& d : dropped) {
             json r = reply(d, false);
-            r["code"] = DC_ERR_CANCELLED, r["error"] = "cancelled (stop)";
+            r["code"] = DC_ERR_CANCELLED, r["error"] = why;
             emit(r);
         }
         dc_cancel(p_);
+        return gen;
     }
 
     // queries that never wait for a running command
@@ -207,6 +218,12 @@ private:
         const std::string cmd = str(req, "cmd");
         char err[2048] = {0};
         if (cmd == "load") {
+            if (req.value("_gen", uint64_t{0}) != gen_.load()) {   // a later load or a stop came after it was taken
+                json r = reply(req, false);
+                r["code"] = DC_ERR_CANCELLED, r["error"] = "cancelled (replaced)";
+                emit(r);
+                return;
+            }
             const std::string path = str(req, "path"), settings = settings_of(req);
             const int code = dc_load_utf8(p_, path.c_str(), settings.c_str(), num(req, "seek", 0), flag(req, "play", true) ? 1 : 0, err, sizeof err);
             json r = reply(req, code == DC_OK);
@@ -268,6 +285,7 @@ private:
     std::condition_variable cv_;
     std::deque<json> queue_;
     bool quit_ = false;
+    std::atomic<uint64_t> gen_{0};   // bumped by every stop and load (cancel_loads); a load runs only in its own
     std::atomic<bool> pump_stop_{false};
 };
 
