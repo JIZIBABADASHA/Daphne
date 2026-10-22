@@ -44,6 +44,7 @@ const Planes& twiddles(TwiddleCache& c, int n) {
     Planes& t = c.table;
     parallel_for(n / 2, [&](int64_t b, int64_t e) {
         for (int64_t k = b; k < e; ++k) {
+            if (((k - b) & 0x3fff) == 0) check_cancel();   // 2^25 dd sincos for 1M taps x 8: seconds, no progress
             DD s, co;
             dd::sincos_series(DD(static_cast<double>(k)) * ang, s, co);
             set_re(t, static_cast<size_t>(k), co);
@@ -58,6 +59,7 @@ const Planes& twiddles(TwiddleCache& c, int n) {
 void fft_dd(Planes& x, bool inverse, TwiddleCache& cache) {
     const int n = static_cast<int>(x.size());
     for (int i = 1, j = 0; i < n; ++i) {
+        if ((i & 0xffff) == 0) check_cancel();   // one thread over the whole array (2^26 points for 1M taps x 8)
         int bit = n >> 1;
         while (j & bit) {
             j ^= bit;
@@ -174,6 +176,7 @@ DVec partial_min_phase(const DVec& h, int L, double alpha, const DD& floor) {
     const double a = std::clamp(alpha, 0.0, 1.0);
     const DD up(1.0 + a), down(1.0 - a);
     for (int k = 1; k < N; ++k) {
+        if ((k & 0xffff) == 0) check_cancel();   // the loops on one thread here and below have no progress either
         if (k == N / 2) continue;
         const DD f = k < N / 2 ? up : down;
         const size_t u = static_cast<size_t>(k);
@@ -210,6 +213,7 @@ DVec partial_min_phase(const DVec& h, int L, double alpha, const DD& floor) {
     const int span = maxD + L + 2 * G;
     std::vector<double> ay(static_cast<size_t>(span));
     for (int j = 0; j < span; ++j) {
+        if ((j & 0xffff) == 0) check_cancel();
         int idx = j - maxD - G;
         idx = ((idx % N) + N) % N;
         ay[static_cast<size_t>(j)] = std::abs(X.rh[static_cast<size_t>(idx)]);
@@ -239,6 +243,7 @@ DVec partial_min_phase(const DVec& h, int L, double alpha, const DD& floor) {
 
     DD sum(0.0);
     for (int n = 0; n < L; ++n) {
+        if ((n & 0xffff) == 0) check_cancel();
         int idx = n - D;
         if (idx < 0) idx += N;
         DD y = re_at(X, static_cast<size_t>(idx));
