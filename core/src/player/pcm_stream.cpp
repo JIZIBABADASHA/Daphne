@@ -55,7 +55,8 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
         auto fail_attempt = [&]() {
             io.dev.reset();
             if (last && error) *error = e;
-            if (!last) event("the output at " + what(attempt) + " failed (" + e + "): trying " + what(attempt + 1));
+            // cancelled: the next round returns without trying the next rate, so the log does not say it does
+            if (!last && !cancel) event("the output at " + what(attempt) + " failed (" + e + "): trying " + what(attempt + 1));
             return last;
         };
         dec->seek(from);

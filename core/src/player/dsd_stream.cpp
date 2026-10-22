@@ -67,7 +67,7 @@ bool Player::Impl::open_dsd(int64_t from, std::string* error) {
             if (io.dev)
                 for (const auto& n : io.dev->take_notes()) event(n);   // why the device did not take it (its rate change)
             io.dev.reset();
-            if (i + 1 < at.size()) event("the output at " + what(a) + " failed (" + e + "): trying " + what(at[i + 1]));
+            if (i + 1 < at.size() && !cancel) event("the output at " + what(a) + " failed (" + e + "): trying " + what(at[i + 1]));
         };
         io.dev = open_output({out, s.output.buffer_ms, a.rate, di.channels, a.native}, &e);
         if (!io.dev) {

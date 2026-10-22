@@ -37,6 +37,8 @@ static class DaphneNative
     // the next track with its own headroom (ReplayGain per track), applied where it starts decoding; NaN keeps it
     [DllImport(Dll, CharSet = CharSet.Unicode)] public static extern void dc_set_next_gain(IntPtr p, string path, double headroomDb);
     [DllImport(Dll)] public static extern void dc_stop(IntPtr p);
+    // cancels a dc_load in progress (it returns ErrCancelled) and returns at once; what plays otherwise is not touched
+    [DllImport(Dll)] public static extern void dc_cancel(IntPtr p);
     [DllImport(Dll)] static extern int dc_state(IntPtr p, byte[] json, int len);
     [DllImport(Dll)] static extern int dc_poll_event(IntPtr p, byte[] json, int len);
     [DllImport(Dll)] public static extern void dc_meter(IntPtr p, out double l, out double r);
