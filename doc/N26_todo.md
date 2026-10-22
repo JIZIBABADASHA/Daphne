@@ -12,7 +12,10 @@
   - 本分支與 `main` 的效能比較（`parallel_for` 的 worker 優先權在 Windows 改成三級，原本照抄建立者的確切值），用最重的設定比較 underrun 數與設計時間。
   - `decode-test --md5`（內建 MD5，取代 BCrypt）與 `main` 的結果逐檔比對。
   - 含中文、emoji、超過 260 字元的實際檔名播放（孤立 surrogate 已有單元測試）。
-- **8 階 DSD64 的最佳化 NTF 在實機上**（N19）：處理鏈中量測與單元測試都通過，但還沒有在 DAC 上播放（DoP / 原生 DSD）確認，也沒有用類比量測確認超音波噪聲。
+- **8 階 DSD64 的最佳化 NTF 在實機上**（N19）：處理鏈中量測與單元測試都通過。
+  - [x] DoP 實機播放（2026-10-22，Audiobyte USB Driver 1.0.62，WASAPI 獨佔，`0f96912`）：48 kHz / 96 kHz 24-bit FLAC 各 20 s，131072 taps、double-double，176.4 kHz DoP → DSD64；underrun 0、event timeout 0、clipped 0，聽感正常。
+  - [ ] 原生 DSD（ASIO）播放。
+  - [ ] 類比量測確認 40 – 100 kHz 的超音波噪聲。
 
 ## 拆分計畫的後續步驟（N25）
 
@@ -97,7 +100,7 @@
 ## 已知問題（暫不處理）
 
 - **處理執行緒的 sleep 輪詢**（環滿時 2 ms、排空時 5 ms、等待裝置的迴圈）：之後改成事件等待。
-- **helper 在 Mac 上實機確認**：Windows 上以腳本驅動 helper 的停止情境已通過（N4「helper 程序」）；還要在 Mac 的 MIKU 裡（Core Audio + DAC）用 1M taps 第一次設計時按停止，確認停止後不出聲（`verify/miku_shell.js`、`verify/helper.py`）。
+- **helper 在 Mac 上實機確認**：✅ 2026-10-22，`e7db5e6`，Intel Mac（macOS 11.7）、Core Audio 獨佔、Audiobyte BLACK DRAGON（USB），以模擬 MIKU 的腳本驅動 helper（同 N4「helper 程序」的情境：1M taps 第一次設計中排第二首，再按停止，PCM 176.4 kHz）。連跑 4 次：排隊的那首 0 ms、設計中的那首 2 – 76 ms 回 `DC_ERR_CANCELLED`，停止 0.82 – 0.89 s，之後再載入正常播放；合併 #45 前的 helper（`adaa2b6`）在同一台 Mac（BlackHole）上停止要約 160 s，回覆時狀態已是 playing。DAC 在設計前就被 hog（要先設好取樣率才知道濾波器怎麼設計），但 `start()` 之前 IO 回呼只送靜音，取消後不會開始播；停止的 0.8 s 是把取樣率改回原本的 352.8 kHz 並等 DAC 確認（與一般停止相同）。沒有在 Mac 的 MIKU 介面裡操作（使用者決定不需要）。
 - **Windows 擴充在 MIKU 裡實機確認**：主控台程式驅動 `DaphneEngine` 的情境都通過（N4）；還要在 MIKU 裡用 1M taps 第一次設計時按停止、換歌、關閉 MIKU，確認畫面不凍結、不出錯誤訊息。
 - **8 階 DSD64 的迴路重置**（N19）：沒有頻寬限制的過載直接送進調變器時，新的表比原本的表容易重置迴路（約 1.5 – 2 倍）：停在限幅器天花板的 40 Hz 方波 3 秒重置 410 次（原本 2 – 3 次）；4 倍滿刻度方波在 440 Hz、1 kHz（44.1 kHz 輸入）重置 526 – 1599 次（原本 0 次），50 / 100 Hz 兩者都會重置（原本約 1200 – 1300 次，新表約 2100 次）。處理鏈的升頻濾波器與限幅器讓這種輸入不會出現，處理鏈中的測試都是 0 次；若之後有不經升頻濾波器與限幅器的輸入路徑，要重新檢查。
 
