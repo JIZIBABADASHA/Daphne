@@ -38,7 +38,9 @@ public sealed partial class DaphneEngine : IAudioEngine
     // progress or a driver that is slow to let go (MIKU froze on a track change while the Audiobyte driver hung).
     // A stop bumps _epoch and runs dc_stop in the background (it cancels a load in progress: DC_ERR_CANCELLED); a load
     // first waits for the stops before it, and is not taken as playing when a stop came while it ran.
-    long _epoch;
+    // A load also cancels the one before it (dc_cancel): a track change during a long first design does not wait for
+    // the design of the track left; a load that a later one or a stop replaced while it waited is skipped.
+    long _epoch, _loadSeq;
     readonly object _nativeLock = new();
     Task _stopping = Task.CompletedTask, _loading = Task.CompletedTask, _applying = Task.CompletedTask;
 
@@ -256,6 +258,8 @@ public sealed partial class DaphneEngine : IAudioEngine
     {
         LastFailureWasDevice = false;
         if (t == null) return;
+        long mine = Interlocked.Increment(ref _loadSeq);
+        long epoch = Interlocked.Read(ref _epoch);   // a stop from here on: this load does not play
         Loading?.Invoke(t);
         if (t.IsLive)
         {
@@ -273,9 +277,10 @@ public sealed partial class DaphneEngine : IAudioEngine
         {
             try { await Task.WhenAny(ReleaseOthers(), Task.Delay(1500)); } catch (Exception ex) { Log.Error("ReleaseOthers", ex); }
         }
-        await _gate.WaitAsync();
+        await EnterReplacing(mine);
         try
         {
+            if (Replaced(mine, epoch)) return;   // a later track or a stop came while this load waited
             _track = t;
             _next = null;
             _pausedAt = seek;
@@ -284,11 +289,11 @@ public sealed partial class DaphneEngine : IAudioEngine
             ProbeCaps();
             string json = SettingsFor(t);
             string path = t.IsLive ? "live:" : t.Path;
-            long epoch = Interlocked.Read(ref _epoch);
             await StopsBefore();   // a stop issued before this load must not cancel it
             string err = null;
             Task<int> load;
-            lock (_nativeLock) _loading = load = Task.Run(() => DaphneNative.Load(_p, path, json, seek, play, out err));
+            lock (_nativeLock)
+                _loading = load = Task.Run(() => Replaced(mine, epoch) ? DaphneNative.ErrCancelled : DaphneNative.Load(_p, path, json, seek, play, out err));
             int r = await load;
             if (epoch != Interlocked.Read(ref _epoch))
             {
@@ -296,6 +301,8 @@ public sealed partial class DaphneEngine : IAudioEngine
                 if (r == DaphneNative.Ok) _ = StopNative();
                 return;
             }
+            // a later track came while it loaded: cancelled (dc_cancel), or started just before; the later load stops it
+            if (mine != Interlocked.Read(ref _loadSeq)) return;
             if (r != DaphneNative.Ok) { Fail(r, err); return; }
             _loaded = true;
             _playing = play;
@@ -306,6 +313,26 @@ public sealed partial class DaphneEngine : IAudioEngine
             QueueNext();
         }
         finally { _gate.Release(); Changed?.Invoke(); }
+    }
+
+    bool Replaced(long mine, long epoch) => mine != Interlocked.Read(ref _loadSeq) || epoch != Interlocked.Read(ref _epoch);
+
+    /// <summary>
+    /// Waits for the gate while the load holding it (an earlier track) is cancelled. Repeated every 50 ms while this
+    /// is the latest load: the earlier one may not have reached dc_load yet, where a cancel takes effect. dc_cancel
+    /// returns at once (it sets a flag) and only touches a load in progress, which can only be the earlier one while
+    /// this one waits; it is called here, not queued, so it never lands after this load has entered.
+    /// </summary>
+    async Task EnterReplacing(long mine)
+    {
+        var enter = _gate.WaitAsync();
+        while (!enter.IsCompleted && !_disposed)
+        {
+            var p = _p;
+            if (mine == Interlocked.Read(ref _loadSeq) && p != IntPtr.Zero) DaphneNative.dc_cancel(p);
+            await Task.WhenAny(enter, Task.Delay(50));
+        }
+        await enter;
     }
 
     int Fail(int code, string err)
