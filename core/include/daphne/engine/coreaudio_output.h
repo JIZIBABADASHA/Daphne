@@ -53,6 +53,7 @@ public:
     std::string device_name() const override { return name_; }
     double latency_ms() const override { return latency_ms_; }
     int buffer_frames() const override { return buffer_frames_; }
+    int system_rate() const override { return system_rate_; }
     std::vector<int> supported_rates() const override { return rates_; }
 
     bool start(ByteRing* ring, const std::atomic<bool>* eof, std::string* error) override;
@@ -80,6 +81,7 @@ private:
     std::string name_;
     double latency_ms_ = 0;
     int buffer_frames_ = 0;
+    int system_rate_ = 0;
     std::vector<int> rates_;
     std::atomic<bool> drained_{false}, failed_{false}, reset_{false};
     OutputStats stats_;

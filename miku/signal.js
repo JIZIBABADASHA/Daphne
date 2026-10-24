@@ -175,7 +175,8 @@ function buildSignal(host, s, o, t, r) {
   const dsdRate = src.dsd_rate || 0;
   const isDsd = dsdRate > 0 || (host.isDsd ? host.isDsd(t) : false);
   const dop = filter.includes('DoP');
-  const devRate = dev.rate, srcRate = dsdRate > 0 ? dsdRate : src.rate;
+  // the core's output rate; Core Audio may convert it to the device's own rate (system_rate) after that
+  const devRate = dev.rate, sysRate = +r.system_rate || 0, srcRate = dsdRate > 0 ? dsdRate : src.rate;
   const mode = SM.exclusive(s) ? 'Core Audio 獨佔' : 'Core Audio 共享';
   const sentDirect = isDsd && filter.startsWith('none (DSD file sent directly)');
   const dsp = chain.filter(x => x === 'eq' || x === 'crossfeed').map(x => (x === 'eq' ? 'EQ' : 'Crossfeed'));
@@ -187,14 +188,15 @@ function buildSignal(host, s, o, t, r) {
   const info = {
     codec: t.codec, sourceRate: srcRate, sourceBits: isDsd ? 1 : t.bits, dsd: isDsd,
     dsdLabel: isDsd && srcRate > 0 ? dsdName(srcRate) : null, lossy, dop, dsdDirect: dop, dsdTransport: dop ? 'Dop' : null,
-    resampled: isDsd ? !sentDirect : dop || devRate !== srcRate,
-    outputRate: devRate, outputFormat: format, outputBits: dev.bits, mode, device: r.device_name,
+    resampled: isDsd ? !sentDirect : dop || devRate !== srcRate || sysRate > 0,
+    outputRate: sysRate || devRate, outputFormat: format, outputBits: dev.bits, mode, device: r.device_name,
     dspActive: dsp.length > 0, dspSummary: dsp.length ? dsp.join(' · ') : null, replayGainDb: Math.abs(rg) > 1e-9 ? rg : null,
     decoder: 'Daphne', sourceChannels: src.channels, volumeMode,
   };
   const notes = [];
   const d = s.dsp || {};
   if (d.enabled && (Math.abs(+d.balance || 0) > 0.001 || d.invert)) notes.push('Daphne 內核沒有平衡 / 反相，這兩項設定不會作用。');
+  if (sysRate > 0) notes.push(`裝置目前是 ${khz(sysRate)} kHz，由 macOS 把 ${khz(devRate)} kHz 轉成裝置的取樣率。`);
   if (sentDirect && volumeMode === 'none') notes.push('DSD 直送時無法使用數位音量，DAC 會以原始音量輸出，請用 DAC 的音量旋鈕調整。');
   const clipped = +r.clipped || 0;
   if (clipped > 0) notes.push(`已有 ${clipped.toLocaleString('en-US')} 個樣本超過滿刻度被削波；請調低數位音量或 EQ 前級。`);

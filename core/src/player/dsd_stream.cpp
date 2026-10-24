@@ -88,6 +88,7 @@ bool Player::Impl::open_dsd(int64_t from, std::string* error) {
         }
         rep.device = io.dev->format();
         rep.device_name = io.dev->device_name();
+        rep.system_rate = io.dev->system_rate();
         rep.latency_ms = io.dev->latency_ms();
         io.note_buffer_fallback(report, s.output.buffer_ms);
         crate = di.dsd_rate / 8;

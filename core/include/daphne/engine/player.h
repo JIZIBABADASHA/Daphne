@@ -30,6 +30,7 @@ struct PlayReport {
     AudioInfo source;
     DeviceFormat device;
     std::string device_name;
+    int system_rate = 0;              // the device's own rate when the output converts to it (Core Audio); 0 = none
     bool bit_perfect = false;
     std::string not_bit_perfect_reason;
     int64_t frames_played = 0;   // device frames written
