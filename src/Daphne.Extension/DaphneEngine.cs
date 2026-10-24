@@ -30,9 +30,10 @@ public sealed partial class DaphneEngine : IAudioEngine
     readonly Settings _s;
     readonly DaphneOptions _opts;
     readonly SemaphoreSlim _gate = new(1, 1);
-    IntPtr _p;
+    readonly DaphnePlayerHandle _p;
     Thread _poll;
     volatile bool _disposed;
+    int _disposeStarted;
 
     Track _track, _next;
     double _pausedAt;
@@ -69,6 +70,7 @@ public sealed partial class DaphneEngine : IAudioEngine
         _opts = options;
         _host = host;
         _p = DaphneNative.dc_create();
+        if (_p.IsInvalid) { _p.Dispose(); throw new InvalidOperationException("Daphne 無法建立播放內核。"); }
         _poll = new Thread(PollLoop) { IsBackground = true, Name = "daphne poll" };
         _poll.Start();
     }
@@ -78,8 +80,8 @@ public sealed partial class DaphneEngine : IAudioEngine
     public SignalInfo Signal => _signal;
     public bool LastFailureWasDevice { get; private set; }
     public Track Track => _track;
-    public bool IsPlaying => _loaded && _playing;
-    public bool IsLoaded => _loaded;
+    public bool IsPlaying => !_disposed && _loaded && _playing;
+    public bool IsLoaded => !_disposed && _loaded;
     public DeviceCaps Caps => _caps;
     public double Position => _loaded ? _position : _pausedAt;
     /// <summary>YouTube Music: what the page wrote and the core has not played yet (the ring, the chain and its ring, the device).</summary>
@@ -92,14 +94,14 @@ public sealed partial class DaphneEngine : IAudioEngine
         {
             try
             {
-                if (_p != IntPtr.Zero)
+                if (!_disposed)
                 {
                     // events and the design progress never wait for a load in progress (a first design can take minutes)
                     string ev;
-                    while ((ev = DaphneNative.PollEvent(_p)) != null) OnEvent(ev);
-                    PostDesign(DaphneNative.dc_design(_p));
+                    while (!_disposed && (ev = DaphneNative.PollEvent(_p)) != null) OnEvent(ev);
+                    if (!_disposed) PostDesign(DaphneNative.dc_design(_p));
                 }
-                if (_p != IntPtr.Zero && _loaded)
+                if (!_disposed && _loaded)
                 {
                     var st = DaphneNative.State(_p);
                     if (st != null)
@@ -133,6 +135,7 @@ public sealed partial class DaphneEngine : IAudioEngine
                     }
                 }
             }
+            catch (ObjectDisposedException) when (_disposed) { }
             catch (Exception ex) { Log.Error("daphne poll", ex); }
             Thread.Sleep(50);
         }
@@ -140,6 +143,7 @@ public sealed partial class DaphneEngine : IAudioEngine
 
     void OnEvent(string json)
     {
+        if (_disposed) return;
         using var doc = JsonDocument.Parse(json);
         var e = doc.RootElement;
         switch (e.GetProperty("type").GetString())
@@ -230,6 +234,7 @@ public sealed partial class DaphneEngine : IAudioEngine
 
     void RefreshReport()
     {
+        if (_disposed) return;
         var st = DaphneNative.State(_p);
         if (st == null) return;
         using var doc = JsonDocument.Parse(st);
@@ -246,6 +251,7 @@ public sealed partial class DaphneEngine : IAudioEngine
 
     public async Task LoadAsync(Track t, double seek, bool play)
     {
+        if (_disposed) return;
         LastFailureWasDevice = false;
         if (t == null) return;
         Loading?.Invoke(t);
@@ -268,6 +274,7 @@ public sealed partial class DaphneEngine : IAudioEngine
         await _gate.WaitAsync();
         try
         {
+            if (_disposed) return;
             _track = t;
             _next = null;
             _pausedAt = seek;
@@ -278,7 +285,7 @@ public sealed partial class DaphneEngine : IAudioEngine
             string path = t.IsLive ? "live:" : t.Path;
             int r = await Task.Run(() => DaphneNative.Load(_p, path, json, seek, play, out var err) is var code && code == DaphneNative.Ok
                 ? code : Fail(code, err));
-            if (r != DaphneNative.Ok) return;
+            if (_disposed || r != DaphneNative.Ok) return;
             _loaded = true;
             _playing = play;
             _position = seek;
@@ -287,11 +294,13 @@ public sealed partial class DaphneEngine : IAudioEngine
             ApplyHardwareVolume();
             QueueNext();
         }
-        finally { _gate.Release(); Changed?.Invoke(); }
+        catch (ObjectDisposedException) when (_disposed) { }
+        finally { _gate.Release(); if (!_disposed) Changed?.Invoke(); }
     }
 
     int Fail(int code, string err)
     {
+        if (_disposed) return code;
         LastFailureWasDevice = code == DaphneNative.ErrDevice;
         _signal = null;
         Log.Info($"[daphne] load failed ({code}): {err}");
@@ -302,7 +311,10 @@ public sealed partial class DaphneEngine : IAudioEngine
     /// <summary>Gapless: tell the core what follows (it continues without a gap when the format matches).</summary>
     void QueueNext()
     {
-        if (!_loaded || !_s.Gapless || _track?.IsLive == true) { DaphneNative.dc_set_next(_p, null); return; }   // a live stream has no end
+        // A load owns the native operation mutex and resets the next track itself. Entering
+        // dc_set_next while loading could block the UI for the entire filter design.
+        if (_disposed || !_loaded) return;
+        if (!_s.Gapless || _track?.IsLive == true) { DaphneNative.dc_set_next(_p, null); return; }   // a live stream has no end
         var n = PeekNext?.Invoke();
         if (n == null || n.IsLive || n.Codec == "CD" || string.IsNullOrEmpty(n.Path)) { _next = null; DaphneNative.dc_set_next(_p, null); return; }
         _next = n;
@@ -312,6 +324,7 @@ public sealed partial class DaphneEngine : IAudioEngine
 
     public void Pause()
     {
+        if (_disposed) return;
         if (_loaded) DaphneNative.dc_pause(_p, 1);
         _playing = false;
         _pausedAt = Position;
@@ -320,6 +333,7 @@ public sealed partial class DaphneEngine : IAudioEngine
 
     public void Resume()
     {
+        if (_disposed) return;
         if (_loaded) { DaphneNative.dc_pause(_p, 0); _playing = true; Changed?.Invoke(); return; }
         var t = _track;
         if (t != null) _ = LoadAsync(t, _pausedAt, true);
@@ -327,6 +341,7 @@ public sealed partial class DaphneEngine : IAudioEngine
 
     public Task SeekAsync(double pos)
     {
+        if (_disposed) return Task.CompletedTask;
         if (_track?.IsLive == true) return Task.CompletedTask;   // YouTube Music seeks in its own page
         if (!_loaded) { _pausedAt = pos; return Task.CompletedTask; }
         DaphneNative.dc_seek(_p, pos);
@@ -337,6 +352,7 @@ public sealed partial class DaphneEngine : IAudioEngine
 
     public void Stop()
     {
+        if (_disposed) return;
         DaphneNative.dc_stop(_p);
         _loaded = false;
         _playing = false;
@@ -347,9 +363,11 @@ public sealed partial class DaphneEngine : IAudioEngine
 
     public async Task ReconfigureAsync()
     {
+        if (_disposed) return;
         var t = _track; double pos = Position; bool play = IsPlaying;
         await _gate.WaitAsync();
-        try { DaphneNative.dc_stop(_p); _loaded = false; }
+        try { if (_disposed) return; DaphneNative.dc_stop(_p); _loaded = false; }
+        catch (ObjectDisposedException) when (_disposed) { return; }
         finally { _gate.Release(); }
         if (t != null) await LoadAsync(t, pos, play);
     }
@@ -363,7 +381,7 @@ public sealed partial class DaphneEngine : IAudioEngine
 
     void Apply()
     {
-        if (!_loaded || _track == null) return;
+        if (_disposed || !_loaded || _track == null) return;
         int r = DaphneNative.Apply(_p, SettingsFor(_track), out var err);
         if (r != DaphneNative.Ok) Log.Info("[daphne] settings: " + err);
     }
@@ -392,6 +410,7 @@ public sealed partial class DaphneEngine : IAudioEngine
 
     public void ApplyVolume()
     {
+        if (_disposed) return;
         Apply();
         ApplyHardwareVolume();
         if (_loaded) _signal = BuildSignal();
@@ -399,6 +418,7 @@ public sealed partial class DaphneEngine : IAudioEngine
 
     public void ApplyDsp()
     {
+        if (_disposed) return;
         Apply();
         if (_loaded) _signal = BuildSignal();
         Changed?.Invoke();
@@ -414,6 +434,7 @@ public sealed partial class DaphneEngine : IAudioEngine
     /// <summary>Hardware volume: the hardware mode, or the digital mode while DSD is sent directly (no digital volume on DSD).</summary>
     void ApplyHardwareVolume()
     {
+        if (_disposed) return;
         bool dsd = DsdDirect;
         bool hw = _s.OutputMode != "asio" && (_s.VolumeMode == "hardware" || (dsd && _s.VolumeMode == "digital"));
         if (!hw || _hwDeviceId == null) { if (!dsd) RestoreHardwareVolume(); return; }
@@ -437,8 +458,10 @@ public sealed partial class DaphneEngine : IAudioEngine
 
     public (double l, double r, long clips, long underruns) Meter()
     {
-        if (!_loaded) return (0, 0, 0, 0);
-        DaphneNative.dc_meter(_p, out double l, out double r);
+        if (_disposed || !_loaded) return (0, 0, 0, 0);
+        double l, r;
+        try { DaphneNative.dc_meter(_p, out l, out r); }
+        catch (ObjectDisposedException) when (_disposed) { return (0, 0, 0, 0); }
         long u = _report.ValueKind == JsonValueKind.Object ? _report.GetProperty("underruns").GetInt64() : 0;
         long c = _report.ValueKind == JsonValueKind.Object ? _report.GetProperty("clipped").GetInt64() : 0;
         return (l, r, c, u);
@@ -543,12 +566,17 @@ public sealed partial class DaphneEngine : IAudioEngine
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposeStarted, 1) != 0) return;
         _disposed = true;
+        _loaded = false;
+        _playing = false;
         try { DaphneNative.dc_stop(_p); } catch { }
         RestoreHardwareVolume();
         _hwDevice?.Dispose();
         _hwDevice = null;
-        try { _poll?.Join(500); } catch { }
-        if (_p != IntPtr.Zero) { DaphneNative.dc_destroy(_p); _p = IntPtr.Zero; }
+        // A timeout must never mean freeing a player still used by the poll/load threads.
+        // SafeHandle defers dc_destroy until active native calls return.
+        _p.Dispose();
+        if (_poll != Thread.CurrentThread) try { _poll?.Join(500); } catch { }
     }
 }
