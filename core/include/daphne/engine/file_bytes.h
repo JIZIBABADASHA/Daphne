@@ -13,6 +13,11 @@
 // The decoder waits only for bytes the loader has not reached yet: the first read of a file, the first read after a
 // move, or a decoder that caught up with a stalled disk. Every reader has its own window: the next track, opened
 // (and read ahead) while the current one plays, does not take the current one's.
+//
+// A file still being written (a song copied from another computer while it plays, MIKU's 遠端音樂庫): the writer puts
+// its whole size, as decimal text, in <file>.growing before it writes the file, and deletes it once the file is
+// complete (or deleted). While that file is there, size() is the whole size and reads wait for the bytes not written
+// yet instead of taking them as the end of the file.
 
 #include <cstddef>
 #include <cstdint>
