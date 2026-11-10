@@ -296,3 +296,53 @@ TEST_CASE("file bytes: a file over 1 GiB is read ahead in the same window", "[fi
     f.reset();
     std::filesystem::remove(p);
 }
+
+TEST_CASE("file bytes: a file still being written (<file>.growing) is waited for, not cut short", "[file_bytes]") {
+    Disk disk;
+    const auto p = test::temp_path("daphne_file_bytes_growing.bin");
+    auto g = p;
+    g += ".growing";
+    const size_t total = size_t{5} << 20;
+    std::vector<uint8_t> all(total);
+    for (size_t i = 0; i < total; ++i) all[i] = static_cast<uint8_t>((i * 2654435761u) >> 13);
+    std::ofstream(g) << total;
+    std::ofstream(p, std::ios::binary).write(reinterpret_cast<const char*>(all.data()), 300000);   // what came so far
+    auto f = FileBytes::open(p);
+    REQUIRE(f);
+    CHECK(f->size() == static_cast<int64_t>(total));
+    std::thread writer([&] {
+        std::ofstream out(p, std::ios::binary | std::ios::app);
+        for (size_t at = 300000; at < total; at += 65536) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(3));
+            out.write(reinterpret_cast<const char*>(all.data() + at), static_cast<std::streamsize>(std::min<size_t>(65536, total - at)));
+            out.flush();
+        }
+        out.close();
+        std::filesystem::remove(g);
+    });
+    const auto got = read_all(f, 100000);
+    writer.join();
+    CHECK(got.size() == total);
+    CHECK(got == all);
+    f.reset();
+    std::filesystem::remove(p);
+}
+
+TEST_CASE("file bytes: a file whose writing stopped short ends where it is once <file>.growing is gone", "[file_bytes]") {
+    Disk disk;
+    const auto p = test::temp_path("daphne_file_bytes_growing_cut.bin");
+    auto g = p;
+    g += ".growing";
+    std::ofstream(g) << (1 << 20);
+    write_bytes(p, 200000, 3);
+    auto f = FileBytes::open(p);
+    REQUIRE(f);
+    std::thread stop([&] { std::this_thread::sleep_for(std::chrono::milliseconds(200)); std::filesystem::remove(g); });
+    std::vector<uint8_t> buf(1 << 20);
+    const auto t0 = Clock::now();
+    CHECK(f->read(0, buf.data(), buf.size()) == 200000);
+    stop.join();
+    CHECK(ms_since(t0) < 3000);
+    f.reset();
+    std::filesystem::remove(p);
+}

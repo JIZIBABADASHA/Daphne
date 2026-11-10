@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <mutex>
 #include <new>
 #include <system_error>
@@ -64,6 +65,13 @@ public:
         return f_ != nullptr;
 #endif
     }
+    // the next read seeks again (a file still being written: stdio's end-of-file and buffer are not kept)
+    void forget() {
+#ifndef _WIN32
+        if (f_) std::clearerr(f_);
+#endif
+        pos_ = -1;
+    }
     // n bytes at off (fewer at the end of the file or on an error)
     size_t read_at(int64_t off, uint8_t* dst, size_t n) {
         if (off != pos_) {
@@ -120,6 +128,8 @@ struct FileBytes::State {
     bool failed = false;  // a disk read at hi failed (or found the file shorter): readers get what is there
     bool cancel = false;
     bool done = false;    // the loader stopped
+    std::filesystem::path growing;   // the file is still being written while <file>.growing exists (file_bytes.h)
+    bool retry_once = false;         // the writing just ended: a short read is tried once more before it is the end
 };
 
 namespace {
@@ -165,9 +175,24 @@ void load(const std::shared_ptr<FileBytes::State>& s, const std::shared_ptr<Read
             g_slow.file = s->name;
             g_slow_count.store(g_slow.count, std::memory_order_release);
         }
+        // a file still being written (file_bytes.h): the bytes not there yet are waited for, not taken as its end
+        bool wait_more = false, retry_once = false;
+        if (got < n && !s->growing.empty()) {
+            std::error_code ec;
+            if (std::filesystem::exists(s->growing, ec)) wait_more = true;
+            else retry_once = true;   // written: what is short now is read once more below, then is the end
+            f->forget();
+        }
         l.lock();
         if (s->gen != gen) continue;   // the window moved while the disk was read: not these bytes
         s->hi += got;
+        if (retry_once) { s->growing.clear(); s->retry_once = true; }
+        if (wait_more || (got < n && s->retry_once)) {
+            if (!wait_more) s->retry_once = false;
+            s->data.notify_all();
+            s->room.wait_for(l, std::chrono::milliseconds(wait_more ? 40 : 0));
+            continue;
+        }
         if (got < n) s->failed = true;   // a read error, or the file shrank
         s->data.notify_all();
     }
@@ -218,9 +243,18 @@ size_t FileBytes::read(int64_t off, void* dst, size_t n) {
     return static_cast<size_t>(pos - off);
 }
 
+static int64_t growing_size(const std::filesystem::path& path) {
+    std::filesystem::path g = path;
+    g += ".growing";
+    std::ifstream in(g);
+    long long n = 0;
+    return in && (in >> n) && n > 0 ? static_cast<int64_t>(n) : 0;
+}
+
 std::shared_ptr<FileBytes> FileBytes::open(const std::filesystem::path& path) {
     std::error_code ec;
-    const auto size = std::filesystem::file_size(path, ec);
+    const int64_t full = growing_size(path);   // a file still being written: its whole size (file_bytes.h)
+    const auto size = full > 0 ? static_cast<uintmax_t>(full) : std::filesystem::file_size(path, ec);
     if (ec || size == 0) return nullptr;
     auto f = std::make_shared<Reader>(path);
     if (!*f) return nullptr;
@@ -231,6 +265,7 @@ std::shared_ptr<FileBytes> FileBytes::open(const std::filesystem::path& path) {
     s->buf.reset(new (std::nothrow) uint8_t[static_cast<size_t>(s->cap)]);
     if (!s->buf) return nullptr;
     s->name = platform::path_to_utf8(path.filename());
+    if (full > 0) { s->growing = path; s->growing += ".growing"; }
     std::thread([s, f] { load(s, f); }).detach();
     return std::shared_ptr<FileBytes>(new FileBytes(s));
 }
