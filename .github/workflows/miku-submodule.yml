@@ -1,0 +1,85 @@
+# When main moves, ask MIKU to follow: point Extensions/<this repo> at the new commit and open (or update) a PR
+# on JIZIBABADASHA/MIKU-Player from the fork cychang-ykc/MIKU-Player. One PR per module: while it is open,
+# a newer push updates the same branch and PR instead of opening another.
+#
+# Needs the secret MIKU_PR_TOKEN: a classic personal access token of cychang-ykc with the public_repo scope
+# (push to the fork, open the PR on the upstream repository).
+# The same file is in Daphne and MoodWave; the module name comes from the repository name.
+name: MIKU submodule PR
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['.github/**']
+  workflow_dispatch:
+
+concurrency:
+  group: miku-submodule
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.MIKU_PR_TOKEN }}
+      MODULE: ${{ github.event.repository.name }}
+      UPSTREAM: JIZIBABADASHA/MIKU-Player
+      FORK: cychang-ykc/MIKU-Player
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: module
+
+      - name: Point MIKU at this commit
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then echo "::error::secret MIKU_PR_TOKEN is not set"; exit 1; fi
+          NEW=$(git -C module rev-parse HEAD)
+          SUB="Extensions/$MODULE"
+          BRANCH="auto/submodule-$(echo "$MODULE" | tr 'A-Z' 'a-z')"
+
+          # the fork's main brought level with MIKU's (fast-forward on GitHub), so the push below only sends one commit
+          gh api -X POST "repos/$FORK/merge-upstream" -f branch=main --jq .message
+          # MIKU's main without its files: only the tree is needed to change one submodule pointer
+          git init -q miku
+          cd miku
+          git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/$FORK.git"
+          git fetch -q --filter=blob:none --depth=1 fork main
+          BASE=$(git rev-parse fork/main)
+          UP=$(gh api "repos/$UPSTREAM/commits/main" --jq .sha)
+          if [ "$BASE" != "$UP" ]; then echo "::error::$FORK main (${BASE:0:7}) is not $UPSTREAM main (${UP:0:7})"; exit 1; fi
+          git update-ref refs/heads/bump "$BASE"
+          git symbolic-ref HEAD refs/heads/bump
+          git read-tree "$BASE"
+
+          OLD=$(git ls-tree fork/main "$SUB" | awk '{print $3}')
+          if [ -z "$OLD" ]; then echo "::error::$SUB is not a submodule in $UPSTREAM"; exit 1; fi
+          if git -C ../module merge-base --is-ancestor "$NEW" "$OLD" 2>/dev/null; then
+            echo "MIKU already has $MODULE ${NEW:0:7} (it points at ${OLD:0:7})"; exit 0
+          fi
+
+          # the commits MIKU gets, for the message and the PR
+          LOG=$(git -C ../module log --no-merges --format='- %h %s' "$OLD..$NEW" 2>/dev/null || true)
+          [ -n "$LOG" ] || LOG="- ${NEW:0:7} $(git -C ../module log -1 --format=%s "$NEW")"
+          TITLE="[UPDATE] $MODULE updated to ${NEW:0:7}"
+          BODY=$(printf '%s\n\n%s\n\nhttps://github.com/%s/%s/compare/%s...%s\n\n_Opened by the %s workflow when %s main moved._' \
+            "Points \`$SUB\` at ${NEW:0:7} (was ${OLD:0:7})." "$LOG" \
+            "$GITHUB_REPOSITORY_OWNER" "$MODULE" "${OLD:0:7}" "${NEW:0:7}" "$GITHUB_WORKFLOW" "$MODULE")
+
+          ME=$(gh api user --jq '"\(.id)+\(.login)@users.noreply.github.com \(.login)"')
+          git config user.email "${ME%% *}"
+          git config user.name "${ME#* }"
+          git update-index --cacheinfo "160000,$NEW,$SUB"
+          git commit -q -m "$TITLE" -m "$LOG"
+          git push -q -f fork "HEAD:refs/heads/$BRANCH"
+
+          HEAD_REF="${FORK%%/*}:$BRANCH"
+          PR=$(gh pr list -R "$UPSTREAM" --head "$BRANCH" --state open --json number,headRepositoryOwner \
+            --jq ".[] | select(.headRepositoryOwner.login == \"${FORK%%/*}\") | .number" | head -1)
+          if [ -n "$PR" ]; then
+            gh pr edit "$PR" -R "$UPSTREAM" --title "$TITLE" --body "$BODY"
+            echo "Updated PR #$PR"
+          else
+            gh pr create -R "$UPSTREAM" --base main --head "$HEAD_REF" --title "$TITLE" --body "$BODY"
+          fi
