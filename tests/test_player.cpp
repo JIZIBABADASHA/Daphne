@@ -1393,7 +1393,7 @@ TEST_CASE("Player: the dsd core falls back when the device has no DoP rate", "[p
         CHECK_FALSE(dop_open(r));
         CHECK(r.saw("is a virtual device"));
         CHECK(r.saw("output fallback: "));
-        CHECK(rep.device.rate == 705600);
+        CHECK(rep.device.rate == 88200);   // 2x at most, though the device lists more
         CHECK(no_dop(r.dev->take()));
     }
     SECTION("DSD128's carrier is missing, DSD64's is there: DSD64, told once") {

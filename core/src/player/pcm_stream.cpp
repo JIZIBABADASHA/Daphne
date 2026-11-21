@@ -24,11 +24,12 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
     std::vector<int> dop_bad;    // DoP rates tried here that did not work: remembered once something plays
     int locked_seen = remember ? output_memo::locked_instead(mkey, modulator_input_rate(src.rate)) : 0;   // a rate the device ran at instead of DoP
     int top = 0;
-    // dsd core, no DSD rate works on this device: PCM for this track as the pcm core would play it, upsampled to the
-    // highest rate the device offers in the source's family (the modulator's input rate at most); a device without
-    // the family gets the source rate, converted by the output where it can
+    // dsd core, no DSD rate works on this device: PCM for this track as the pcm core would play it, upsampled 2x at
+    // most (44.1 -> 88.2, 48 -> 96 kHz: a device without DSD gains little from more, and the filter's cost grows with the
+    // rate), capped by what the device offers in the source's family; a device without the family gets the source
+    // rate, converted by the output where it can
     auto add_pcm = [&] {
-        int hi = modulator_input_rate(src.rate);
+        int hi = std::min(modulator_input_rate(src.rate), 2 * src.rate);
         // the rate the device ran at instead of a DoP rate: what it takes (a device may list rates it does not take)
         if (locked_seen >= src.rate && locked_seen % src.rate == 0 && locked_seen < hi) hi = locked_seen;
         if (!dev.rates.empty()) {
