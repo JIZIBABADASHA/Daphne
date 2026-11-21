@@ -286,8 +286,8 @@ bool Player::Impl::open_and_start(int64_t from, std::string* error) {
         if (pcm_fallback) {
             note_dop_fallback(mkey, pcm_fallback);
         } else if (run_osr > 0 && run_osr < top && (dop_left_out || !dop_bad.empty())) {
-            const std::string what = "DSD" + std::to_string(top) + " -> DSD" + std::to_string(run_osr);
-            event(std::string(output_memo::first(mkey, what) ? "output fallback: " : "") + name + " does not play DSD" +
+            const std::string step = "DSD" + std::to_string(top) + " -> DSD" + std::to_string(run_osr);
+            event(std::string(output_memo::first(mkey, step) ? "output fallback: " : "") + name + " does not play DSD" +
                   std::to_string(top) + " (DoP): DSD" + std::to_string(run_osr) + " instead");
         }
     }
