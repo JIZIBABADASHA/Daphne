@@ -31,6 +31,7 @@ constexpr int64_t kBehind = int64_t{1} << 20;       // kept behind the reader (d
 constexpr int64_t kSlowMs = 500;
 
 std::atomic<int64_t> g_window{0};
+thread_local const std::atomic<bool>* t_cancel = nullptr;   // FileBytes::set_thread_cancel
 std::mutex g_hook_m;
 std::shared_ptr<const std::function<void(int64_t, size_t)>> g_hook;
 
@@ -214,6 +215,12 @@ FileBytes::~FileBytes() {
 
 int64_t FileBytes::size() const { return s_->size; }
 
+const std::atomic<bool>* FileBytes::set_thread_cancel(const std::atomic<bool>* flag) {
+    const std::atomic<bool>* old = t_cancel;
+    t_cancel = flag;
+    return old;
+}
+
 size_t FileBytes::read(int64_t off, void* dst, size_t n) {
     State& s = *s_;
     if (off < 0 || off >= s.size || n == 0) return 0;
@@ -231,7 +238,14 @@ size_t FileBytes::read(int64_t off, void* dst, size_t n) {
         }
         s.reader = pos;
         s.room.notify_one();
-        s.data.wait(l, [&] { return s.hi > pos || s.failed || s.done || s.lo > pos; });
+        const auto ready = [&] { return s.hi > pos || s.failed || s.done || s.lo > pos; };
+        if (!t_cancel) {
+            s.data.wait(l, ready);
+        } else {
+            // this thread's player may stop meanwhile: a copy or a disk that stalled must not hold that up
+            while (!ready() && !t_cancel->load(std::memory_order_relaxed)) s.data.wait_for(l, std::chrono::milliseconds(20));
+            if (!ready()) break;   // stopped: what there is
+        }
         if (s.lo > pos) continue;   // (not from another reader: one at a time)
         if (s.hi <= pos) break;     // a failed read or the loader stopped: what there is
         const int64_t take = std::min(end, s.hi) - pos;
