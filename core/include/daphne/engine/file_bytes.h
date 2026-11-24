@@ -19,6 +19,7 @@
 // complete (or deleted). While that file is there, size() is the whole size and reads wait for the bytes not written
 // yet instead of taking them as the end of the file.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -45,6 +46,11 @@ public:
     // first or a disk read failed (the decoders take a short read for the end of the file). 0 past the end. One
     // reader at a time (a decoder's).
     size_t read(int64_t off, void* dst, size_t n);
+
+    // The stop flag of the calling thread (the player's playback thread, the next track's opener). Once it is set, a
+    // read that waits for the loader returns what there is instead of waiting on: a file still being copied whose copy
+    // stalled (or a stalled disk) does not hold up a stop or a track change. nullptr: none. Returns the one it replaces.
+    static const std::atomic<bool>* set_thread_cancel(const std::atomic<bool>* flag);
 
     // Tests: the window of files opened from now on (0: kWindow), and a function called on the loader's thread before
     // each disk read (offset, bytes), to make the disk slow or stall it.
