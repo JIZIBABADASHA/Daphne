@@ -1,5 +1,5 @@
 /* Daphne for MIKU (extension module): Daphne's own settings, the filter design progress and its row in 關於.
-   升頻 (upsampler off / PCM 升頻 / 轉成 DSD; PCM target 原取樣率 / 2 倍 / 最高 / 固定; DSD rate and order), 濾波器
+   升頻 (upsampler off / PCM 升頻 / 轉成 DSD; PCM target 原取樣率 / 2 倍 / 最高; DSD rate and order), 濾波器
    (apodizing, then phase / length / double-double unless at the source rate). The core only checks ranges; the menus'
    limits are the page's. */
 (() => {
@@ -9,14 +9,105 @@
   // fields that depend on another: draw the page again
   const rerender = () => { try { Router.render(false, 'none'); } catch (e) { console.error('[daphne]', e); } };
 
+  /* This page in MIKU's interface language (I18N.lang, i18n.js), the way MIKU's own T works: keyed by the Traditional
+     Chinese text, a template's ${} values as {0} {1} …. Daphne carries its own words (简体中文, English, 日本語), so a
+     new wording here needs no change in MIKU. Text with no entry is shown as written. */
+  const WORDS = {
+    "線性": ["线性", "Linear", "リニア"],
+    "中間": ["中间", "Intermediate", "中間"],
+    "最小": ["最小", "Minimum", "ミニマム"],
+    "自訂": ["自定义", "Custom", "カスタム"],
+    "0（線性）": ["0（线性）", "0 (linear)", "0（リニア）"],
+    "1（最小）": ["1（最小）", "1 (minimum)", "1（ミニマム）"],
+    "{0} 秒": ["{0} 秒", "{0} s", "{0} 秒"],
+    "取樣率不變，只套用濾波器。": ["采样率不变，只应用滤波器。", "Keeps the sample rate; only the filter is applied.", "サンプルレートはそのままで、フィルターだけを適用します。"],
+    "曲目取樣率的 2 倍。": ["曲目采样率的 2 倍。", "Twice the track's sample rate.", "曲のサンプルレートの 2 倍です。"],
+    "盡量升高，最高到 705.6 / 768 kHz。": ["尽量升高，最高到 705.6 / 768 kHz。", "As high as possible, up to 705.6 / 768 kHz.", "できるだけ高く、最大 705.6 / 768 kHz まで上げます。"],
+    "沒有相位偏移，前後都有振鈴，延遲最長。": ["没有相位偏移，前后都有振铃，延迟最长。", "No phase shift; ringing before and after; the longest delay.", "位相のずれがなく、前後にリンギングがあります。遅延は最も長くなります。"],
+    "前振鈴很小，延遲較短。（預設）": ["前振铃很小，延迟较短。（默认）", "Very little pre-ringing, a shorter delay. (Default)", "Pre-ringing が小さく、遅延が短めです。（デフォルト）"],
+    "沒有前振鈴，延遲最短，高頻有相位偏移。": ["没有前振铃，延迟最短，高频有相位偏移。", "No pre-ringing, the shortest delay; high frequencies are phase-shifted.", "Pre-ringing がなく、遅延が最も短くなります。高域の位相がずれます。"],
+    "在線性（0）與最小（1）之間自訂": ["在线性（0）与最小（1）之间自定义", "Anywhere between linear (0) and minimum (1)", "リニア（0）とミニマム（1）の間で設定します"],
+    "目前曲目：{0}，不升頻": ["当前曲目：{0}，不升频", "Now playing: {0}, not upsampled", "再生中の曲：{0}、アップサンプリングなし"],
+    "維持曲目的取樣率": ["保持曲目的采样率", "Keeps the track's sample rate", "曲のサンプルレートを維持します"],
+    "例：44.1 kHz → {0}（{1} 倍）": ["例：44.1 kHz → {0}（{1} 倍）", "e.g. 44.1 kHz → {0} ({1}×)", "例：44.1 kHz → {0}（{1} 倍）"],
+    "目前曲目是 DSD，直接送到 DAC，不升頻": ["当前曲目是 DSD，直接送到 DAC，不升频", "Now playing DSD: sent to the DAC as is, not upsampled", "再生中の曲は DSD です。そのまま DAC に送り、アップサンプリングしません"],
+    "目前曲目：{0}，不升頻（上限不到 2 倍）": ["当前曲目：{0}，不升频（上限不到 2 倍）", "Now playing: {0}, not upsampled (the limit is under 2×)", "再生中の曲：{0}、アップサンプリングなし（上限が 2 倍未満）"],
+    "目前曲目：{0}，DAC 不支援 {1}，不升頻": ["当前曲目：{0}，DAC 不支持 {1}，不升频", "Now playing: {0}; the DAC doesn't support {1}, not upsampled", "再生中の曲：{0}、DAC が {1} に非対応のためアップサンプリングなし"],
+    "目前曲目：{0} → {1}（{2} 倍）": ["当前曲目：{0} → {1}（{2} 倍）", "Now playing: {0} → {1} ({2}×)", "再生中の曲：{0} → {1}（{2} 倍）"],
+    " · DAC 不支援 {0}，改用 {1}": [" · DAC 不支持 {0}，改用 {1}", " · the DAC doesn't support {0}, using {1}", " · DAC が {0} に非対応のため {1} を使用"],
+    "實際長度 {0} 點（{1} × {2} 倍）": ["实际长度 {0} 点（{1} × {2} 倍）", "Actual length {0} taps ({1} × {2})", "実際の長さ {0} タップ（{1} × {2} 倍）"],
+    "濾波器暫存": ["滤波器缓存", "Filter cache", "フィルターキャッシュ"],
+    "已停用（DAPHNE_FILTER_CACHE=off）": ["已停用（DAPHNE_FILTER_CACHE=off）", "Off (DAPHNE_FILTER_CACHE=off)", "無効（DAPHNE_FILTER_CACHE=off）"],
+    "超過時刪除最久沒用的濾波器，使用中的不會刪除。": ["超过时删除最久没用的滤波器，使用中的不会删除。", "Over the limit, the least recently used filters are deleted; filters in use are kept.", "上限を超えると、最も長く使われていないフィルターから削除します。使用中のものは削除しません。"],
+    "開啟資料夾": ["打开文件夹", "Open folder", "フォルダーを開く"],
+    "刪除暫存的濾波器，使用中的保留。": ["删除缓存的滤波器，使用中的保留。", "Deletes the cached filters; filters in use are kept.", "キャッシュしたフィルターを削除します。使用中のものは残します。"],
+    "已清除濾波器暫存": ["已清除滤波器缓存", "Filter cache cleared", "フィルターキャッシュを消去しました"],
+    "清除暫存": ["清除缓存", "Clear cache", "キャッシュを消去"],
+    "已用 {0} · {1} 個濾波器": ["已用 {0} · {1} 个滤波器", "{0} used · {1} filters", "使用量 {0} · フィルター {1} 個"],
+    "上限": ["上限", "Limit", "上限"],
+    "自動（核心數 − 2）": ["自动（核心数 − 2）", "Auto (cores − 2)", "自動（コア数 − 2）"],
+    "設計用執行緒": ["设计用线程", "Design threads", "設計用スレッド"],
+    "設計濾波器時用的 CPU 執行緒。設計時聲音斷續的話請調低。": ["设计滤波器时使用的 CPU 线程。设计时声音断续的话请调低。", "CPU threads used to design filters. Lower it if the sound stutters during a design.", "フィルターの設計に使う CPU スレッド数です。設計中に音が途切れる場合は下げてください。"],
+    "升頻": ["升频", "Upsampling", "アップサンプリング"],
+    "播放 YouTube Music 時不升頻。": ["播放 YouTube Music 时不升频。", "No upsampling while YouTube Music plays.", "YouTube Music の再生中はアップサンプリングしません。"],
+    "關閉": ["关闭", "Off", "オフ"],
+    "PCM 升頻": ["PCM 升频", "PCM upsampling", "PCM アップサンプリング"],
+    "轉成 DSD": ["转成 DSD", "Convert to DSD", "DSD に変換"],
+    "目標取樣率": ["目标采样率", "Target sample rate", "目標サンプルレート"],
+    "原取樣率": ["原采样率", "Original", "元のレート"],
+    "2 倍": ["2 倍", "2×", "2 倍"],
+    "最高": ["最高", "Highest", "最高"],
+    "DSD 倍率": ["DSD 倍率", "DSD rate", "DSD レート"],
+    "最高到上方的「DAC 最高 DSD 取樣倍率」（DSD{0}）。DAC 不支援時自動降低。": ["最高到上方的「DAC 最高 DSD 采样倍率」（DSD{0}）。DAC 不支持时自动降低。", "Up to \"DAC maximum DSD rate\" above (DSD{0}). Lowered automatically if the DAC doesn't support it.", "上の「DAC の最大 DSD レート」（DSD{0}）までです。DAC が対応していない場合は自動的に下げます。"],
+    "請選 DAC 實際支援的倍率，或在上方設定「DAC 最高 DSD 取樣倍率」。DAC 不支援時自動降低。": ["请选择 DAC 实际支持的倍率，或在上方设置「DAC 最高 DSD 采样倍率」。DAC 不支持时自动降低。", "Choose a rate your DAC really supports, or set \"DAC maximum DSD rate\" above. Lowered automatically if the DAC doesn't support it.", "DAC が実際に対応するレートを選ぶか、上の「DAC の最大 DSD レート」を設定してください。DAC が対応していない場合は自動的に下げます。"],
+    "階數": ["阶数", "Order", "次数"],
+    "超音波雜訊較低": ["超声波噪声较低", "Less ultrasonic noise", "超音波ノイズが少ない"],
+    "可聽頻段的雜訊最低（預設）": ["可听频段的噪声最低（默认）", "Least noise in the audible band (default)", "可聴帯域のノイズが最も少ない（デフォルト）"],
+    "5 階": ["5 阶", "5th order", "5 次"],
+    "8 階": ["8 阶", "8th order", "8 次"],
+    "濾波器": ["滤波器", "Filter", "フィルター"],
+    "播放 YouTube Music 時不使用。": ["播放 YouTube Music 时不使用。", "Not used while YouTube Music plays.", "YouTube Music の再生中は使用しません。"],
+    "目前不經過濾波器。": ["当前不经过滤波器。", "The signal doesn't go through the filter now.", "現在、信号はフィルターを通りません。"],
+    "去除錄音振鈴": ["去除录音振铃", "Apodizing", "Apodizing"],
+    "去除錄音時留下的高頻振鈴（Apodizing）。20 kHz 以上會被濾掉。": ["去除录音时留下的高频振铃（Apodizing）。20 kHz 以上会被滤掉。", "Removes the high-frequency ringing left by the recording. Above 20 kHz is filtered out.", "録音時に残った高域のリンギングを取り除きます。20 kHz 以上はカットされます。"],
+    "相位": ["相位", "Phase", "位相"],
+    "自訂相位": ["自定义相位", "Custom phase", "カスタム位相"],
+    "0 = 線性、0.5 = 中間、1 = 最小": ["0 = 线性、0.5 = 中间、1 = 最小", "0 = linear, 0.5 = intermediate, 1 = minimum", "0 = リニア、0.5 = 中間、1 = ミニマム"],
+    "{0} taps · 延遲 {1}": ["{0} taps · 延迟 {1}", "{0} taps · delay {1}", "{0} taps · 遅延 {1}"],
+    "長度": ["长度", "Length", "長さ"],
+    "越長，高頻越完整，延遲也越長。": ["越长，高频越完整，延迟也越长。", "Longer keeps more of the highs, with a longer delay.", "長いほど高域が忠実になり、遅延も長くなります。"],
+    "106bit 高精度運算": ["106bit 高精度运算", "106-bit high precision", "106bit 高精度演算"],
+    "CPU 用量約 1.2 ~ 2 倍。": ["CPU 用量约 1.2 ~ 2 倍。", "Uses about 1.2 ~ 2× the CPU.", "CPU 使用量が約 1.2 ~ 2 倍になります。"],
+    "DSD 轉 PCM 低通": ["DSD 转 PCM 低通", "DSD to PCM low-pass", "DSD → PCM ローパス"],
+    "濾掉 DSD 的超音波雜訊。頻率越高，保留的高頻越多，雜訊也越多。": ["滤掉 DSD 的超声波噪声。频率越高，保留的高频越多，噪声也越多。", "Filters out DSD's ultrasonic noise. A higher frequency keeps more of the highs, and more noise.", "DSD の超音波ノイズを取り除きます。周波数が高いほど高域が多く残り、ノイズも多くなります。"],
+    "24 kHz（預設）": ["24 kHz（默认）", "24 kHz (default)", "24 kHz（デフォルト）"],
+    "DSD 轉 PCM 限幅器": ["DSD 转 PCM 限幅器", "DSD to PCM limiter", "DSD → PCM リミッター"],
+    "轉換時音量提高 6 dB，和 PCM 一樣大聲。開啟後，過大的峰值會被壓回，不會破音。": ["转换时音量提高 6 dB，和 PCM 一样大声。开启后，过大的峰值会被压回，不会破音。", "Conversion raises the level by 6 dB, as loud as PCM. When on, peaks that are too high are brought back down instead of clipping.", "変換時に音量を 6 dB 上げ、PCM と同じ大きさにします。オンにすると、大きすぎるピークを抑え、音割れを防ぎます。"],
+    "正在設計濾波器": ["正在设计滤波器", "Designing the filter", "フィルターを設計中"],
+    "播放不會中斷，完成後自動切換。設計好的會存起來，下次不用再等。": ["播放不会中断，完成后自动切换。设计好的会保存，下次不用再等。", "Playback continues and switches over when it's done. The filter is saved, so next time there's no wait.", "再生は中断されず、完了すると自動的に切り替わります。設計したフィルターは保存されるので、次回は待ちません。"],
+    "完成": ["完成", "Done", "完了"],
+    "播放核心": ["播放核心", "Playback core", "再生コア"],
+    "版本不明": ["版本不明", "Unknown version", "バージョン不明"],
+  };
+  const LANG = ['zh-Hans', 'en', 'ja'].indexOf(typeof I18N !== 'undefined' ? I18N.lang : '');
+  const T = (s, ...v) => {
+    if (Array.isArray(s) && s.raw) {
+      let key = s[0];
+      for (let i = 1; i < s.length; i++) key += '{' + (i - 1) + '}' + s[i];
+      const w = LANG >= 0 && WORDS[key] ? WORDS[key][LANG] : key;
+      return w.replace(/\{(\d+)\}/g, (m, i) => i < v.length ? String(v[i]) : m);
+    }
+    return LANG >= 0 && WORDS[s] ? WORDS[s][LANG] : s;
+  };
+
   /** Menu entries for a value list, with the current value added when it is not one of them. */
   const withCurrent = (list, cur, label = String) => (list.includes(cur) ? list : [...list, cur].sort((x, y) => x - y)).map(v => [v, label(v)]);
   // the filter's taps, 1024 .. 2^17 (512 taps with apodizing stop only about 114 dB down at the Nyquist rate, 1024 about 210 dB)
   const TAPS = Array.from({ length: 8 }, (_, i) => 1024 << i);
-  const PHASES = [['linear', '線性'], ['intermediate', '中間'], ['minimum', '最小'], ['custom', '自訂']];
+  const PHASES = [['linear', T('線性')], ['intermediate', T('中間')], ['minimum', T('最小')], ['custom', T('自訂')]];
   const ALPHAS = Array.from({ length: 21 }, (_, i) => i * 5 / 100);
-  const alphaLabel = a => a === 0 ? '0（線性）' : a === 1 ? '1（最小）' : a.toFixed(2);
-  const msText = ms => ms >= 1000 ? (ms / 1000).toFixed(2) + ' 秒' : (ms >= 10 ? Math.round(ms) : ms.toFixed(1)) + ' ms';
+  const alphaLabel = a => a === 0 ? T('0（線性）') : a === 1 ? T('1（最小）') : a.toFixed(2);
+  const msText = ms => ms >= 1000 ? T`${(ms / 1000).toFixed(2)} 秒` : (ms >= 10 ? Math.round(ms) : ms.toFixed(1)) + ' ms';
 
   /** Draws the page again when a setting of MIKU's own (read by `key`) changes while the page is open. */
   function watch(host, key) {
@@ -32,22 +123,16 @@
   /** MIKU's segmented buttons (views.js seg) where available, else a menu. */
   const choice = (ui, opts, value, onchange) => typeof seg === 'function' ? seg(opts, value, onchange) : ui.select(opts, value, onchange);
 
-  const UPSAMPLER_TEXT = {
-    off: '維持原始取樣率播放；沒有任何處理時為 Bit-perfect（見訊號路徑）',
-    pcm: 'PCM 升頻，經過下方的濾波器',
-    dsd: '轉成 DSD 輸出（DoP / ASIO 原生 DSD），DSD 倍率在下方選擇',
-  };
   const TARGET_TEXT = {
-    native: '維持曲目的取樣率，只經過濾波器（例如去除錄音振鈴）',
-    '2x': '升到曲目取樣率的 2 倍',
-    max: '升到同一族中最高的取樣率（705.6 / 768 kHz 以下）',
+    native: T('取樣率不變，只套用濾波器。'),
+    '2x': T('曲目取樣率的 2 倍。'),
+    max: T('盡量升高，最高到 705.6 / 768 kHz。'),
   };
-  const FIXED_RATES = [88200, 96000, 176400, 192000, 352800, 384000, 705600, 768000];
   const PHASE_TEXT = {
-    linear: '前後振鈴對稱、沒有相位失真；延遲最長',
-    intermediate: '前振鈴很小、延遲較短（預設）',
-    minimum: '沒有前振鈴、延遲最短，高頻有相位偏移',
-    custom: '在線性（0）與最小（1）之間自訂',
+    linear: T('沒有相位偏移，前後都有振鈴，延遲最長。'),
+    intermediate: T('前振鈴很小，延遲較短。（預設）'),
+    minimum: T('沒有前振鈴，延遲最短，高頻有相位偏移。'),
+    custom: T('在線性（0）與最小（1）之間自訂'),
   };
   // filter delay (its peak) in ms for a 44.1 kHz track, measured from the filter designs: up = upsampling (any ratio),
   // x1 = apodizing at the source rate; n / a = apodizing off / on; alpha 0, .25, .5, .75, 1
@@ -73,17 +158,17 @@
   /** The 升頻 group's result line: the loaded track (Daphne.state.now), or a 44.1 kHz example. */
   function resultText(target, fixedRate) {
     const now = Daphne.state.now;
-    if (target === 'native') return now ? `目前曲目：${khz(now.source)}，維持原始取樣率` : '維持曲目的取樣率';
+    if (target === 'native') return now ? T`目前曲目：${khz(now.source)}，不升頻` : T('維持曲目的取樣率');
     if (!now) {
       const want = pcmRate(44100, target, fixedRate);
-      return `例：44.1 kHz 曲目 → ${khz(want)}（${want / 44100} 倍）· 播放時改為顯示目前曲目`;
+      return T`例：44.1 kHz → ${khz(want)}（${want / 44100} 倍）`;
     }
     const src = now.source, got = now.device, want = pcmRate(src, target, fixedRate);
-    if (now.dsd > 0 && got % src !== 0) return '目前曲目是 DSD，直接送到 DAC，不經過 PCM 升頻';
-    if (want === src) return `目前曲目：${khz(src)}，目標不到 2 倍，維持原始取樣率`;
-    if (got === src) return `目前曲目：${khz(src)} · DAC 不支援 ${khz(want)}，維持原始取樣率`;
-    let t = `目前曲目：${khz(src)} → ${khz(got)}（${got / src} 倍）`;
-    if (got < want) t += ` · DAC 不支援 ${khz(want)}，已退到 ${khz(got)}`;
+    if (now.dsd > 0 && got % src !== 0) return T('目前曲目是 DSD，直接送到 DAC，不升頻');
+    if (want === src) return T`目前曲目：${khz(src)}，不升頻（上限不到 2 倍）`;
+    if (got === src) return T`目前曲目：${khz(src)}，DAC 不支援 ${khz(want)}，不升頻`;
+    let t = T`目前曲目：${khz(src)} → ${khz(got)}（${got / src} 倍）`;
+    if (got < want) t += T` · DAC 不支援 ${khz(want)}，改用 ${khz(got)}`;
     return t;
   }
 
@@ -95,13 +180,12 @@
     const out = real ? now.device : pcmRate(44100, target, fixedRate);
     const ratio = out / src;
     const n = v => v.toLocaleString('en-US');
-    return `實際長度：${n(taps)} taps × ${ratio} 倍升頻 = ${n(taps * ratio)} 點` +
-           `（${real ? '目前曲目 ' : '例：'}${khz(src)} → ${khz(out)}）`;
+    return T`實際長度 ${n(taps * ratio)} 點（${n(taps)} × ${ratio} 倍）`;
   }
 
-  /** A titled group of fields in Daphne's own card. */
+  /** A group of fields in Daphne's own card, titled unless `title` is null (升頻: its one field says it). */
   function group(host, ui, title, note) {
-    const box = h('div', { class: 'dp-group' }, h('div', { class: 'dp-group-h' }, h('b', null, title), note ? h('small', null, note) : null));
+    const box = h('div', { class: 'dp-group' }, title ? h('div', { class: 'dp-group-h' }, h('b', null, title), note ? h('small', null, note) : null) : null);
     host.append(box);
     return {
       box,
@@ -114,24 +198,24 @@
   const cacheField = (field, ui) => {
     const c = Daphne.state.cache;
     if (!c) return;
-    if (!c.dir) { field('濾波器暫存', '已停用（DAPHNE_FILTER_CACHE=off）', h('span')); return; }
+    if (!c.dir) { field(T('濾波器暫存'), T('已停用（DAPHNE_FILTER_CACHE=off）'), h('span')); return; }
     const size = b => b >= 1 << 30 ? (b / (1 << 30)).toFixed(2) + ' GB' : b >= 1 << 20 ? (b / (1 << 20)).toFixed(1) + ' MB' : Math.round(b / 1024) + ' KB';
     const limit = [500, 1024, 2048].includes(o().cacheLimitMb) ? o().cacheLimitMb : 1024;
-    const limitTip = '濾波器暫存上限：超過時從最久沒用到的濾波器開始刪除，目前設定使用中的濾波器一律保留';
+    const limitTip = T('超過時刪除最久沒用的濾波器，使用中的不會刪除。');
     const limitSel = ui.select([[500, '500 MB'], [1024, '1 GB'], [2048, '2 GB']], limit, v => set({ cacheLimitMb: +v }).then(rerender));
     limitSel.title = limitTip;
-    const open = h('button', { class: 'dp-btn', title: c.dir, onclick: () => Daphne.api.rpc('openCache') }, '開啟資料夾');
-    const clear = h('button', { class: 'dp-btn', title: '清除濾波器暫存：只保留目前設定使用中的濾波器', onclick: async () => {
+    const open = h('button', { class: 'dp-btn', title: c.dir, onclick: () => Daphne.api.rpc('openCache') }, T('開啟資料夾'));
+    const clear = h('button', { class: 'dp-btn', title: T('刪除暫存的濾波器，使用中的保留。'), onclick: async () => {
       clear.disabled = true;
       Daphne.state = await Daphne.api.rpc('clearCache') || Daphne.state;
-      toast('已清除濾波器暫存（保留目前設定使用的濾波器）');
+      toast(T('已清除濾波器暫存'));
       rerender();
-    } }, '清除暫存');
+    } }, T('清除暫存'));
     // the size follows new filters (a design finishing, the limit pruning) while the page is open
-    const text = k => `目前 ${size((k && k.bytes) || 0)}・${(k && k.files) || 0} 個`;
+    const text = k => T`已用 ${size((k && k.bytes) || 0)} · ${(k && k.files) || 0} 個濾波器`;
     const status = h('span', null, text(c));
-    field('濾波器暫存', status,
-      h('div', { class: 'dp-cache-ctl' }, h('span', { class: 'dp-limit-t', title: limitTip }, '上限'), limitSel, open, clear));
+    field(T('濾波器暫存'), status,
+      h('div', { class: 'dp-cache-ctl' }, h('span', { class: 'dp-limit-t', title: limitTip }, T('上限')), limitSel, open, clear));
     const update = () => {
       if (!document.contains(status)) { clearInterval(timer); if (Daphne.cacheChanged === update) Daphne.cacheChanged = null; return; }
       Daphne.api.rpc('state').then(st => { if (st) { Daphne.state = st; status.textContent = text(st.cache); } }).catch(() => {});
@@ -141,8 +225,8 @@
   };
 
   const threadsField = (op, field, ui) => {
-    const threads = [[0, '自動（核心數 − 2）'], [1, '1'], [2, '2'], [4, '4'], [8, '8'], [16, '16']];
-    field('濾波器設計執行緒', '設計大型濾波器時佔用的 CPU 執行緒；播放時會影響聲音的話請調低', ui.select(threads, op.threads || 0, v => set({ threads: +v })));
+    const threads = [[0, T('自動（核心數 − 2）')], [1, '1'], [2, '2'], [4, '4'], [8, '8'], [16, '16']];
+    field(T('設計用執行緒'), T('設計濾波器時用的 CPU 執行緒。設計時聲音斷續的話請調低。'), ui.select(threads, op.threads || 0, v => set({ threads: +v })));
   };
 
   /** 升頻 (the upsampler and its target, or the DSD rate and order) → 濾波器 (PCM 升頻 and 轉成 DSD; apodizing first). */
@@ -157,14 +241,16 @@
       return;
     }
     const cur = ['pcm', 'dsd'].includes(op.upsampler) ? op.upsampler : 'off';
-    const target = ['native', '2x', 'max', 'fixed'].includes(op.target) ? op.target : 'native';
+    // 上限 (fixed) is no longer offered: a setting still on it becomes 最高, the closest, so the page and playback agree
+    if (op.target === 'fixed') { op.target = 'max'; set({ target: 'max' }).catch(() => {}); }
+    const target = ['native', '2x', 'max'].includes(op.target) ? op.target : 'native';
     const fixedRate = fixedOf(op);
     let lenLine = null;   // the filter group's length line, refreshed with the 升頻 result line
 
     // YouTube Music plays through Daphne without upsampling (SettingsMap.Upsampler): the group is shown greyed out, and
     // the page is drawn again when the track changes between it and a file
     const live = !!Daphne.state.live;
-    const g = group(host, ui, '升頻', live ? '使用 Daphne 播放 YT Music 時禁用升頻' : null);
+    const g = group(host, ui, null);
     if (live) g.box.classList.add('dp-off');
     const liveTimer = setInterval(() => {
       if (!document.contains(g.box)) { clearInterval(liveTimer); return; }
@@ -174,14 +260,12 @@
         if (!!s.live !== live) { clearInterval(liveTimer); rerender(); }
       }).catch(() => {});
     }, 2000);
-    g.field('升頻器', UPSAMPLER_TEXT[cur],
-      choice(ui, [['off', '關閉'], ['pcm', 'PCM 升頻'], ['dsd', '轉成 DSD']], cur, v => set({ upsampler: v }).then(rerender)));
+    // no group title and no description: the field is 升頻 itself (YouTube Music: why it is greyed out)
+    g.field(T('升頻'), live ? T('播放 YouTube Music 時不升頻。') : null,
+      choice(ui, [['off', T('關閉')], ['pcm', T('PCM 升頻')], ['dsd', T('轉成 DSD')]], cur, v => set({ upsampler: v }).then(rerender)));
     if (cur === 'pcm') {
-      g.field('目標取樣率', target === 'fixed' ? '升到不超過這個取樣率的最高 2 的冪倍率' : TARGET_TEXT[target],
-        choice(ui, [['native', '原取樣率'], ['2x', '2 倍'], ['max', '最高'], ['fixed', '固定']], target, v => set({ target: v }).then(rerender)));
-      if (target === 'fixed')
-        g.field('固定取樣率', 'DAC 不支援時自動往下退',
-          ui.select(withCurrent(FIXED_RATES, fixedRate, khz), fixedRate, v => set({ fixedRate: +v }).then(rerender)));
+      g.field(T('目標取樣率'), TARGET_TEXT[target],
+        choice(ui, [['native', T('原取樣率')], ['2x', T('2 倍')], ['max', T('最高')]], target, v => set({ target: v }).then(rerender)));
       const line = h('div', { class: 'dp-result num' }, resultText(target, fixedRate));
       g.add(line);
       // the loaded track can change while the page is open
@@ -197,12 +281,11 @@
       // MIKU's DAC 最高 DSD (DSD section) caps the rate: only the multiples up to it are offered
       const lim = [64, 128, 256, 512].includes(App.settings.maxDsd) ? App.settings.maxDsd : 0;
       const osr = Math.min(op.osr || 128, lim || 1024), order = op.order === 5 ? 5 : 8;
-      g.field('DSD 取樣率', lim ? `最高到 DSD 區設定的「DAC 最高 DSD」（DSD${lim}）；DAC 拒絕時自動往下退`
-        : '請依 DAC 實際支援的格式選擇（驅動程式宣稱的上限不一定可靠，可在 DSD 區設定「DAC 最高 DSD」）；DAC 拒絕時自動往下退',
+      g.field(T('DSD 倍率'), lim ? T`最高到上方的「DAC 最高 DSD 取樣倍率」（DSD${lim}）。DAC 不支援時自動降低。`
+        : T('請選 DAC 實際支援的倍率，或在上方設定「DAC 最高 DSD 取樣倍率」。DAC 不支援時自動降低。'),
         ui.select([64, 128, 256, 512, 1024].filter(v => !lim || v <= lim).map(v => [v, 'DSD' + v]), osr, v => set({ osr: +v }).then(rerender)));
-      g.field('階數', order === 5 ? '超音波雜訊最低' : '可聽頻段最安靜（預設）',
-        choice(ui, [[5, '5 階'], [8, '8 階']], order, v => set({ order: +v }).then(rerender)));
-      g.add(h('div', { class: 'dp-result num' }, `PCM 先以下方的濾波器升到 705.6 / 768 kHz，再轉成 DSD${osr}`));
+      g.field(T('階數'), order === 5 ? T('超音波雜訊較低') : T('可聽頻段的雜訊最低（預設）'),
+        choice(ui, [[5, T('5 階')], [8, T('8 階')]], order, v => set({ order: +v }).then(rerender)));
     }
 
     if (cur === 'pcm' || cur === 'dsd') {
@@ -210,28 +293,26 @@
       const native = cur === 'pcm' && target === 'native';
       const lenTarget = cur === 'dsd' ? 'max' : target;   // the pre-filter goes to 705.6 / 768 kHz
       const apod = !!op.apodize;
-      const f = group(host, ui, '濾波器', live ? '使用 Daphne 播放 YT Music 時禁用升頻，濾波器不使用'
-                                         : native && !apod ? '原取樣率且沒有去除錄音振鈴：訊號不經過濾波器'
-                                         : cur === 'dsd' ? '轉成 DSD 前，升頻到 705.6 / 768 kHz 用的濾波器' : null);
+      const f = group(host, ui, T('濾波器'), live ? T('播放 YouTube Music 時不使用。')
+                                         : native && !apod ? T('目前不經過濾波器。')
+                                         : null);
       if (live) f.box.classList.add('dp-off');   // greyed out like 升頻; the filter cache row stays usable (dp-keep)
-      f.field('去除錄音振鈴（Apodizing）', native
-          ? '在原始取樣率套用：20 kHz 開始柔和衰減，去掉錄音時留下的高頻振鈴；20–22 kHz 會被濾掉'
-          : '通帶改到 20 kHz、Nyquist 完全衰減，去掉錄音時留下的高頻振鈴；20–22 kHz 會被濾掉',
+      f.field(T('去除錄音振鈴'), T('去除錄音時留下的高頻振鈴（Apodizing）。20 kHz 以上會被濾掉。'),
         ui.sw(apod, v => set({ apodize: v }).then(rerender)));
       if (!native) {
         const src = (Daphne.state.now && Daphne.state.now.source) || 44100;
         const phase = PHASES.some(p => p[0] === op.phase) ? op.phase : 'intermediate';
         const alpha = phase === 'linear' ? 0 : phase === 'minimum' ? 1 : phase === 'custom' ? (op.phaseCustom == null ? 0.5 : op.phaseCustom) : 0.5;
-        f.field('相位', PHASE_TEXT[phase], choice(ui, PHASES, phase, v => set({ phase: v }).then(rerender)));
+        f.field(T('相位'), PHASE_TEXT[phase], choice(ui, PHASES, phase, v => set({ phase: v }).then(rerender)));
         if (phase === 'custom')
-          f.field('α', '0 = 線性、0.5 = 中間、1 = 最小', ui.select(withCurrent(ALPHAS, alpha, alphaLabel), alpha, v => set({ phaseCustom: +v }).then(rerender)));
+          f.field(T('自訂相位'), T('0 = 線性、0.5 = 中間、1 = 最小'), ui.select(withCurrent(ALPHAS, alpha, alphaLabel), alpha, v => set({ phaseCustom: +v }).then(rerender)));
         const taps = op.taps || 2048;
-        const label = t => { const d = delayMs(t, alpha, apod, false, src); return t.toLocaleString('en-US') + ' taps' + (d == null ? '' : ' · 延遲 ' + msText(d)); };
-        f.field('長度', `越長頻寬越接近 Nyquist（去除錄音振鈴時為 20 kHz），延遲也越長；延遲以${Daphne.state.now ? '目前曲目' : ' 44.1 kHz 曲目'}計算`,
+        const label = t => { const d = delayMs(t, alpha, apod, false, src); const n = t.toLocaleString('en-US'); return d == null ? n + ' taps' : T`${n} taps · 延遲 ${msText(d)}`; };
+        f.field(T('長度'), T('越長，高頻越完整，延遲也越長。'),
           ui.select(withCurrent(TAPS, taps, label), taps, v => set({ taps: +v }).then(rerender)));
         lenLine = h('div', { class: 'dp-result num' }, lengthText(taps, lenTarget, fixedRate, cur === 'dsd'));
         f.add(lenLine);
-        f.field('雙倍精度摺積', '以 double-double（約 106 bit）計算摺積；量測上沒有可聽差異，CPU 約 1.2–2 倍',
+        f.field(T('106bit 高精度運算'), T('CPU 用量約 1.2 ~ 2 倍。'),
           ui.sw(!!op.doubleDouble, v => set({ doubleDouble: v })));
         threadsField(op, f.field, ui);
       }
@@ -245,9 +326,9 @@
   function dsdSettings(host, ui) {
     const op = o(), st = App.settings;
     if (st.outputMode === 'shared' || st.dsdMode === 'pcm') {
-      host.append(ui.field('DSD 轉 PCM 低通', '濾掉 DSD 的超音波噪聲；頻率越高保留越多高頻，也留下越多超音波噪聲',
-        ui.select([[24, '24 kHz（預設）'], [30, '30 kHz'], [50, '50 kHz']], op.dsdPcmLowpass || 24, v => set({ dsdPcmLowpass: +v }))));
-      host.append(ui.field('DSD 轉 PCM 限幅器', 'DSD 轉 PCM 固定 +6 dB（SACD 0 dB = 0 dBFS，與 PCM 同音量）；超過滿刻度的峰值由限幅器壓回，而不是削波',
+      host.append(ui.field(T('DSD 轉 PCM 低通'), T('濾掉 DSD 的超音波雜訊。頻率越高，保留的高頻越多，雜訊也越多。'),
+        ui.select([[24, T('24 kHz（預設）')], [30, '30 kHz'], [50, '50 kHz']], op.dsdPcmLowpass || 24, v => set({ dsdPcmLowpass: +v }))));
+      host.append(ui.field(T('DSD 轉 PCM 限幅器'), T('轉換時音量提高 6 dB，和 PCM 一樣大聲。開啟後，過大的峰值會被壓回，不會破音。'),
         ui.sw(op.dsdPcmLimiter !== false, v => set({ dsdPcmLimiter: v }))));
     }
     // DSD 播放方式 / 輸出模式 are on the same page
@@ -291,16 +372,16 @@
       if (!this.el) {
         this.el = h('div', { class: 'dp-design' },
           // the title starts with the wordmark (petal + DAPHNE), as in the signal path card
-          h('div', { class: 'dp-design-t' }, h('b', { class: 'dp-design-h' }, mark(), '正在設計濾波器'), h('span', { class: 'dp-design-pct' }, '')),
+          h('div', { class: 'dp-design-t' }, h('b', { class: 'dp-design-h' }, mark(), T('正在設計濾波器')), h('span', { class: 'dp-design-pct' }, '')),
           h('div', { class: 'dp-design-f' }, ''),
           h('div', { class: 'dp-design-bar' }, h('i', null)),
-          h('small', null, '播放不中斷，設計完成後會交叉淡入；結果會快取，下次切換就不用再等'));
+          h('small', null, T('播放不會中斷，完成後自動切換。設計好的會存起來，下次不用再等。')));
         document.body.append(this.el);
       }
       clearTimeout(this.hideTimer);
       const pct = Math.max(0, Math.min(100, Math.round((d.progress || 0) * 100)));
       this.el.querySelector('.dp-design-f').textContent = d.text || '';
-      this.el.querySelector('.dp-design-pct').textContent = d.done ? '完成' : pct + '%';
+      this.el.querySelector('.dp-design-pct').textContent = d.done ? T('完成') : pct + '%';
       this.el.querySelector('.dp-design-bar i').style.width = (d.done ? 100 : pct) + '%';
       this.el.classList.add('on');
       if (d.done) {
@@ -356,8 +437,8 @@
             h('small', { class: 'dp-meta' },
               h('span', { class: 'dp-latin' }, h('span', { class: 'dp-petal-svg', html: PETAL }), 'DAPHNE'),
               h('span', { class: 'dp-sep' }),
-              h('span', null, '播放核心'),
-              Daphne.state.commit ? h('code', { class: 'dp-commit' }, Daphne.state.commit) : h('span', null, '版本不明'))));
+              h('span', null, T('播放核心')),
+              Daphne.state.commit ? h('code', { class: 'dp-commit' }, Daphne.state.commit) : h('span', null, T('版本不明')))));
         host.append(h('div', { class: 'field dp-about' }, h('div', { class: 'dp-row' }, brand)));
       });
     },
