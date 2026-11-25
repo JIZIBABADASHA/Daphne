@@ -18,9 +18,6 @@
 //   state                                  -> state (dc_state's object), kept (a device is kept, nothing loaded)
 //   meter                                  -> l, r
 //   devices                                -> devices (dc_devices' object)
-//   volume   scalar | db, muted            -> volume ({"scalar","db","min_db","max_db","muted","can_mute"}), macOS: the
-//                                             hardware volume of the device held in exclusive mode, set first where
-//                                             given; null when none is held or it has no volume
 //   cache_dir                              -> dir      cache_prune  settings, limit_mb -> bytes
 //   quit                                   stops playback and exits (also on end of input)
 //
@@ -45,9 +42,6 @@
 #include <nlohmann/json.hpp>
 
 #include "daphne_core.h"
-#ifdef __APPLE__
-#include "device_volume_mac.h"
-#endif
 
 using json = nlohmann::json;
 
@@ -191,18 +185,6 @@ private:
         } else if (cmd == "devices") {
             json r = reply(req, true);
             r["devices"] = fetch([](char* b, int n) { return dc_devices(b, n); });
-            emit(r);
-        } else if (cmd == "volume") {
-            json r = reply(req, true);
-            r["volume"] = nullptr;
-#ifdef __APPLE__
-            const bool has_scalar = req.contains("scalar") && req["scalar"].is_number(), has_db = req.contains("db") && req["db"].is_number();
-            const double scalar = num(req, "scalar", 0), db = num(req, "db", 0);
-            const bool mute = flag(req, "muted", false);
-            const auto v = daphne::mac::device_volume(has_scalar ? &scalar : nullptr, has_db ? &db : nullptr,
-                                                      req.contains("muted") && req["muted"].is_boolean() ? &mute : nullptr);
-            if (v.ok) r["volume"] = {{"scalar", v.scalar}, {"db", v.db}, {"min_db", v.min_db}, {"max_db", v.max_db}, {"muted", v.muted}, {"can_mute", v.can_mute}};
-#endif
             emit(r);
         } else if (cmd == "cache_dir") {
             char b[4096];
