@@ -397,6 +397,14 @@ class DaphneEngine extends EventEmitter {
     };
   }
 
+  /** The hardware volume of the device held in exclusive mode, set first when `change` ({ scalar | db, muted }) says so:
+   *  macOS refuses everyone else (the Sound menu, the volume keys, MIKU). null: none held, or it has no volume. */
+  async deviceVolume(change = {}) {
+    if (!this.client || !this.client.running || !this.holdsDevice) return null;
+    const r = await this.client.request('volume', change, 2000);
+    return (r && r.ok && r.volume) || null;
+  }
+
   // ───────────── signal path ─────────────
   buildSignal() { return buildSignal(this.host, this.s, this.opts, this.track, this.report); }
   nowPlaying() { return this.loaded ? nowPlaying(this.report) : null; }
